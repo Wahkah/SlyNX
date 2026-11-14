@@ -1,0 +1,28 @@
+# Release audit allow-list: findings that were reviewed and are fine to publish.
+# See docs/release-audit.md ("False positives"). Every entry needs a reason; an entry that matches nothing is
+# reported so the list does not rot.
+#
+# [[allow]]
+# check  = "literals"                    # data | similarity | literals | notices | licenses | extra
+# path   = "crates/formats/src/world.rs" # glob on the repo-relative path of the finding
+# match  = "1129332290"                  # optional glob on the finding's key: the reason (data), the reference
+#                                        # file (similarity), the literal value (literals), the crate (notices)
+# reason = "File-format magic number, documented in specs/formats/world.md (a fact, not code)."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/platform-switch/c/shaders/slynx_color_vsh.glsl"
+match  = "*/Sly1-Release/screen.vert"
+reason = "Trivial pass-through vertex shader (vec2 position to gl_Position, one varying copied). GLSL allows essentially one way to write it; the shared region is the layout declarations and gl_Position = vec4(inPos, 0.0, 1.0), the same as the deko3d examples. Inputs and outputs differ (colour here, texture coordinates there). Reviewed 2026-11-13."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/platform-switch/c/slynx_shim.c"
+match  = "SafeHouse/platform/switch/*/backend.cpp"
+reason = "2% overlap, all deko3d API sequences fixed by the library: dkMemBlockMakerDefaults with DK_MEMBLOCK_ALIGNMENT rounding, the framebuffer image-layout/memblock/dkImageInitialize/dkSwapchainMakerDefaults setup as in the public deko3d examples, dkDeviceMakerDefaults and dkQueueAcquireImage. Flags, structure and naming differ. Reviewed 2026-11-13."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/platform-switch/c/slynx_shim.c"
+match  = "SafeHouse/platform/switch/deko/gl_deko.cpp"
+reason = "3% overlap, all deko3d API sequences fixed by the library: a memblock helper rounding to DK_MEMBLOCK_ALIGNMENT and the swapchain framebuffer setup (image layout, one Image memblock, dkImageInitialize per image) as in the public deko3d examples. Flags, error handling and naming differ. Reviewed 2026-11-13."

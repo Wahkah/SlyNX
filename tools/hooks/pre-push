@@ -1,0 +1,26 @@
+#!/bin/sh
+# git pre-push hook: runs the release audit and refuses the push if it fails.
+# Install (once per clone), from the repository root:
+#     cp tools/hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# See docs/release-audit.md.
+#
+# The audit checks the working tree (tracked + untracked, not ignored) and every file in the git history.
+# Extra arguments for the audit can be given in SLYNX_AUDIT_ARGS (for example "--strict").
+
+repo=$(git rev-parse --show-toplevel) || exit 1
+
+for py in python3 python py; do
+    if command -v "$py" >/dev/null 2>&1 &&
+        "$py" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+        # shellcheck disable=SC2086
+        "$py" "$repo/tools/audit/audit.py" --repo "$repo" $SLYNX_AUDIT_ARGS
+        status=$?
+        if [ "$status" -ne 0 ]; then
+            echo "pre-push: release audit failed (exit $status); nothing was pushed." >&2
+        fi
+        exit "$status"
+    fi
+done
+
+echo "pre-push: Python 3.11 or newer is needed to run the release audit; nothing was pushed." >&2
+exit 1

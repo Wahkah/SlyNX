@@ -1,0 +1,13 @@
+[package]
+name = "platform-switch"
+description = "Nintendo Switch platform layer: libnx/deko3d shim bindings, allocator, panic handler"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "platform_switch"
+path = "src/lib.rs"

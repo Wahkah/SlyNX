@@ -1,0 +1,4 @@
+# The Switch target (aarch64-nintendo-switch-freestanding) is tier 3: nightly with -Z build-std.
+[toolchain]
+channel = "nightly"
+components = ["rust-src", "rustfmt", "clippy"]

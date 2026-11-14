@@ -1,0 +1,18 @@
+[package]
+name = "hello-switch"
+description = "Switch smoke test: deko3d clear, an animated triangle and the SlyNX name"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hello_switch"
+path = "src/lib.rs"
+# staticlib: linked by tools/build-switch.sh into the .nro. rlib: lets `cargo test` run the scene tests on a PC.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+platform-switch = { path = "../platform-switch" }

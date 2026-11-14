@@ -1,0 +1,40 @@
+# cargo-deny configuration: `cargo deny check licenses` (run by tools/audit/audit.py).
+#
+# The license allow-list below is the single source of truth for which crate licenses SlyNX accepts. It was approved
+# by legal review on 2026-11-13; the policy behind it is in docs/legal/LICENSING.md. Adding a license, or a
+# per-crate exception, needs the same review and a comment here saying why.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+# Below this confidence a detected license text is treated as unknown (and so denied).
+confidence-threshold = 0.93
+# Our own unpublished workspace crates (publish = false) are not third-party dependencies.
+private = { ignore = true }
+# Per-crate exceptions, each with a comment saying who approved it and why:
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
