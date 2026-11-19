@@ -69,19 +69,66 @@ Specs live in `specs/`, one Markdown file per topic (for example `specs/sly1/for
 - Pseudo-code that follows a reference function line by line, or that reproduces its control flow, its local
   variables, or its order of operations where that order is a choice of the original author rather than a fact of
   the behaviour.
-- The reference's internal architecture as a blueprint: class hierarchies, module layout, function lists and call
+- The reference's (or the game's) internal architecture as a blueprint: class hierarchies, module layout, function lists and call
   graphs, in-memory struct layouts of the engine (as opposed to on-disc formats). Describe what the game does, not how
   the reference code is organised. Exception: an in-memory layout that the game's data or save files depend on, which
   is then a data format.
-- Bulk symbol names from a decompilation's symbol map or class tree. A handful of names to identify concepts is fine;
-  copying the naming scheme wholesale is not.
-- Large tables copied out of the game's executable. If the port needs a table that only exists in the executable,
-  the spec describes where it is and how to read it, and the packager extracts it from the player's own disc at
-  build time.
+- Names taken from a reference project or a decompilation's symbols (class, function, field or type names), whether
+  as headings, aliases or cross-reference columns. Identify things by the game's own identifiers (numeric IDs, file
+  names, strings stored in the data) and give them descriptive names of our own. Layout, format and section names in
+  specs are ours too. A reference-side writer who needs a mapping to the reference's names keeps it outside the
+  repository.
+- The engine's class hierarchy (which class derives from which). Say which on-disc layout a class uses, and describe
+  shared behaviour where it is observed.
+- Large tables copied out of the game's executable. If the port needs a table that exists as data in the
+  executable, the spec describes where it is and how to read it, and the port reads it from the player's own disc
+  (see "Tables stored in the executable" below).
 - Links that would lead the implementation side into reference code ("see `foo.cpp` in ProjectCane").
 
 Test for borderline cases: could someone who has never seen the reference produce this sentence by watching the game
 and examining its data? If yes, it is a fact. If it only makes sense as a description of someone's code, leave it out.
+
+**Tables that only exist in the game's code.** Some tables (for example the value size of each option ID) are built
+by the game's code and cannot be read from any data file. The individual entries are facts the data format depends
+on. Copying the whole table from a reference is not allowed, though. A spec may hold such a table under these
+conditions:
+
+1. **Only what the data needs.** List only the entries that occur in the game's data on the supported discs. Entries
+   that occur nowhere in the data are left out, and the loader treats them as corrupt input.
+2. **Every entry confirmed by the game itself**, independently of the reference: for example, by a walk of every
+   file that would fail if the entry were wrong. A reference may supply a first guess, recorded in `sources:`, but an
+   entry that cannot be confirmed this way stays out.
+3. **Our own presentation.** The layout of the table (codes, grid, order, notes) is ours, not the reference's.
+4. **Say what is confirmed and what is not.** Where the game confirms only part of an entry (say, its size but not
+   whether 4 bytes are a float or an integer), the spec says the rest is a working assumption to be settled by the
+   spec that uses it.
+
+**Tables stored in the executable.** When a table exists as data in the game's executable (for example an
+animation lookup list, a per-class option map, friction tables, the movie list), the spec does not copy it. It
+describes it by location, and the port reads it from the player's own disc, when packing or at run time. This is
+the preferred way to handle any table the game stores, and it is allowed under these conditions:
+
+1. **Tied to a known executable.** The spec names the executable (file name and SHA-256) the address belongs to,
+   and gives the virtual address and the file offset, the record layout, the record count, and how to resolve any
+   pointers in the records. The port checks the executable's hash (or an equivalent signature) before reading, and
+   refuses or reports an unsupported disc on a mismatch; it never guesses an address. Addresses for other regions or
+   versions are separate spec entries, each with its own hash.
+2. **Check values, not contents.** The spec may give a few entries (the first one or two records, a count, a
+   checksum of the table) so the reader can be tested. It does not reproduce the table.
+3. **Read as data only.** The port uses these tables as data: it reads records and follows pointers to other data.
+   It never loads, translates or runs the game's code. (Running or recompiling the game's code would be a different
+   kind of project and needs its own legal review.)
+4. **Stays on the player's machine.** A table read this way is game data: it may be in the player's own build, but
+   never in the repository, test fixtures, CI artifacts, logs or published builds (see
+   [DISTRIBUTION.md](DISTRIBUTION.md)). Tests that need it read the disc from a path given at run time.
+5. **Sources recorded** as usual: how the location was found (reference side) and how it was confirmed against the
+   disc (for example, every lookup result matches an object that exists in the worlds).
+
+An address, a record layout and a count are facts about the executable; they carry no expression from the game or
+from a reference. Reading the table from the player's disc means none of the game's data is copied into SlyNX.
+
+**Minimum necessary.** In general, a spec carries only what the port needs and what the game confirms. Material
+whose only source is a reference project, and that the port does not need, stays out even if it is a fact.
 
 ## 3. How sources are recorded
 
@@ -122,6 +169,7 @@ date: 2026-11-13
 - No code, no line-by-line pseudo-code, no copied comments or identifiers in bulk (section 2).
 - Every fact has a source line; reference-project facts are confirmed against the game where possible.
 - Test vectors are small and do not reproduce game assets.
+- No names from the references; tables built by the game's code meet the four conditions in section 2.
 
 **Code review (every change):**
 
@@ -166,6 +214,12 @@ code in it, or an implementer who read reference code for the subsystem they imp
 
 - The reference projects are pinned: record the commit you read. If a reference later adds a license, that does not
   change our process, but the legal review may re-evaluate what can be reused.
+- Public standards (MPEG-2, ISO 9660, PNG, SHA-256 and so on) are implemented from the standard documents. The
+  tables a standard defines (code tables, quantiser matrices, constants) may be used as the standard gives them.
+  Other projects' implementations of the same standard (FFmpeg, libmpeg2, PCSX2's IPU, the codecs inside the
+  reference projects) are not read by whoever writes ours: their code carries its own license (often GPL or LGPL),
+  and the similarity audit compares against them. Running such a tool as a test oracle (to produce reference output
+  to compare with) is fine; reading its source is not.
 - Emulator use: running the game in an emulator to observe it is fine for both sides. Reading the emulator's source
   is reference side (most are GPL), but is rarely needed.
 - Specs are part of the public repository, so they must be publishable: no game data beyond the small test vectors

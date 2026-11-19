@@ -1,0 +1,14 @@
+[package]
+name = "stage"
+description = "Sly 2 and Sly 3 worlds turned into renderer resources (materials, lighting, merged static geometry), shared by the viewer and the game"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+formats-sly3 = { path = "../formats-sly3", default-features = false }
+render = { path = "../render" }

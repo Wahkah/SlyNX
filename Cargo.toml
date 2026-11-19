@@ -1,6 +1,27 @@
 [workspace]
 resolver = "3"
-members = ["crates/platform-switch", "crates/hello-switch"]
+members = [
+    "crates/platform-api",
+    "crates/platform-switch",
+    "crates/hello-switch",
+    "crates/formats",
+    "crates/render",
+    "crates/platform-pc",
+    "crates/harness",
+    "crates/viewer",
+    "crates/audio",
+    "crates/engine",
+    "crates/script",
+    "crates/video",
+    "crates/video-bench",
+    "crates/ui",
+    "crates/packager",
+    "crates/save",
+    "crates/game",
+    "crates/formats-sly2",
+    "crates/formats-sly3",
+    "crates/stage",
+]
 
 [workspace.package]
 edition = "2024"

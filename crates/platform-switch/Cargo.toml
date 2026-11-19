@@ -1,6 +1,6 @@
 [package]
 name = "platform-switch"
-description = "Nintendo Switch platform layer: libnx/deko3d shim bindings, allocator, panic handler"
+description = "Nintendo Switch platform backend: libnx/deko3d shim bindings, allocator, panic handler, input, audio, files, threads"
 edition.workspace = true
 version.workspace = true
 authors.workspace = true
@@ -11,3 +11,6 @@ publish.workspace = true
 [lib]
 name = "platform_switch"
 path = "src/lib.rs"
+
+[dependencies]
+platform-api = { path = "../platform-api" }

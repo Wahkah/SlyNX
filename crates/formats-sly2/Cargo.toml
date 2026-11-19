@@ -1,0 +1,19 @@
+[package]
+name = "formats-sly2"
+description = "Readers for Sly 2 (USA) disc and world formats, written from specs/sly2 (no third-party dependencies)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["std"]
+# Opening a disc image by path. Everything else is no_std + alloc.
+std = ["formats/std"]
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+
+[dev-dependencies]
+engine = { path = "../engine" }

@@ -1,6 +1,6 @@
 [package]
 name = "hello-switch"
-description = "Switch smoke test: deko3d clear, an animated triangle and the SlyNX name"
+description = "Platform demo: live input, a test tone, RomFS and save files, CPU boost; runs on the Switch and the PC"
 edition.workspace = true
 version.workspace = true
 authors.workspace = true
@@ -11,8 +11,15 @@ publish.workspace = true
 [lib]
 name = "hello_switch"
 path = "src/lib.rs"
-# staticlib: linked by tools/build-switch.sh into the .nro. rlib: lets `cargo test` run the scene tests on a PC.
+# staticlib: linked by tools/build-switch.sh into the .nro. rlib: lets `cargo test` run the scene tests on a PC and
+# the PC example use the demo.
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+platform-api = { path = "../platform-api" }
+
+[target.'cfg(target_os = "horizon")'.dependencies]
 platform-switch = { path = "../platform-switch" }
+
+[target.'cfg(not(target_os = "horizon"))'.dev-dependencies]
+platform-pc = { path = "../platform-pc" }

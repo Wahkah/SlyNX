@@ -1,0 +1,22 @@
+[package]
+name = "packager"
+description = "Makes a Switch .nro of SlyNX plus the player's own game data, on the player's machine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# A PC tool: it uses std and is never built for the Switch target.
+[lib]
+name = "packager"
+path = "src/lib.rs"
+
+[[bin]]
+name = "slynx-pack"
+path = "src/main.rs"
+
+[dependencies]
+formats = { path = "../formats" }
+formats-sly2 = { path = "../formats-sly2" }
+formats-sly3 = { path = "../formats-sly3" }

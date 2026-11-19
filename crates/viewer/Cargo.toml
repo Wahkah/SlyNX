@@ -1,0 +1,54 @@
+[package]
+name = "viewer"
+description = "Sly 1 and Sly 2 level viewer: loads a world from the player's disc and renders it with a free camera"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "viewer"
+path = "src/lib.rs"
+# staticlib: linked by tools/build-switch.sh into dist/slynx-viewer.nro. rlib: the PC programs (examples) and the
+# tests.
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# The Switch entry point (`main`) for dist/slynx-viewer.nro. Off by default, so other Switch programs (the game) can
+# use the viewer's level conversion without a second `main`.
+switch-app = []
+
+[dependencies]
+engine = { path = "../engine" }
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+# Sly 3 hook: the Sly 3 path (src/sly3.rs).
+formats-sly3 = { path = "../formats-sly3", default-features = false }
+ui = { path = "../ui", default-features = false }
+platform-api = { path = "../platform-api" }
+render = { path = "../render" }
+stage = { path = "../stage" }
+
+[target.'cfg(target_os = "horizon")'.dependencies]
+platform-switch = { path = "../platform-switch" }
+
+[target.'cfg(not(target_os = "horizon"))'.dependencies]
+formats = { path = "../formats", features = ["std"] }
+formats-sly2 = { path = "../formats-sly2" }
+formats-sly3 = { path = "../formats-sly3" }
+ui = { path = "../ui" }
+harness = { path = "../harness" }
+platform-pc = { path = "../platform-pc" }
+
+[[example]]
+name = "slynx_harness"
+path = "examples/slynx_harness.rs"
+
+[[example]]
+name = "viewer_pc"
+path = "examples/viewer_pc.rs"
+
+[[example]]
+name = "scene_stats"
+path = "examples/scene_stats.rs"

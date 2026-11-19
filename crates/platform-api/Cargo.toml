@@ -1,0 +1,13 @@
+[package]
+name = "platform-api"
+description = "The platform interface shared by the Switch and PC backends: input, audio, files, threads, clock, events"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "platform_api"
+path = "src/lib.rs"

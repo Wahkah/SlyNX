@@ -1,0 +1,24 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Sly 1 fonts, text markup and layout, text tables, the HUD and the menus, as backend-neutral draw lists."
+
+[features]
+default = ["std"]
+# Opening a disc image by path (passed on to `formats`). Everything else is `no_std` + `alloc`.
+std = ["formats/std"]
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+platform-api = { path = "../platform-api" }
+
+[dev-dependencies]
+harness = { path = "../harness" }
+
+[[example]]
+name = "ui_capture"
+required-features = ["std"]

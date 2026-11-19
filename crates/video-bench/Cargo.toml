@@ -1,0 +1,28 @@
+[package]
+name = "video-bench"
+description = "Movie decode benchmark for the Switch (and the PC): decodes the movies of the player's own discs and logs the times"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "video_bench"
+path = "src/lib.rs"
+# staticlib: linked by tools/build-switch.sh into dist/slynx-video-bench.nro. rlib: the PC tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+formats-sly3 = { path = "../formats-sly3", default-features = false }
+platform-api = { path = "../platform-api" }
+video = { path = "../video", default-features = false }
+
+[target.'cfg(target_os = "horizon")'.dependencies]
+platform-switch = { path = "../platform-switch" }
+
+[target.'cfg(not(target_os = "horizon"))'.dev-dependencies]
+harness = { path = "../harness" }
+platform-pc = { path = "../platform-pc" }

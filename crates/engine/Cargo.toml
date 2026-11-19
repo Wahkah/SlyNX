@@ -1,0 +1,25 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Shared engine foundations: animation playback and skinning, collision structures and queries."
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+formats-sly3 = { path = "../formats-sly3", default-features = false } # Sly 3 hook: world::sly3
+platform-api = { path = "../platform-api" }
+save = { path = "../save" } # Sly 2 hook: game::sly2_jobs (the progress block)
+script = { path = "../script" }
+
+[dev-dependencies]
+formats = { path = "../formats" }
+formats-sly2 = { path = "../formats-sly2" }
+formats-sly3 = { path = "../formats-sly3" }
+harness = { path = "../harness" }
+
+[[example]]
+name = "collision_bench"

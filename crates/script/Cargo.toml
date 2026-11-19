@@ -1,0 +1,19 @@
+[package]
+name = "script"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Sly 1, 2 and 3 world scripts: the syntax-tree reader, the interpreter, the engine boundary and state machines."
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+formats-sly3 = { path = "../formats-sly3", default-features = false }
+
+[dev-dependencies]
+formats = { path = "../formats" }
+formats-sly2 = { path = "../formats-sly2" }
+formats-sly3 = { path = "../formats-sly3" }
+harness = { path = "../harness" }

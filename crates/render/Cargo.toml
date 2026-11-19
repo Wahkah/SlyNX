@@ -1,0 +1,30 @@
+[package]
+name = "render"
+description = "SlyNX renderer: backend-neutral batching core, deko3d (Switch) and OpenGL 4.3 (PC) backends"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "render"
+path = "src/lib.rs"
+# rlib: used by the engine and the PC tools. staticlib: the Switch demo .nro links librender.a (see
+# crates/render/tools/build-switch-demo.sh); on other targets the staticlib is just an unused by-product.
+crate-type = ["rlib", "staticlib"]
+
+[features]
+# Builds the Switch demo entry point (`main`) into the library. Only meaningful on target_os = "horizon".
+switch-demo = []
+
+[target.'cfg(target_os = "horizon")'.dependencies]
+platform-switch = { path = "../platform-switch" }
+
+# The cubes example saves screenshots with the harness's PNG encoder.
+[target.'cfg(not(target_os = "horizon"))'.dev-dependencies]
+harness = { path = "../harness" }
+
+[[example]]
+name = "cubes"
+path = "examples/cubes.rs"

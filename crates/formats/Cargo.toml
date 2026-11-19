@@ -1,0 +1,22 @@
+[package]
+name = "formats"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Readers for the Sly Cooper games' disc and data formats (no third-party dependencies)."
+
+[features]
+default = ["std"]
+# File access (opening a disc image by path). Everything else is `no_std` + `alloc`.
+std = []
+
+[dependencies]
+
+[dev-dependencies]
+harness = { path = "../harness" }
+
+[[example]]
+name = "inspect"
+required-features = ["std"]

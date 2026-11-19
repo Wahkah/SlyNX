@@ -25,6 +25,6 @@ fn on_panic(info: &PanicInfo) -> ! {
     let mut out = StackBuf { buf: [0; 512], len: 0 };
     let _ = writeln!(out, "SlyNX panic: {info}");
     // Truncation may split a UTF-8 sequence; the log takes raw bytes, so that is harmless.
-    crate::switch::debug_log_bytes(&out.buf[..out.len]);
-    crate::switch::abort()
+    crate::platform::debug_log_bytes(&out.buf[..out.len]);
+    crate::platform::abort()
 }

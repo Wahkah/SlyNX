@@ -1,0 +1,12 @@
+[package]
+name = "platform-pc"
+description = "PC platform backend (Linux, Windows): SDL2 window and OpenGL 4.3 context, input, audio, files, threads, headless rendering"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# SDL2 (and EGL on Linux) are linked from the system with hand-written declarations; nothing from crates.io.
+[dependencies]
+platform-api = { path = "../platform-api" }

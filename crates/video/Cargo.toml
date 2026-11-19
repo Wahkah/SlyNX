@@ -1,0 +1,28 @@
+[package]
+name = "video"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "MPEG-2 video decoder, PSS demultiplexer and movie player for the Sly 1, 2 and 3 movies (no third-party dependencies)."
+
+[features]
+default = ["std"]
+std = []
+# Decode the slices of a frame picture on several threads (std::thread::scope).
+threads = ["std"]
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+
+[dev-dependencies]
+formats = { path = "../formats" }
+formats-sly2 = { path = "../formats-sly2" }
+formats-sly3 = { path = "../formats-sly3" }
+harness = { path = "../harness" }
+
+[[example]]
+name = "movie"
+required-features = ["std"]

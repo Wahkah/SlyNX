@@ -1,0 +1,14 @@
+[package]
+name = "save"
+description = "Save slots, auto-save rules and the port's settings file (no_std + alloc)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+platform-api = { path = "../platform-api" }
+
+[target.'cfg(not(target_os = "horizon"))'.dev-dependencies]
+platform-pc = { path = "../platform-pc" }

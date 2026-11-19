@@ -1,0 +1,573 @@
+//! Sly 3 command scripts (class 135; specs/sly3/scripts.md 7): the runner.
+//!
+//! A script's commands form a tree (first child, next sibling; index 0 is the root and never a child). Starting a
+//! script makes a runner on the root's children. A runner executes a command, then its children, then the next
+//! sibling; when a chain of siblings ends it returns to its parent's next sibling, and when it returns past its
+//! root it ends. The block-end commands (`0x01`, `0x03`, `0x05`, `0x0A`) close their blocks in the stored list
+//! and are never reached through the links.
+//!
+//! - **Blocks:** a nested `0x00` starts its children as a new runner named by the command's object (the current
+//!   runner goes on); `0x02` keeps its children to run when the script finishes; `0x04` repeats its children while
+//!   its condition holds; `0x06` runs the children of its first branch (`0x07`, `0x08`) whose condition holds,
+//!   else of its `0x09` branch.
+//! - **Conditions:** 1886 true, 1887 false, 1891 / 1892 an alarm set / not set, 1894 / 1895 no line / a line
+//!   playing. The object-state tests (1888 to 1890) and the module's own conditions are not run yet: false.
+//! - **Waits** (flag bit 0): a dialogue line (`0x52`) until it ends; `0x2F` a random time between its two values;
+//!   `0x17` until the started script ends; `0x0E` until its alarm is set; `0x0C` until the named runners are gone;
+//!   `0x5F` until no line plays. Other commands with the flag complete at once.
+//! - **Scripts** start (`0x17`, with the command's object, else the script's own) and stop (`0x11`) here.
+//! - **What the world does** goes out as [`Request`]s for the session: dialogue, exits (`0x68` with its point),
+//!   adding and removing objects (`0x38`, `0x39`), task states (`0x1E`), state-machine goals (`0x19`), screens
+//!   (`0x1A`, `0x1B`) and music (`0x59`, `0x5A`).
+//! - Commands not listed (animation, camera keys, walking, the module hook `0x15`, ...) complete at once; they are
+//!   counted in [`Scripts::unhandled`].
+//!
+//! Working readings (to confirm with the spec): `0x1E`'s byte is the task state, 4 meaning "current"; `0x0F` /
+//! `0x10` set and clear an alarm by ID, alarms being one set for all scripts.
+
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
+
+use audio::rng::Rng;
+use audio::sly3::talk::{DialogueCommand, LineOrder};
+use engine::world::World;
+use formats_sly3::stream::{Command, command_script};
+
+/// Conditions (scripts.md 7.1).
+pub mod cond {
+    pub const TRUE: i32 = 1886;
+    pub const FALSE: i32 = 1887;
+    pub const ALARM_SET: i32 = 1891;
+    pub const ALARM_CLEAR: i32 = 1892;
+    pub const NO_LINE: i32 = 1894;
+    pub const LINE: i32 = 1895;
+}
+
+/// The longest a runner goes without waiting in one frame (a loop with no wait in it stops here).
+const STEP_LIMIT: usize = 512;
+
+/// What a script asks of the world.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    /// `0x52`: play `line` (chosen from the command's list), from `object` (the command's object, −1 none).
+    PlayLine { line: i32, command: DialogueCommand, object: i32 },
+    /// `0x53`: stop the playing line if listed (any for an empty list).
+    StopLine { list: Vec<i32> },
+    /// `0x54`.
+    ClearSubtitle,
+    /// `0x68`: fire `exit` at `point` (−1: its own).
+    FireExit { exit: i32, point: i32 },
+    /// `0x38` / `0x39`: put an object in or out of the world.
+    Present { object: i32, on: bool },
+    /// `0x1E`: a task's state (4: current).
+    TaskState { task: i32, state: i32 },
+    /// `0x19`: drive `object`'s state machine `machine` to `goal`.
+    Goal { object: i32, machine: i32, goal: i32, snap: bool },
+    /// `0x1A` / `0x1B`.
+    Screen { screen: i32, on: bool },
+    /// `0x59` / `0x5A`: push or pop a music track.
+    Music { push: Option<i16> },
+}
+
+/// What scripts can ask about the world this frame.
+#[derive(Clone, Debug, Default)]
+pub struct View {
+    /// A dialogue line is playing.
+    pub line_playing: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Frame {
+    /// The runner's root: returning past it ends the runner.
+    Root,
+    /// Children of a command; then its next sibling.
+    Plain(usize),
+    /// Children of a loop; then the condition again.
+    Loop(usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Wait {
+    Time(f32),
+    Line,
+    NoLine,
+    Script(i32),
+    Alarm(i32),
+    Runners(Vec<i32>),
+}
+
+#[derive(Clone, Debug)]
+struct Runner {
+    name: i32,
+    pc: Option<usize>,
+    stack: Vec<Frame>,
+    wait: Option<Wait>,
+}
+
+/// One running script.
+#[derive(Clone, Debug)]
+pub struct ScriptRun {
+    /// The script's object ID and the object it was started with.
+    pub oid: i32,
+    /// See [`ScriptRun::oid`].
+    pub object: i32,
+    commands: Vec<Command>,
+    args: Vec<Vec<u8>>,
+    runners: Vec<Runner>,
+    finish: Vec<usize>,
+    finishing: bool,
+    orders: BTreeMap<usize, LineOrder>,
+}
+
+/// The running scripts of a world.
+#[derive(Clone, Debug)]
+pub struct Scripts {
+    /// Running scripts.
+    pub running: Vec<ScriptRun>,
+    /// Alarms set.
+    pub alarms: BTreeSet<i32>,
+    /// What the scripts asked this frame.
+    pub requests: Vec<Request>,
+    /// Commands completed without being run, by ID.
+    pub unhandled: BTreeMap<u8, usize>,
+    rng: Rng,
+    stopped: BTreeSet<i32>,
+}
+
+fn word(a: &[u8], k: usize) -> i32 {
+    a.get(k * 4..k * 4 + 4).map_or(-1, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn float(a: &[u8], k: usize) -> f32 {
+    f32::from_bits(word(a, k) as u32)
+}
+
+impl Scripts {
+    /// No scripts; `seed` for the random waits and line orders.
+    pub fn new(seed: u64) -> Scripts {
+        Scripts {
+            running: Vec::new(),
+            alarms: BTreeSet::new(),
+            requests: Vec::new(),
+            unhandled: BTreeMap::new(),
+            rng: Rng::new(seed),
+            stopped: BTreeSet::new(),
+        }
+    }
+
+    /// Whether script `oid` runs.
+    pub fn is_running(&self, oid: i32) -> bool {
+        self.running.iter().any(|s| s.oid == oid)
+    }
+
+    /// Starts script `oid` (a command script of `world`) with `object` as its object. A running script is not
+    /// started twice. False when there is no such script.
+    pub fn start(&mut self, world: &World, oid: i32, object: i32) -> bool {
+        if self.is_running(oid) {
+            return true;
+        }
+        let Some(level) = world.sly3.as_deref() else { return false };
+        let Some(h) =
+            world.find_sly3_id(oid, None).filter(|&h| world.class(h) == Some(super::flow::COMMAND_SCRIPT_CLASS))
+        else {
+            return false;
+        };
+        let Some(r) = world.sly3_record(h) else { return false };
+        let Ok((_, commands)) = command_script(&world.level.bytes, r.body_offset, &level.table) else { return false };
+        if commands.first().map(|c| c.id) != Some(0x00) {
+            return false;
+        }
+        let args = commands
+            .iter()
+            .map(|c| world.level.bytes[c.args.0 as usize..(c.args.0 + c.args.1) as usize].to_vec())
+            .collect();
+        let child = (commands[0].child & 0x7FF) as usize;
+        self.running.push(ScriptRun {
+            oid,
+            object,
+            runners: alloc::vec![Runner {
+                name: commands[0].object,
+                pc: (child != 0).then_some(child),
+                stack: alloc::vec![Frame::Root],
+                wait: None
+            }],
+            commands,
+            args,
+            finish: Vec::new(),
+            finishing: false,
+            orders: BTreeMap::new(),
+        });
+        true
+    }
+
+    /// Stops script `oid` (its finish blocks are not run).
+    pub fn stop(&mut self, oid: i32) {
+        self.running.retain(|s| s.oid != oid);
+    }
+
+    /// Runs every script for `dt` seconds (`world` is where `0x17` finds the scripts it starts); their requests are added to [`Scripts::requests`]. Scripts
+    /// started this frame run from the next.
+    pub fn update(&mut self, world: Option<&World>, view: &View, dt: f32) {
+        let names: BTreeSet<i32> = self.running.iter().map(|s| s.oid).collect();
+        let mut scripts = core::mem::take(&mut self.running);
+        for s in &mut scripts {
+            self.step_script(world, s, view, &names, dt);
+        }
+        let stopped = core::mem::take(&mut self.stopped);
+        scripts.retain(|s| !s.runners.is_empty() && !stopped.contains(&s.oid));
+        // Scripts started this frame were pushed onto `self.running`.
+        scripts.append(&mut self.running);
+        self.running = scripts;
+    }
+
+    fn step_script(&mut self, world: Option<&World>, s: &mut ScriptRun, view: &View, scripts: &BTreeSet<i32>, dt: f32) {
+        let mut i = 0;
+        while i < s.runners.len() {
+            let mut r = s.runners[i].clone();
+            let spawned = self.step_runner(world, s, &mut r, view, scripts, dt);
+            s.runners[i] = r;
+            s.runners.extend(spawned);
+            i += 1;
+        }
+        s.runners.retain(|r| !r.stack.is_empty());
+        if s.runners.is_empty() && !s.finishing && !s.finish.is_empty() {
+            s.finishing = true;
+            for &c in &s.finish.clone() {
+                s.runners.push(Runner { name: -1, pc: Some(c), stack: alloc::vec![Frame::Root], wait: None });
+            }
+        }
+    }
+
+    fn condition(&self, s: &ScriptRun, kind: i32, view: &View) -> bool {
+        let _ = s;
+        match kind {
+            cond::TRUE => true,
+            cond::ALARM_SET => !self.alarms.is_empty(),
+            cond::ALARM_CLEAR => self.alarms.is_empty(),
+            cond::NO_LINE => !view.line_playing,
+            cond::LINE => view.line_playing,
+            _ => false,
+        }
+    }
+
+    fn waited(&self, w: &Wait, s: &ScriptRun, view: &View, scripts: &BTreeSet<i32>, dt: f32) -> Option<Wait> {
+        match w {
+            Wait::Time(t) if *t > dt => Some(Wait::Time(t - dt)),
+            Wait::Line if view.line_playing => Some(Wait::Line),
+            Wait::NoLine if view.line_playing => Some(Wait::NoLine),
+            Wait::Script(id)
+                if !self.stopped.contains(id)
+                    && (scripts.contains(id) || self.running.iter().any(|r| r.oid == *id)) =>
+            {
+                Some(w.clone())
+            }
+            Wait::Alarm(a) if !self.alarms.contains(a) => Some(w.clone()),
+            Wait::Runners(n) if s.runners.iter().any(|r| n.contains(&r.name) && !r.stack.is_empty()) => Some(w.clone()),
+            _ => None,
+        }
+    }
+
+    /// Steps one runner; returns the runners it spawned.
+    fn step_runner(
+        &mut self,
+        world: Option<&World>,
+        s: &mut ScriptRun,
+        r: &mut Runner,
+        view: &View,
+        scripts: &BTreeSet<i32>,
+        dt: f32,
+    ) -> Vec<Runner> {
+        let mut spawned = Vec::new();
+        let link = |v: u16| -> Option<usize> { Some((v & 0x7FF) as usize).filter(|&x| x != 0) };
+        for _ in 0..STEP_LIMIT {
+            if let Some(w) = r.wait.take() {
+                r.wait = self.waited(&w, s, view, scripts, dt);
+                if r.wait.is_some() {
+                    return spawned;
+                }
+            }
+            let Some(i) = r.pc else {
+                match r.stack.pop() {
+                    None | Some(Frame::Root) => {
+                        r.stack.clear();
+                        return spawned;
+                    }
+                    Some(Frame::Plain(p)) => r.pc = s.commands.get(p).and_then(|c| link(c.sibling)),
+                    Some(Frame::Loop(l)) => {
+                        let c = s.commands[l];
+                        if self.condition(s, word(&s.args[l], 0), view) {
+                            r.stack.push(Frame::Loop(l));
+                            r.pc = link(c.child);
+                        } else {
+                            r.pc = link(c.sibling);
+                        }
+                        // One pass of a loop per frame at most.
+                        return spawned;
+                    }
+                }
+                continue;
+            };
+            let Some(&c) = s.commands.get(i) else {
+                r.pc = None;
+                continue;
+            };
+            let a = s.args[i].clone();
+            let next = link(c.sibling);
+            let wait = c.flags & 1 != 0;
+            r.pc = next;
+            match c.id {
+                0x00 => {
+                    if let Some(ch) = link(c.child) {
+                        spawned.push(Runner {
+                            name: c.object,
+                            pc: Some(ch),
+                            stack: alloc::vec![Frame::Root],
+                            wait: None,
+                        });
+                    }
+                }
+                0x02 => {
+                    if let Some(ch) = link(c.child) {
+                        s.finish.push(ch);
+                    }
+                }
+                0x04 => {
+                    if self.condition(s, word(&a, 0), view) {
+                        r.stack.push(Frame::Loop(i));
+                        r.pc = link(c.child);
+                    }
+                }
+                0x06 => {
+                    let mut b = link(c.child);
+                    while let Some(k) = b {
+                        let bc = s.commands[k];
+                        let take = match bc.id {
+                            0x07 | 0x08 => self.condition(s, word(&s.args[k], 0), view),
+                            0x09 => true,
+                            _ => false,
+                        };
+                        if take {
+                            r.stack.push(Frame::Plain(i));
+                            r.pc = link(bc.child);
+                            break;
+                        }
+                        b = link(bc.sibling);
+                    }
+                }
+                0x0B => {
+                    let name = word(&a, 0);
+                    if name == -1 || name == r.name {
+                        r.stack.clear();
+                        r.pc = None;
+                        return spawned;
+                    }
+                    for o in s.runners.iter_mut().filter(|o| o.name == name) {
+                        o.stack.clear();
+                        o.pc = None;
+                    }
+                }
+                0x0C => {
+                    let n = a.first().map_or(0, |&n| (n as i8).max(0) as usize);
+                    let names: Vec<i32> = (0..n).map(|k| word(&a[1..], k)).collect();
+                    r.wait = Some(Wait::Runners(names));
+                }
+                0x0E => r.wait = Some(Wait::Alarm(word(&a, 0))),
+                0x0F => {
+                    self.alarms.insert(word(&a, 0));
+                }
+                0x10 => {
+                    self.alarms.remove(&word(&a, 0));
+                }
+                0x11 => {
+                    let script = word(&a, 0);
+                    self.running.retain(|x| x.oid != script);
+                    self.stopped.insert(script);
+                }
+                0x17 => {
+                    let script = word(&a, 0);
+                    let object = if c.object != -1 { c.object } else { s.object };
+                    let running = scripts.contains(&script) && !self.stopped.contains(&script);
+                    let started = running || world.is_some_and(|w| self.start(w, script, object));
+                    if wait && started {
+                        r.wait = Some(Wait::Script(script));
+                    }
+                }
+                0x19 => self.requests.push(Request::Goal {
+                    object: word(&a, 0),
+                    machine: word(&a, 1),
+                    goal: word(&a, 2),
+                    snap: a.get(12).is_some_and(|&b| b != 0),
+                }),
+                0x1A | 0x1B => self.requests.push(Request::Screen { screen: word(&a, 0), on: c.id == 0x1A }),
+                0x1E => {
+                    self.requests.push(Request::TaskState { task: word(&a, 0), state: *a.get(4).unwrap_or(&0) as i32 })
+                }
+                0x2F => {
+                    let (lo, hi) = (float(&a, 0), float(&a, 1));
+                    let t = if hi > lo { self.rng.range_f32(lo, hi) } else { lo };
+                    if wait && t > 0.0 {
+                        r.wait = Some(Wait::Time(t));
+                    }
+                }
+                0x38 | 0x39 => self.requests.push(Request::Present { object: word(&a, 0), on: c.id == 0x38 }),
+                0x52 => {
+                    if let Some(d) = DialogueCommand::decode(c.id, &a) {
+                        let DialogueCommand::PlayLine { lines, .. } = &d else { unreachable!() };
+                        let rng = &mut self.rng;
+                        let order = s.orders.entry(i).or_insert_with(|| LineOrder::new(lines));
+                        if let Some(line) = order.next(rng) {
+                            self.requests.push(Request::PlayLine { line, command: d, object: c.object });
+                            if wait {
+                                r.wait = Some(Wait::Line);
+                            }
+                        }
+                    }
+                }
+                0x53 => {
+                    if let Some(DialogueCommand::Stop { list }) = DialogueCommand::decode(c.id, &a) {
+                        self.requests.push(Request::StopLine { list });
+                    }
+                }
+                0x54 => self.requests.push(Request::ClearSubtitle),
+                0x59 => self.requests.push(Request::Music {
+                    push: Some(i16::from_le_bytes([*a.first().unwrap_or(&0), *a.get(1).unwrap_or(&0)])),
+                }),
+                0x5A => self.requests.push(Request::Music { push: None }),
+                0x5F => r.wait = Some(Wait::NoLine),
+                0x68 => self.requests.push(Request::FireExit { exit: word(&a, 0), point: word(&a, 1) }),
+                0x55 | 0x56 | 0x18 | 0x14 => {}
+                id => *self.unhandled.entry(id).or_default() += 1,
+            }
+            // A command with children of its own (other than the blocks above) runs them next.
+            if !matches!(c.id, 0x00 | 0x02 | 0x04 | 0x06)
+                && let Some(ch) = link(c.child)
+            {
+                r.stack.push(Frame::Plain(i));
+                r.pc = Some(ch);
+            }
+        }
+        spawned
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd(id: u8, child: u16, sibling: u16, flags: i8) -> Command {
+        Command { id, object: -1, flags, child, sibling, args: (0, 0) }
+    }
+
+    fn run(commands: Vec<Command>, args: Vec<Vec<u8>>) -> ScriptRun {
+        let child = commands[0].child as usize;
+        ScriptRun {
+            oid: 1,
+            object: -1,
+            runners: alloc::vec![Runner { name: -1, pc: Some(child), stack: alloc::vec![Frame::Root], wait: None }],
+            commands,
+            args,
+            finish: Vec::new(),
+            finishing: false,
+            orders: BTreeMap::new(),
+        }
+    }
+
+    fn ww(a: i32, b: i32) -> Vec<u8> {
+        let mut v = a.to_le_bytes().to_vec();
+        v.extend_from_slice(&b.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn a_tree_runs_in_order_with_a_branch_and_a_finish_block() {
+        // 0 root → 1 exit A → 2 if (3 branch false → 4 exit B; 5 else → 6 exit C) → 7 finish (8 exit D).
+        let c = alloc::vec![
+            cmd(0x00, 1, 0, 0),
+            cmd(0x68, 0, 2, 0),
+            cmd(0x06, 3, 7, 0),
+            cmd(0x07, 4, 5, 0),
+            cmd(0x68, 0, 0, 0),
+            cmd(0x09, 6, 0, 0),
+            cmd(0x68, 0, 0, 0),
+            cmd(0x02, 8, 0, 0),
+            cmd(0x68, 0, 0, 0),
+        ];
+        let a = alloc::vec![
+            alloc::vec![],
+            ww(10, -1),
+            alloc::vec![],
+            ww(cond::FALSE, -1),
+            ww(20, -1),
+            alloc::vec![],
+            ww(30, -1),
+            alloc::vec![],
+            ww(40, 7),
+        ];
+        let mut s = Scripts::new(1);
+        s.running.push(run(c, a));
+        s.update(None, &View::default(), 0.1);
+        s.update(None, &View::default(), 0.1);
+        let exits: Vec<(i32, i32)> = s
+            .requests
+            .iter()
+            .filter_map(|r| match r {
+                Request::FireExit { exit, point } => Some((*exit, *point)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(exits, [(10, -1), (30, -1), (40, 7)]);
+        assert!(s.running.is_empty(), "the script ended");
+    }
+
+    #[test]
+    fn waits_hold_the_runner() {
+        // 0 root → 1 wait 0.5 s (flag) → 2 exit.
+        let mut wait = 0.5f32.to_le_bytes().to_vec();
+        wait.extend_from_slice(&0.5f32.to_le_bytes());
+        wait.extend_from_slice(&(-1i32).to_le_bytes());
+        let c = alloc::vec![cmd(0x00, 1, 0, 0), cmd(0x2F, 0, 2, 1), cmd(0x68, 0, 0, 0)];
+        let mut s = Scripts::new(1);
+        s.running.push(run(c, alloc::vec![alloc::vec![], wait, ww(5, -1)]));
+        for _ in 0..4 {
+            s.update(None, &View::default(), 0.1);
+        }
+        assert!(s.requests.is_empty(), "still waiting after 0.4 s");
+        for _ in 0..2 {
+            s.update(None, &View::default(), 0.1);
+        }
+        assert_eq!(s.requests, [Request::FireExit { exit: 5, point: -1 }]);
+    }
+
+    #[test]
+    fn a_loop_spawns_and_stops_a_runner_each_pass_until_its_alarm() {
+        // 0 root → 1 loop (true) [2 runner 7 (3 exit 1) → 4 wait alarm 9 → 5 stop runner 7].
+        let mut c = alloc::vec![
+            cmd(0x00, 1, 0, 0),
+            cmd(0x04, 2, 0, 0),
+            cmd(0x00, 3, 4, 0),
+            cmd(0x68, 0, 0, 0),
+            cmd(0x0E, 0, 5, 1),
+            cmd(0x0B, 0, 0, 0),
+        ];
+        c[2].object = 7;
+        let a = alloc::vec![
+            alloc::vec![],
+            ww(cond::TRUE, -1),
+            alloc::vec![],
+            ww(1, -1),
+            ww(9, 0),
+            7i32.to_le_bytes().to_vec(),
+        ];
+        let mut s = Scripts::new(1);
+        s.running.push(run(c, a));
+        s.update(None, &View::default(), 0.1);
+        s.update(None, &View::default(), 0.1);
+        assert_eq!(s.requests.len(), 1, "one pass: the runner fired once, the loop waits for the alarm");
+        s.alarms.insert(9);
+        for _ in 0..3 {
+            s.update(None, &View::default(), 0.1);
+        }
+        assert!(s.requests.len() >= 2, "the alarm let the loop go round");
+        assert_eq!(s.running.len(), 1, "a forever loop keeps the script");
+    }
+}

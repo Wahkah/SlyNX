@@ -17,12 +17,60 @@ reason = "Trivial pass-through vertex shader (vec2 position to gl_Position, one 
 
 [[allow]]
 check  = "similarity"
-path   = "crates/platform-switch/c/slynx_shim.c"
-match  = "SafeHouse/platform/switch/*/backend.cpp"
-reason = "2% overlap, all deko3d API sequences fixed by the library: dkMemBlockMakerDefaults with DK_MEMBLOCK_ALIGNMENT rounding, the framebuffer image-layout/memblock/dkImageInitialize/dkSwapchainMakerDefaults setup as in the public deko3d examples, dkDeviceMakerDefaults and dkQueueAcquireImage. Flags, structure and naming differ. Reviewed 2026-11-13."
+path   = "crates/formats/src/iso.rs"
+match  = "*/ps2-disc/src/tests.rs"
+reason = "Test fixture only (the #[cfg(test)] module). The shared lines build an ISO 9660 directory record and primary volume descriptor in memory; every offset written (record length at 0, extent LBA both-endian at 2/6, data length both-endian at 10/14, flags at 25, name length at 32, name at 33, padding to an even length; descriptor type 1, CD001, version 1, space-padded system and volume identifiers at 8 and 40, root record at 156) is fixed by ECMA-119 sections 8.4 and 9.1, and PLAYSTATION is the system identifier every PS2 disc carries. Image layout, sector numbers, the two-sector directory, the date field and the assertions differ. Reviewed 2026-11-13."
 
 [[allow]]
 check  = "similarity"
-path   = "crates/platform-switch/c/slynx_shim.c"
-match  = "SafeHouse/platform/switch/deko/gl_deko.cpp"
-reason = "3% overlap, all deko3d API sequences fixed by the library: a memblock helper rounding to DK_MEMBLOCK_ALIGNMENT and the swapchain framebuffer setup (image layout, one Image memblock, dkImageInitialize per image) as in the public deko3d examples. Flags, error handling and naming differ. Reviewed 2026-11-13."
+path   = "crates/script/src/event.rs"
+match  = "*/ps2-gs/src/export.rs"
+reason = "Token-shape match only. The file is a list of documented `pub const NAME: u32 = n;` items, the standard Rust way to name integer codes. The reference regions are graphics-register constants (`u8` addresses and `usize` word indices) with other names, values and meanings; no identifier, value sequence or comment is shared. The event numbers 0 to 29 and their meanings come from specs/sly1/scripts.md section 6. Reviewed 2026-11-14."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/script/src/event.rs"
+match  = "*/ps2-gs/src/regs.rs"
+reason = "Token-shape match only. The file is a list of documented `pub const NAME: u32 = n;` items, the standard Rust way to name integer codes. The reference regions are graphics-register addresses (`u8`, hex values) with other names, values and meanings; no identifier, value sequence or comment is shared. The event numbers 0 to 29 and their meanings come from specs/sly1/scripts.md section 6. Reviewed 2026-11-14."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/script/src/lib.rs"
+match  = "*/ps2-analysis/src/lib.rs"
+reason = "Crate-root boilerplate: `pub mod` declarations and `pub use module::{Item, ...};` re-exports. The shared fingerprints are the `pub use` token pattern; the module and item names are this crate's own (tree, value, interp, machine, option_map; Interpreter, Program, Value) and differ from the reference's. Reviewed 2026-11-14."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/audio/examples/render_paris.rs"
+match  = "*/sly-app/src/sound.rs"
+reason = "Example tool only. The shared lines write the 44-byte canonical RIFF/WAVE header for 16-bit stereo PCM: RIFF, size, WAVEfmt, chunk size 16, format 1, channels 2, sample rate, byte rate, block align 4, bits 16, data, data size. Every field, its order and its width are fixed by the WAV format (Microsoft RIFF/WAVE fmt chunk); writing them with extend_from_slice and to_le_bytes is the plain way to do it in Rust. Reviewed 2026-11-14."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/engine/src/behavior/guard.rs"
+match  = "*/ps2-gs/src/export.rs"
+reason = "Token-shape match only. Lines 27-63 are `mod state`, the guard state numbers 0 to 16 from specs (guards.md 3) as documented `pub const NAME: u8 = n;` items, plus a `COUNT: usize`. The reference region (`mod word`, lines 30-67) is a list of `usize` word indices into a graphics primitive record. The only thing in common is the consecutive numbering from 0, which any such list has; no identifier, comment or meaning is shared. The two stray fingerprints (lines 205-211) are `pub name: f32` struct fields with other names and types. Reviewed 2026-11-18."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/engine/src/gang/character.rs"
+match  = "*/ps2-gs/src/export.rs"
+reason = "Token-shape match only. Lines 17-107 are `mod sly`, `mod murray` and `mod bentley`, each character's state numbers from specs (characters.md 3, 4.2, 5.2) as documented `pub const NAME: u8 = n;` items; the numbers skip where the spec skips (8 to 10, 14 to 23, 6 to 9, 15 to 21). The reference region (`mod word`, lines 30-65) is consecutive `usize` word indices into a graphics primitive record. Only short runs of consecutive integers line up; no identifier, comment or meaning is shared. The other fingerprints (lines 243-316) are derive-plus-`pub field` struct openings with other names. Reviewed 2026-11-18."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/ui/src/tables.rs"
+match  = "*/ps2-gs/src/export.rs"
+reason = "Token-shape match only. Lines 153-221 are `mod pair`, `mod resp` and `mod prompt`: menu row, response and prompt indices from specs (ui-and-menus.md 2) as `pub const NAME: usize|i32 = n;` items, the prompt list skipping where the spec does (2 to 11, 14 to 16, 20 to 23, 24 to 31). The reference region (`mod word`, lines 30-75) is `usize` word indices into a graphics primitive record. Only the consecutive numbering lines up; no identifier, comment or meaning is shared. The few other fingerprints (lines 50-117, 344-347) are `#[derive(...)] pub struct Name { pub field: T` openings with other names. Reviewed 2026-11-18."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/ui/src/tables.rs"
+match  = "*/ps2-gs/src/regs.rs"
+reason = "Token-shape match only. Lines 155-221 are the menu index lists (`mod pair`, `mod resp`, `mod prompt`, from ui-and-menus.md 2) written as `pub const NAME: T = n;` in decimal. The reference region (`mod addr`, lines 6-25) is graphics-register addresses written in hex; the normaliser reads 0x00..0x0A and 0..10 as the same tokens, so only the consecutive run from 0 lines up. Names, types (`usize`/`i32` against `u8`), values past 10 and meaning all differ, and no identifier or comment is shared. Lines 344-355 are a derive-plus-fields struct (`SlotInfo`) with other names. Reviewed 2026-11-18."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/render/src/frame.rs"
+match  = "*/ps2-gs/src/export.rs"
+reason = "Token-shape match only. The regions are our draw-packet types: derive-plus-`pub field: u32` structs (GpuInstance, DrawCmd, Batch, View, FrameStats, lines 18-343), small flag lists (INSTANCE_*, VIEW_*, lines 68-72 and 188-197), STATE_* bits written as `1 << n` (lines 152-165, against the reference's PRIM-register bits `1 << 8` to `1 << 14` at 116-128), and `mod slot`, the draw order 0 to 15 (lines 355-370, against `mod word` word indices at 30-62). What lines up is consecutive integers and consecutive bit shifts; no code identifier is shared (`Batch` is a struct name in both, with unrelated fields), and the layouts, meanings and comments are this renderer's own (rendering.md). Reviewed 2026-11-18."

@@ -1,0 +1,59 @@
+[package]
+name = "game"
+description = "SlyNX: the game application (platform, engine, renderer) for the Switch and the PC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "game"
+path = "src/lib.rs"
+# staticlib: linked by tools/build-switch.sh into dist/slynx.nro. rlib: the PC programs (examples) and the tests.
+crate-type = ["staticlib", "rlib"]
+
+[features]
+# Sly 2 hook: build the Sly 2 Switch entry point (dist/slynx-sly2.nro) instead of the Sly 1 one.
+sly2-switch = []
+# Sly 3 hook: build the Sly 3 Switch entry point (dist/slynx-sly3.nro).
+sly3-switch = []
+# Build the smoke entry point (dist/slynx-smoke.nro): the Sly 1 smoke route, headless, logged to the SD card.
+smoke-switch = []
+
+[dependencies]
+audio = { path = "../audio", default-features = false }
+engine = { path = "../engine" }
+formats = { path = "../formats", default-features = false }
+formats-sly2 = { path = "../formats-sly2", default-features = false }
+formats-sly3 = { path = "../formats-sly3", default-features = false } # Sly 3 hook: src/sly3
+platform-api = { path = "../platform-api" }
+render = { path = "../render" }
+save = { path = "../save" }
+script = { path = "../script" }
+stage = { path = "../stage" }
+ui = { path = "../ui", default-features = false }
+video = { path = "../video", default-features = false }
+
+[target.'cfg(target_os = "horizon")'.dependencies]
+platform-switch = { path = "../platform-switch" }
+
+[target.'cfg(not(target_os = "horizon"))'.dependencies]
+formats = { path = "../formats", features = ["std"] }
+formats-sly2 = { path = "../formats-sly2" }
+formats-sly3 = { path = "../formats-sly3" } # Sly 3 hook
+audio = { path = "../audio" } # Sly 3 hook: opening the disc by path for the session's sound
+harness = { path = "../harness" }
+platform-pc = { path = "../platform-pc" }
+
+[[example]]
+name = "slynx_game"
+path = "examples/slynx_game.rs"
+
+[[example]]
+name = "game_pc"
+path = "examples/game_pc.rs"
+
+[[example]]
+name = "world_bench"
+path = "examples/world_bench.rs"

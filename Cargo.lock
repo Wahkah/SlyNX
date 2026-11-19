@@ -3,12 +3,197 @@
 version = 4
 
 [[package]]
+name = "audio"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+ "platform-api",
+ "video",
+]
+
+[[package]]
+name = "engine"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+ "platform-api",
+ "save",
+ "script",
+]
+
+[[package]]
+name = "formats"
+version = "0.0.1"
+dependencies = [
+ "harness",
+]
+
+[[package]]
+name = "formats-sly2"
+version = "0.0.1"
+dependencies = [
+ "engine",
+ "formats",
+]
+
+[[package]]
+name = "formats-sly3"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "harness",
+]
+
+[[package]]
+name = "game"
+version = "0.0.1"
+dependencies = [
+ "audio",
+ "engine",
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+ "platform-api",
+ "platform-pc",
+ "platform-switch",
+ "render",
+ "save",
+ "script",
+ "stage",
+ "ui",
+ "video",
+]
+
+[[package]]
+name = "harness"
+version = "0.0.1"
+
+[[package]]
 name = "hello-switch"
 version = "0.0.1"
 dependencies = [
+ "platform-api",
+ "platform-pc",
  "platform-switch",
+]
+
+[[package]]
+name = "packager"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+]
+
+[[package]]
+name = "platform-api"
+version = "0.0.1"
+
+[[package]]
+name = "platform-pc"
+version = "0.0.1"
+dependencies = [
+ "platform-api",
 ]
 
 [[package]]
 name = "platform-switch"
 version = "0.0.1"
+dependencies = [
+ "platform-api",
+]
+
+[[package]]
+name = "render"
+version = "0.0.1"
+dependencies = [
+ "harness",
+ "platform-switch",
+]
+
+[[package]]
+name = "save"
+version = "0.0.1"
+dependencies = [
+ "platform-api",
+ "platform-pc",
+]
+
+[[package]]
+name = "script"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+]
+
+[[package]]
+name = "stage"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "render",
+]
+
+[[package]]
+name = "ui"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "harness",
+ "platform-api",
+]
+
+[[package]]
+name = "video"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+]
+
+[[package]]
+name = "video-bench"
+version = "0.0.1"
+dependencies = [
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+ "platform-api",
+ "platform-pc",
+ "platform-switch",
+ "video",
+]
+
+[[package]]
+name = "viewer"
+version = "0.0.1"
+dependencies = [
+ "engine",
+ "formats",
+ "formats-sly2",
+ "formats-sly3",
+ "harness",
+ "platform-api",
+ "platform-pc",
+ "platform-switch",
+ "render",
+ "stage",
+ "ui",
+]

@@ -1,0 +1,30 @@
+[package]
+name = "audio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Sly 1 sound: SPU ADPCM, effect banks, the adaptive music sequencer, dialogue and the real-time mixer."
+
+[features]
+default = ["std"]
+# Opening a disc image by path (passed on to `formats`). Everything else is `no_std` + `alloc`.
+std = ["formats/std"]
+
+[dependencies]
+formats = { path = "../formats", default-features = false }
+platform-api = { path = "../platform-api" }
+
+[dev-dependencies]
+harness = { path = "../harness" }
+# Walks the Sly 2 sequence objects in the dialogue disc test.
+formats-sly2 = { path = "../formats-sly2" }
+# Walks the Sly 3 command scripts in the dialogue disc test.
+formats-sly3 = { path = "../formats-sly3" }
+# Demultiplexes the movies in the Sly 2 movie-soundtrack disc test.
+video = { path = "../video" }
+
+[[example]]
+name = "render_paris"
+required-features = ["std"]
