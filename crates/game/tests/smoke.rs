@@ -10,7 +10,7 @@ use smoke_run::{Config, DEFAULT_WORLDS, failures, report, run};
 #[test]
 fn title_new_game_paris_hideout_and_episodes() {
     let Some(disc) = require_disc(Game::Sly1, "title_new_game_paris_hideout_and_episodes") else { return };
-    let cfg = Config { disc, seconds: 4.0, worlds: DEFAULT_WORLDS.to_vec() };
+    let cfg = Config { disc, seconds: 4.0, worlds: DEFAULT_WORLDS.to_vec(), vehicles: Vec::new() };
     let a = run(&cfg, |_| {});
     let b = run(&cfg, |_| {});
     eprintln!("{}", report(&a));

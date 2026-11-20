@@ -114,7 +114,7 @@ impl LineOrder {
 
     /// The line to play this run: one line always plays; otherwise the list rotates by one (first to the end) while
     /// the count is below the list's length, and when it reaches it the list is shuffled (each position from the
-    /// second on swapped with a random earlier one), the count goes back to 0, and the line that played last is
+    /// positions in order, position i swapped with a random one in 0 to n − 1 − i), the count goes back to 0, and the line that played last is
     /// swapped to the end if the shuffle put it first. The line is the first entry after that step. `None` for an
     /// empty list.
     pub fn next(&mut self, rng: &mut Rng) -> Option<i32> {
@@ -125,8 +125,8 @@ impl LineOrder {
                 self.count += 1;
             } else {
                 let last = self.order[0];
-                for i in 1..n {
-                    let j = rng.range_i32(0, i as i32 - 1) as usize;
+                for i in 0..n {
+                    let j = rng.range_i32(0, (n - 1 - i) as i32) as usize;
                     self.order.swap(i, j);
                 }
                 self.count = 0;

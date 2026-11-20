@@ -241,7 +241,7 @@ fn restart_reloads_at_the_checkpoint_with_wipe_875() {
     assert!(!player_at(&s, want), "the player walked off");
     let mut pairs = Vec::new();
     for _ in 0..3 {
-        s.restart();
+        assert!(s.defeat(), "no job is running: the defeat restarts");
         frames(&mut s, 1);
         let l = s.last_load.clone().unwrap();
         assert_eq!((l.slot, l.point, l.wipe), (3, 424, flow::RESTART_WIPE));
@@ -289,7 +289,17 @@ fn the_safe_house_and_the_shop() {
     let table = engine::gang::sly3::Sly3ItemTable::from_executable(&s.disc().unwrap().executable).unwrap();
     let all = safehouse::Shop::new(&table, 8, &[]);
     assert_eq!((all.items.len(), all.items.iter().map(|i| i.1.price).sum::<i32>()), (34, 23_700));
-    // Right to Sly; Cross takes him out.
+    // Circle closes the shop screen (the 2D layer holds the pad while it is open); right to Sly; Cross takes him
+    // out.
+    for f in 0..240 {
+        if !s.screens_hold() {
+            break;
+        }
+        // Circle once the screen has finished opening; it then plays its closing.
+        let input = if f % 30 == 29 { press(platform_api::Buttons::A) } else { FrameInput::default() };
+        s.update(&input, 1.0 / 60.0);
+    }
+    assert!(!s.screens_hold(), "the shop screen closed");
     s.update(&press(platform_api::Buttons::RIGHT), 1.0 / 60.0);
     s.update(&press(platform_api::Buttons::B), 1.0 / 60.0);
     assert!(!s.in_safe_house);
@@ -326,4 +336,206 @@ fn every_world_carries_the_same_save_tree() {
     assert_eq!(p.block.len(), save::sly3::BLOCK_SIZE);
     p.set_named(&["loot", "ccoin"], None, save::sly2::SaveValue::Int(1_700));
     assert_eq!(save::sly3::coins(&p), 1_700);
+}
+
+#[test]
+fn the_jobs_graph_of_venice() {
+    let Some(path) = require_disc(Game::Sly3, "the_jobs_graph_of_venice") else { return };
+    let mut s = session(&path);
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    let j = s.jobs.as_ref().expect("the job system attached");
+    let g = &j.graph;
+    // v_ext holds Venice's 10 jobs (class 168) and 95 tasks (class 169).
+    assert_eq!((g.jobs.len(), g.tasks.len()), (10, 95));
+    // Every job's first and last task and its four save keys; every task's five keys.
+    // Every job names its first task (1364); one (2283) has a last-task value that names no task.
+    let last = g.jobs.iter().filter(|j| j.last.is_some()).count();
+    assert_eq!(last, 9);
+    for job in &g.jobs {
+        assert!(job.first.is_some(), "job {}", job.id);
+        let k = &job.keys;
+        assert!(k.focus.is_some() && k.complete.is_some() && k.time.is_some() && k.help.is_some(), "job {}", job.id);
+    }
+    for t in &g.tasks {
+        let k = &t.keys;
+        assert!(k.focus.is_some() && k.completed.is_some() && k.complete.is_some(), "task {}", t.id);
+        assert!(k.state.is_some() && k.restarted.is_some(), "task {}", t.id);
+    }
+    let with_job = g.tasks.iter().filter(|t| t.job.is_some()).count();
+    eprintln!("{with_job} of {} tasks name their job", g.tasks.len());
+    assert!(with_job >= 81);
+    // The exits that end jobs (1381) and that tasks fire (1406), as level-flow.md 4.5 lists for Venice.
+    let job_exits: BTreeSet<i32> = g.jobs.iter().filter_map(|j| j.exit).collect();
+    let task_exits: BTreeSet<i32> = g.tasks.iter().filter_map(|t| t.exit).collect();
+    assert_eq!(job_exits, [2045, 2051, 2052].into());
+    assert_eq!(task_exits, [2135, 2226, 2417].into());
+    // missions.md 2 and 4.1: the completion modes, items and event lists of Venice's jobs (printed), and its
+    // tasks' 1405 ("done when current") and 1408 scripts.
+    let replay: Vec<&str> = g.jobs.iter().filter(|j| j.replay).map(|j| j.name.as_str()).collect();
+    let items: Vec<(&str, i32)> = g.jobs.iter().filter_map(|j| j.item.map(|i| (j.name.as_str(), i))).collect();
+    let events: Vec<(&str, &[i32])> =
+        g.jobs.iter().filter(|j| !j.events.is_empty()).map(|j| (j.name.as_str(), j.events.as_slice())).collect();
+    let done_now = g.tasks.iter().filter(|t| t.done_on_current).count();
+    let scripts = g.tasks.iter().filter(|t| t.script.is_some()).count();
+    eprintln!(
+        "replayable {replay:?}; items {items:?}; events {events:?}; {done_now} done-when-current, {scripts} with scripts"
+    );
+    assert!(scripts > 0 && done_now > 0);
+    assert!(g.jobs.iter().all(|j| j.resume.is_none()), "only Kaine Island's jobs have a resume task");
+    // The restored states: nothing done on a new game, some tasks open.
+    assert!(j.states.iter().all(|&s| (0..=1).contains(&s)));
+    assert!(j.states.contains(&1), "a task is available");
+}
+
+#[test]
+fn the_take_out_script_runs() {
+    let Some(path) = require_disc(Game::Sly3, "the_take_out_script_runs") else { return };
+    let mut s = session(&path);
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    let use_point = |s: &Session| {
+        let w = &s.game.as_ref().unwrap().world;
+        w.find_sly3_id(15152, None).map(|h| w.in_world(h))
+    };
+    assert_eq!(use_point(&s), Some(true));
+    // In the safe house, Cross on the first state (Bentley): script 44602, which starts 2061 with Bentley.
+    assert!(s.enter_safe_house());
+    let press = |b: platform_api::Buttons| FrameInput { pressed: b.0, buttons: b.0, ..Default::default() };
+    s.update(&press(platform_api::Buttons::B), 1.0 / 60.0);
+    frames(&mut s, 2);
+    assert!(s.scripts.is_running(2061), "the take-out script started");
+    // safehouse-and-shop.md 1: it sets four tasks' states, then (after a 0.5 s wait) removes the door's use point...
+    for _ in 0..120 {
+        if use_point(&s) == Some(false) {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    assert_eq!(use_point(&s), Some(false), "the use point is removed while the character walks out");
+    let j = s.jobs.as_ref().unwrap();
+    let state = |id: i32| j.graph.task_ids.get(&id).map(|&t| j.states[t]);
+    assert_eq!((state(2138), state(2227), state(2418)), (Some(3), Some(3), Some(3)));
+    assert_eq!(j.current.map(|t| j.graph.tasks[t].id), Some(2083), "task 2083 made current");
+    // ...and its finish block puts the use point back when it ends.
+    for _ in 0..600 {
+        if !s.scripts.is_running(2061) {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    assert!(!s.scripts.is_running(2061), "the script ended");
+    assert_eq!(use_point(&s), Some(true), "the use point is back");
+    eprintln!("commands not run: {:?}", s.scripts.unhandled);
+}
+
+#[test]
+fn a_script_fires_its_exit() {
+    let Some(path) = require_disc(Game::Sly3, "a_script_fires_its_exit") else { return };
+    let mut s = session(&path);
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    let src = flow::exit_sources(&s.game.as_ref().unwrap().world);
+    // Try the scripts holding a command 0x68 until one runs to it (others wait on conditions not modelled yet).
+    let mut fired = None;
+    for &(script, exit, point) in &src.commands {
+        s.start_episode(3, &EpisodeProgress::default()).unwrap();
+        frames(&mut s, 2);
+        let w = &s.game.as_ref().unwrap().world;
+        assert!(s.scripts.start(w, script, -1), "script {script}");
+        for _ in 0..600 {
+            frames(&mut s, 1);
+            if s.last_load.as_ref().is_some_and(|l| l.exit == Some(exit)) {
+                fired = Some((script, exit, point));
+                break;
+            }
+        }
+        if fired.is_some() {
+            break;
+        }
+    }
+    let (script, exit, point) = fired.expect("a script fired its exit");
+    eprintln!("script {script} fired exit {exit} at point {point}");
+    let l = s.last_load.clone().unwrap();
+    assert_eq!(l.point, if point == -1 { 424 } else { point });
+    if let Some(want) = expected_place(&s, l.point) {
+        assert!(player_at(&s, want), "arrived at point {}", l.point);
+    }
+}
+
+#[test]
+fn option_sets_follow_the_task_progress() {
+    let Some(path) = require_disc(Game::Sly3, "option_sets_follow_the_task_progress") else { return };
+    let mut s = session(&path);
+    // conditions.md 2: the sets of every world, the first being a fresh load's.
+    let want: BTreeMap<&str, Vec<i32>> = [
+        ("dvd_menu", vec![22]),
+        ("v_ext", vec![22, 19, 20, 23]),
+        ("v_canal", vec![14, 23]),
+        ("v_apt", vec![12]),
+        ("o_ext", vec![14, 15]),
+        ("o_quarry", vec![14, 15]),
+        ("o_arena", vec![15]),
+        ("o_cave_murray", vec![118_474]),
+        ("h_dogfight", vec![15, 14]),
+        ("p_at_sea", vec![22, 19]),
+        ("m_ext", vec![13, 14, 15]),
+    ]
+    .into_iter()
+    .collect();
+    let mut tables = BTreeMap::new();
+    for (slot, name) in s.worlds() {
+        s.load_slot(slot).unwrap();
+        let l = s.game.as_ref().unwrap().world.sly3.as_deref().unwrap();
+        if let Some(ids) = want.get(name.as_str()) {
+            assert_eq!(&l.option_sets.ids, ids, "{name}");
+        }
+        // A fresh load (no progress yet in this session's first world, then the empty new-game block) takes set 0.
+        assert_eq!(l.context.condition, l.option_sets.ids[0], "{name}");
+        tables.insert(name.clone(), l.option_sets.table_b.clone());
+    }
+    // Table B of Venice: 65 entries, conditions 12 ×23, 23 ×41, 20 ×1.
+    let mut venice: BTreeMap<u32, usize> = BTreeMap::new();
+    for e in &tables["v_ext"] {
+        *venice.entry(e.2).or_default() += 1;
+    }
+    assert_eq!(venice, [(12, 23), (20, 1), (23, 41)].into());
+    // With a task of condition 23 done, v_ext loads its set 23 (index 3), and the world's condition is 23.
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    let entry = tables["v_ext"].iter().rev().find(|e| e.2 == 23).unwrap().clone();
+    s.jobs.as_mut().unwrap().progress.set(&entry.0, None, save::sly2::SaveValue::Int(2));
+    s.load_at(3, 424).unwrap();
+    let l = s.game.as_ref().unwrap().world.sly3.as_deref().unwrap();
+    assert_eq!(l.context.condition, 23, "v_ext after task {}", entry.1);
+}
+
+#[test]
+fn machines_come_in_through_their_scripts() {
+    let Some(path) = require_disc(Game::Sly3, "machines_come_in_through_their_scripts") else { return };
+    let mut s = session(&path);
+    // (world, machine class, a script that brings it in and hands it over); o_quarry's truck is in the world from
+    // the start.
+    s.load_slot(9).unwrap();
+    {
+        let w = &s.game.as_ref().unwrap().world;
+        assert!(w.handles().any(|h| w.class(h) == Some(81) && w.is_active(h)), "o_quarry's truck");
+    }
+    for (slot, class, script) in [(21usize, 82i16, 3297), (31, 84, 3998)] {
+        s.load_slot(slot).unwrap();
+        let active = |s: &Session| {
+            let w = &s.game.as_ref().unwrap().world;
+            w.handles().any(|h| w.class(h) == Some(class) && w.is_active(h))
+        };
+        assert!(!active(&s), "slot {slot}: the machine waits for its script");
+        let w = &s.game.as_ref().unwrap().world;
+        assert!(s.scripts.start(w, script, -1), "script {script}");
+        let mut driven = None;
+        for _ in 0..1200 {
+            frames(&mut s, 1);
+            let w = &s.game.as_ref().unwrap().world;
+            if let Some(h) = w.shared.driving.filter(|&h| w.class(h) == Some(class) && w.is_active(h)) {
+                driven = Some(h);
+                break;
+            }
+        }
+        eprintln!("slot {slot}: machine class {class} driven {}", driven.is_some());
+        assert!(driven.is_some(), "slot {slot}: script {script} hands over the machine");
+    }
 }

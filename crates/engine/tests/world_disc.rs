@@ -189,3 +189,40 @@ fn every_world_runs_and_is_deterministic() {
     // Actions the scripts call that no behaviour implements yet (two runs per world).
     eprintln!("unhandled actions (calls): {:?}", unhandled.lock().unwrap());
 }
+
+#[test]
+fn collision_surfaces_are_polygons() {
+    // specs/sly1/collision.md 1.2: world 1's mesh, surface 1275 (corners 1191, 1190, 1187) is a pentagon whose edges
+    // end at 1183 and 1184; about a quarter of the surfaces in worlds 1, 2 and 12 are larger than their triangle.
+    let Some(d) = disc("collision_surfaces_are_polygons") else { return };
+    let w = load(d, 1);
+    let level = &w.level;
+    let (mut found, mut surfaces, mut larger) = (false, 0usize, 0usize);
+    for r in &level.stream.records {
+        if !matches!(
+            formats::stream::layout_of(r.class),
+            Some(formats::stream::Layout::Solid | formats::stream::Layout::Conveyor)
+        ) {
+            continue;
+        }
+        let Ok(solid) = formats::collision::Solid::parse(&level.bytes, r.offset + 6) else { continue };
+        let m = &solid.mesh;
+        let ends = m.edge_ends();
+        for t in 0..m.triangles.len() {
+            let poly = m.surface_polygon(t, &ends);
+            surfaces += 1;
+            larger += usize::from(poly.len() > 3);
+            if t == 1275 && m.triangles[t].corners == [1191, 1190, 1187] {
+                // collision.md 1.2: the pentagon of 1183, 1184, 1187, 1190 and 1191 (edges stored under 1275, 1277
+                // and 1278).
+                let mut p = poly.clone();
+                p.sort_unstable();
+                assert_eq!(p, [1183, 1184, 1187, 1190, 1191], "the pentagon");
+                found = true;
+            }
+        }
+    }
+    eprintln!("world 1: {larger} of {surfaces} surfaces are larger than their triangle");
+    assert!(found, "surface 1275");
+    assert!(larger * 5 > surfaces, "{larger} of {surfaces}");
+}

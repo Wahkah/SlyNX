@@ -47,6 +47,9 @@ pub struct SceneOptions {
     pub passes: u32,
     /// Deepest chain of placements followed.
     pub max_depth: u32,
+    /// Most records visited, placed copies included ([`MAX_SCENE_RECORDS`] by default): placements that place
+    /// placements can fan out without bound in corrupt data.
+    pub record_budget: u32,
     /// Light classes: 4 up to its last derived class (the executable's class table, object-stream.md 3.1;
     /// [`light_classes`]). Default: class 4 alone.
     pub lights: (i16, i16),
@@ -76,6 +79,7 @@ impl Default for SceneOptions {
             grade: true,
             passes: (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 7) | (1 << 9),
             max_depth: 8,
+            record_budget: MAX_SCENE_RECORDS,
             lights: (LIGHT_CLASS, LIGHT_CLASS),
         }
     }
@@ -89,6 +93,8 @@ pub struct SceneBuild {
     pub material_base: Vec<u32>,
     /// Placements whose group id names no group of the world.
     pub unresolved_placements: u32,
+    /// Records left out once [`SceneOptions::record_budget`] was spent.
+    pub over_budget: u32,
     /// Per material: the texture of frame 0, palette slot 1 (kinds 1 and 7: the grey palette), decoded with the
     /// others.
     pub slot1: Vec<Option<u32>>,
@@ -121,7 +127,12 @@ struct Builder<'w, 'a> {
     texture_cache: BTreeMap<(usize, u16, u16), Option<u32>>,
     used_materials: Vec<bool>,
     by_id: BTreeMap<i32, usize>,
+    /// Records visited so far.
+    visited: u32,
 }
+
+/// Default record budget of a scene build: far above any world on the disc.
+pub const MAX_SCENE_RECORDS: u32 = 1 << 20;
 
 /// Builds the scene of `world`.
 pub fn build(world: &World<'_>, opts: SceneOptions) -> SceneBuild {
@@ -149,6 +160,7 @@ pub fn build(world: &World<'_>, opts: SceneOptions) -> SceneBuild {
             scene: Scene { materials, ..Scene::default() },
             material_base: base,
             unresolved_placements: 0,
+            over_budget: 0,
             slot1,
             self_illum,
             color2,
@@ -163,6 +175,7 @@ pub fn build(world: &World<'_>, opts: SceneOptions) -> SceneBuild {
         texture_cache: BTreeMap::new(),
         used_materials: used,
         by_id,
+        visited: 0,
     };
     for (i, g) in world.groups.iter().enumerate() {
         if g.shared != 0 {
@@ -186,6 +199,11 @@ impl Builder<'_, '_> {
             if !r.loaded(&self.opts.context) || r.removed_at_start() {
                 continue;
             }
+            if self.visited >= self.opts.record_budget {
+                self.out.over_budget += 1;
+                continue;
+            }
+            self.visited += 1;
             match &r.body {
                 Body::Solid(s) => {
                     let world = s.transforms.world_matrices(root, enclosing);

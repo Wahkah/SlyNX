@@ -210,6 +210,62 @@ impl TriMesh {
         false
     }
 
+    /// The tree walk of [`TriMesh::point_inside`], also giving the last node's triangle (the plane that decided).
+    pub fn point_inside_at(&self, p: Vec3) -> Option<(bool, u32)> {
+        let nodes = &self.tree.nodes;
+        if nodes.is_empty() {
+            return None;
+        }
+        let mut i = 0usize;
+        for _ in 0..nodes.len() {
+            let node = nodes[i];
+            let tri = &self.triangles[node.triangle as usize];
+            let front = tri.is_degenerate() || tri.signed_distance(p) >= 0.0;
+            let next = if front { node.positive } else { node.negative };
+            if next == NO_CHILD_WIDE {
+                return Some((!front, node.triangle));
+            }
+            i = next as usize;
+        }
+        None
+    }
+
+    /// The floor below `p` by the collision tree's one-sided rule (collision.md 2; Sly 2 classes/solid-object.md
+    /// 2.2): walking down from `p` along `down` (unit, in the mesh's frame) for at most `max_drop`, the first point
+    /// the tree calls solid, refined to `0.01`, and the triangle whose plane decided it. `None` when `p` is already
+    /// solid or nothing solid is reached. It finds floors whose stored outline does not cover the point.
+    pub fn tree_floor(&self, p: Vec3, down: Vec3, max_drop: f32) -> Option<(f32, u32)> {
+        const STEP: f32 = 8.0;
+        if self.point_inside_at(p)?.0 {
+            return None;
+        }
+        let at = |d: f32| add(p, scale(down, d));
+        let (mut empty, mut solid) = (0.0f32, None);
+        let mut d = STEP.min(max_drop);
+        loop {
+            if self.point_inside_at(at(d)).is_some_and(|s| s.0) {
+                solid = Some(d);
+                break;
+            }
+            empty = d;
+            if d >= max_drop {
+                break;
+            }
+            d = (d + STEP).min(max_drop);
+        }
+        let mut hi = solid?;
+        while hi - empty > 0.01 {
+            let mid = 0.5 * (empty + hi);
+            if self.point_inside_at(at(mid)).is_some_and(|s| s.0) {
+                hi = mid;
+            } else {
+                empty = mid;
+            }
+        }
+        let tri = self.point_inside_at(at(hi))?.1;
+        Some((hi, tri))
+    }
+
     /// The triangle nearest to `p`, with the closest point on it.
     pub fn nearest_triangle(&self, p: Vec3) -> Option<(u32, Vec3)> {
         let best = Cell::new(f32::INFINITY);

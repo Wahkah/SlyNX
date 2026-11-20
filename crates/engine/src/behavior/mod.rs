@@ -30,6 +30,7 @@ pub mod sly2_commands;
 pub mod sly2_pickups;
 pub mod sly2_props;
 pub mod sly2_sensors;
+pub mod sly2_vault;
 pub mod sly2_world;
 pub mod sly3; // Sly 3 hook: Sly 3 behaviours (behavior::sly3)
 pub mod vault;
@@ -181,6 +182,8 @@ pub enum Behavior {
     Sly2Thrown(Box<sly2_world::Thrown>),
     /// Sly 2 sound manager (class 152): queues music streams (action 146).
     Sly2SoundManager(Box<sly2_world::SoundManager>),
+    /// Sly 2 vault (class 78): the dial and the vault flag.
+    Sly2Vault(Box<sly2_vault::Sly2Vault>),
     /// Sly 2 trigger volume (classes 24, 25; interactables.md 4).
     Sly2Volume(Box<sly2_props::TriggerVolume>),
     /// Coin, charm, life token, key, sprint hourglass (pickups-and-progress.md 2).
@@ -284,6 +287,7 @@ macro_rules! dispatch {
             Behavior::Sly2Barrel($b) => $e,
             Behavior::Sly2Thrown($b) => $e,
             Behavior::Sly2SoundManager($b) => $e,
+            Behavior::Sly2Vault($b) => $e,
             Behavior::Sly2Volume($b) => $e,
             Behavior::Custom($b) => $e,
         }

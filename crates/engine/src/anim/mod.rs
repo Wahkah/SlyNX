@@ -8,6 +8,8 @@
 //! | [`skin`] | bind matrices, per-frame bone matrices, per-vertex influences and pose deltas |
 //! | [`xform`] | Sly 2 transform-list rigs: channels by transform kind, mirror pairs, two-bone chains |
 //! | [`sly2`] | Sly 2 clip playback (caller-chosen wrap, events, type-5 jumps) and skinning by byte weights |
+//! | [`sly2_gang`], [`sly2_pose`] | the Sly 2 gang's state → clip tracks; clips and blends applied to the poses |
+//! | [`sly3_pose`] | the Sly 3 crew's state → clip tracks, applied to their poses |
 //!
 //! Parsing of segments is in `formats::anim`.
 
@@ -16,8 +18,10 @@ pub mod playback;
 pub mod rig;
 pub mod skin;
 pub mod sly2;
+pub mod sly2_gang; // Sly 2 pose hook: the gang's clips.
 pub mod sly2_machine; // Sly 2 hook: state machines (class 111), run by game::sly2_anim.
 pub mod sly2_pose;
+pub mod sly3_pose; // Sly 3 pose hook: the crew's clips.
 pub mod xform; // Sly 2 clip playback and skinning (added with the Sly 2 world loader).
 
 pub use curve::{euler_zyx, eval_scalar, eval_vector, sample_scalar, sample_vector};

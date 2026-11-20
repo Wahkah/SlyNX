@@ -69,7 +69,7 @@ A port's walker should reproduce every number in this table and in [disc.md](dis
 
 The floor of v_apt (world 5) has collision in the **level object itself**. That object is class 48, object ID 1, in
 the group `v_apt` (group ID 148660), which no placement places, so its coordinates are world coordinates. It has
-one collision mesh with **1,390 vertices and 1,356 triangles**, transform index −1 (no transform; the positions are
+one collision mesh with **1,390 vertices and 1,356 surfaces**, transform index −1 (no transform; the positions are
 used as they are). Its z range is −244 to 1,929.
 
 In the coffee-shop area (x −3,700 to −1,300, y 2,800 to 7,100) the mesh has 302 vertices. 56 of them lie on the
@@ -85,6 +85,8 @@ floor at z = −39.4, for example:
 The props there stand on that floor: the coffee stations are placed at z −36, the displays at −35 and the roasters
 at −39 or −40.
 
-A walker that finds no floor collision around z −40 has misread this mesh: a vertex offset, the transform index or
-the triangle list. No other class or option supplies the floor. Option set 12 is chosen at load (condition 12), and
+A walker that finds no floor collision around z −40 has misread this mesh. The likeliest cause is treating each
+surface as the triangle of its three corners: surfaces are convex polygons whose outline is their edge list
+([classes/solid-object.md](classes/solid-object.md) 2.1; the coffee-shop floor includes the 10-sided surface 281).
+A vertex offset or the transform index are other possible misreadings. No other class or option supplies the floor. Option set 12 is chosen at load (condition 12), and
 the level object is not filtered by it.

@@ -12,6 +12,8 @@ pub use formats_sly2::options::{Opt, OptionList};
 pub const REMOVE_AT_START: i16 = 27;
 /// A group's copy count in an option set (world-file.md 3.7).
 pub const SET_COPY_COUNT: i16 = 1032;
+/// A further condition an option set adds (conditions.md 1).
+pub const SET_EXTRA_CONDITION: i16 = 1029;
 /// Emitter position kind (classes 27).
 pub const EMITTER_POSITION_27: i16 = 617;
 /// Emitter position kind (classes 30, 31).

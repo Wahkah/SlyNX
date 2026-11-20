@@ -248,8 +248,6 @@ pub struct GangTunables {
     pub height: [f32; 3],
     /// Turn rate on the ground (rad/s).
     pub turn_rate: f32,
-    /// Stick dead zone.
-    pub dead_zone: f32,
     /// Reach for guards (fight stance, pickpocket), objects ahead (Murray's stance, lift) and interactions.
     pub reach: f32,
     /// Throw range (min, max) when the object gives none.
@@ -274,12 +272,6 @@ pub struct GangTunables {
     /// Sly 3: Rocket Boots' speed factor on the ordinary movement (the run sets no speed of its own and plays state
     /// 0's animation; the speed is to be measured in play, gadgets.md 6.9).
     pub rocket_factor: f32,
-    /// Sly 3: Be The Ball's rolling speed and how fast the roll eases toward it, per second (not given).
-    pub ball: [f32; 2],
-    /// Sly 3: the button that starts a Grapple-Cam grab (not found yet).
-    pub grapple_grab: u32,
-    /// Sly 3: the treasure map's number of heading directions (the map object's field +644; not given).
-    pub map_directions: u32,
 }
 
 impl Default for GangTunables {
@@ -288,7 +280,6 @@ impl Default for GangTunables {
             radius: [30.0, 45.0, 35.0],
             height: [90.0, 80.0, 60.0],
             turn_rate: 12.0,
-            dead_zone: 0.15,
             reach: 200.0,
             throw_range: [200.0, 1500.0],
             throw_time: 1.5,
@@ -300,9 +291,6 @@ impl Default for GangTunables {
             combo_window: 0.35,
             combo_clip_time: 0.5,
             rocket_factor: 1.0,
-            grapple_grab: super::input::button::CROSS,
-            ball: [800.0, 2.0],
-            map_directions: 8,
         }
     }
 }

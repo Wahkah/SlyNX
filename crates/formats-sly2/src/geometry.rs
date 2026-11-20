@@ -198,11 +198,12 @@ fn read_rigid(r: &mut Reader<'_>) -> Result<BodyParts> {
             let count = r.i32()?;
             let shader = r.i32()?;
             let flags = r.i32()?;
-            if count < 0 {
-                return Err(r.corrupt("negative strip-list vertex count"));
+            // At most 255 positions, so far fewer strip entries; anything larger is corrupt.
+            if !(0..=MAX_STRIP_ENTRIES as i32).contains(&count) {
+                return Err(r.corrupt("strip-list vertex count out of range"));
             }
             lists.push(StripList { count: count as u32, shader, flags, first });
-            first += count as u32;
+            first = first.checked_add(count as u32).ok_or_else(|| r.corrupt("strip lists too long"))?;
         }
         let p = r.u8()?;
         let pos_at = r.pos() as u32;
@@ -384,6 +385,24 @@ impl MeshSet {
 /// Decodes a strip (geometry.md 8): vertex `i` (from 2) closes `(i−2, i−1, i)` unless its break bit is set, with
 /// the winding alternating with `i`; triangles repeating a position are dropped. `bit(i)` reads the break bit of
 /// strip vertex `i`. Returns triangles of position indices.
+/// The triangles of strip list `count` entries long at `start` in `data`, keeping only those whose indices are below
+/// `positions` (the group's vertex count); empty if the list lies outside `data`.
+pub fn strip_triangles_at(
+    data: &[u8],
+    start: usize,
+    count: usize,
+    positions: usize,
+    bit: impl Fn(usize) -> bool,
+) -> Vec<[u8; 3]> {
+    let Some(idx) = start.checked_add(count).and_then(|end| data.get(start..end)) else { return Vec::new() };
+    let mut t = strip_triangles(idx, bit);
+    t.retain(|tri| tri.iter().all(|&i| (i as usize) < positions));
+    t
+}
+
+/// Most entries in one strip list.
+pub const MAX_STRIP_ENTRIES: u32 = 0x10000;
+
 pub fn strip_triangles(indices: &[u8], bit: impl Fn(usize) -> bool) -> Vec<[u8; 3]> {
     let mut out = Vec::new();
     for i in 2..indices.len() {
@@ -408,19 +427,19 @@ impl Group {
     /// Triangles of every strip list of the group: (shader index, triangles of position indices).
     pub fn triangles(&self, data: &[u8]) -> Vec<(i32, Vec<[u8; 3]>)> {
         match self {
-            Group::Rigid { lists, indices_at, breaks_at, .. } => lists
+            Group::Rigid { lists, indices_at, breaks_at, positions, .. } => lists
                 .iter()
                 .map(|l| {
                     let start = *indices_at as usize + l.first as usize;
-                    let idx = &data[start..start + l.count as usize];
                     let first = l.first as usize;
-                    (l.shader, strip_triangles(idx, |i| break_bit(data, *breaks_at as usize, first + i)))
+                    let bit = |i| break_bit(data, *breaks_at as usize, first + i);
+                    (l.shader, strip_triangles_at(data, start, l.count as usize, *positions as usize, bit))
                 })
                 .collect(),
-            Group::Indexed { shader, count, indices_at, breaks_at, .. } => {
-                let start = *indices_at as usize;
-                let idx = &data[start..start + *count as usize];
-                alloc::vec![(*shader as i32, strip_triangles(idx, |i| break_bit(data, *breaks_at as usize, i)))]
+            Group::Indexed { shader, count, indices_at, breaks_at, positions, .. } => {
+                let bit = |i| break_bit(data, *breaks_at as usize, i);
+                let t = strip_triangles_at(data, *indices_at as usize, *count as usize, *positions as usize, bit);
+                alloc::vec![(*shader as i32, t)]
             }
             Group::Outline { .. } => Vec::new(),
         }
@@ -505,5 +524,25 @@ mod tests {
         let data = [0b0000_0011u8, 0, 0, 0, 0x01, 0, 0, 0];
         assert!(break_bit(&data, 0, 0) && break_bit(&data, 0, 1) && !break_bit(&data, 0, 2));
         assert!(break_bit(&data, 0, 32) && !break_bit(&data, 0, 33));
+    }
+
+    #[test]
+    fn strip_indices_past_the_positions_are_dropped() {
+        // Positions 0..3: the strip (0, 1, 2, 7) gives (0, 1, 2) and drops (1, 2, 7).
+        let data = [0u8, 1, 2, 7];
+        assert_eq!(strip_triangles_at(&data, 0, 4, 3, |_| false), [[0, 1, 2]]);
+        // A list outside the data, or one whose end overflows: no triangles, no panic.
+        assert!(strip_triangles_at(&data, 2, 4, 255, |_| false).is_empty());
+        assert!(strip_triangles_at(&data, usize::MAX, 4, 255, |_| false).is_empty());
+    }
+
+    #[test]
+    fn huge_strip_lists_are_refused() {
+        // A rigid body: flags 0, 2 bytes, no bones, no fog block, empty vertex map, one group with one strip list of
+        // 2^31 - 1 entries.
+        let mut b = alloc::vec![0u8, 0, 0, 0, 0xFF, 0, 0, 1, 0, 1];
+        b.extend_from_slice(&i32::MAX.to_le_bytes());
+        b.extend_from_slice(&[0; 8]);
+        assert!(read_rigid(&mut Reader::new(&b)).is_err());
     }
 }

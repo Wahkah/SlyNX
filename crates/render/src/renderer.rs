@@ -65,6 +65,9 @@ pub struct Renderer<B: Backend> {
     light: [f32; 4],
     fog: Option<Fog>,
     fog_rising: bool,
+    /// The performance text ([`crate::perf`]): its capacity (0: off), and the overlay of the committed level.
+    perf_chars: usize,
+    perf_text: Option<crate::overlay::TextOverlay>,
     darkening: f32,
     /// Outline width in pixels of a 448-line frame (scaled with the target height).
     outline_width: f32,
@@ -198,6 +201,8 @@ impl<B: Backend> Renderer<B> {
             light: default_light(),
             fog: None,
             fog_rising: false,
+            perf_chars: 0,
+            perf_text: None,
             darkening: 1.0,
             outline_width: DEFAULT_OUTLINE_WIDTH,
             bone_store: Vec::new(),
@@ -309,8 +314,31 @@ impl<B: Backend> Renderer<B> {
 
     /// Uploads the arena and texture pools in one go and frees their CPU copies.
     pub fn commit(&mut self) -> Result<(), RenderError> {
+        // The performance text rides along with every level, once enabled.
+        if self.perf_chars > 0 && self.perf_text.is_none() && !self.res.committed {
+            self.perf_text = Some(crate::overlay::TextOverlay::new(self, self.perf_chars)?);
+        }
         let backend = &mut self.backend;
         self.res.commit_with(|level| backend.upload_level(level))
+    }
+
+    /// Draws the performance text ([`crate::perf`]) with every level committed from now on (up to `chars`
+    /// characters; the next commit adds it).
+    pub fn enable_perf_text(&mut self, chars: usize) {
+        self.perf_chars = chars;
+    }
+
+    /// Shows `lines` as the performance text in the bottom-left corner (an empty slice hides it). Does nothing until
+    /// a level was committed with the text enabled.
+    pub fn set_perf_text(&mut self, lines: &[&str]) -> Result<(), RenderError> {
+        let Some(mut t) = self.perf_text.take() else { return Ok(()) };
+        let (_, h) = self.backend.target_size();
+        let scale = if h >= 1000 { 3 } else { 2 };
+        let height = lines.len() as u32 * crate::overlay::LINE_HEIGHT * scale;
+        let y = h.saturating_sub(height + 8 * scale);
+        let result = t.set_text(self, lines, 8 * scale, y, scale, [255, 255, 160, 255]);
+        self.perf_text = Some(t);
+        result
     }
 
     /// Forgets all resources and instances (the GPU data is replaced by the next `commit`).
@@ -324,6 +352,7 @@ impl<B: Backend> Renderer<B> {
         self.morph_store.clear();
         self.morph_waste = 0;
         self.fog_rising = false;
+        self.perf_text = None;
     }
 
     /// (vertices, indices) in the committed arena.
@@ -361,6 +390,7 @@ impl<B: Backend> Renderer<B> {
             sphere: None,
             sort_key: None,
             weights: None,
+            shader_light: None,
             fog: 1.0,
             uv_rect: None,
             flat: false,
@@ -447,6 +477,17 @@ impl<B: Backend> Renderer<B> {
             }
         };
         self.bone_store[start..start + bones.len()].copy_from_slice(bones);
+        Ok(())
+    }
+
+    /// Lights a [`crate::Lighting::TwoColour`] instance in the vertex shader (per frame, as it moves) instead of
+    /// from vertex weights: the light block is matrices `first .. first + LIGHT_BLOCK_MATRICES` of the bones given
+    /// with [`Renderer::set_bones`] (rows: shadow colour RGB and the starting fourth channel; material colour RGBA
+    /// on 0..255; one-pass flag; then per light, four of them: position or direction and point flag, colour, angular
+    /// offset, angular scale, distance factor and in-use flag; `crate::frame` and the shader read it). `None` goes
+    /// back to the instance's weights.
+    pub fn set_shader_light(&mut self, id: InstanceId, first: Option<u32>) -> Result<(), RenderError> {
+        self.rec_mut(id)?.shader_light = first;
         Ok(())
     }
 

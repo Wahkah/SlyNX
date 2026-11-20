@@ -6,7 +6,8 @@
 //! | [`turret`] | 69 turrets | 68 turret |
 //! | [`hack`] | 72 hack ship, 73 enemies, 75 dock | 74 hack ship, 75 enemies, 77 dock |
 //! | [`car`] | 77 combat car (with 108 ammo) | 81 truck, 85 remote cars |
-//! | [`craft`] | | 82 biplanes, 83 raft, 84 jolly boat, 87 swimmer, 88 ships |
+//! | [`air`] | | 82 biplanes (player and computer flight, shots) |
+//! | [`craft`] | | 83 raft, 84 jolly boat, 87 swimmer, 88 ships |
 //! | [`dance`] | 121 dance director (the scoring of 5) | |
 //! | [`boss`] | 59 to 67 bosses' hit points and block | |
 //!
@@ -18,11 +19,13 @@
 //! Not covered: Sly 2's class-50 machines (the RC chopper, the tank) are flown by their scripts (2); the Sly 3 lock
 //! minigame (79) has no rules in the spec; the Sly 3 safe (80) is `behavior::sly3::devices::Safe`.
 
+pub mod air;
 pub mod boss;
 pub mod car;
 pub mod craft;
 pub mod dance;
 pub mod hack;
+pub mod shots;
 pub mod turret;
 
 use alloc::boxed::Box;
@@ -258,7 +261,7 @@ pub fn for_class(world: &World, h: Handle) -> Option<Box<dyn ClassBehavior>> {
             74 => Some(Box::new(hack::HackShip::new(world, h, Title::Sly3))),
             75 => Some(Box::new(hack::HackEnemy::new(world, h, Title::Sly3))),
             81 | 85 => Some(Box::new(car::Car::new(world, h, class))),
-            82 => Some(Box::new(craft::Biplane::new(world, h))),
+            82 => Some(Box::new(air::Biplane::new(world, h))),
             83 | 84 => Some(Box::new(craft::Raft::new(world, h, class == 84))),
             87 => Some(Box::new(craft::Swimmer::new(world, h))),
             88 => Some(Box::new(craft::Ship::new(world, h))),

@@ -118,6 +118,7 @@ typedef struct SlynxRenderStats {
                                 // the slot ran out and more was allocated
     uint32_t reserved;
     uint64_t wait_ns;           // time blocked on the frame slot's fence
+    uint64_t gpu_ns;            // GPU time of the latest finished frame (FRAME_SLOTS behind); 0 when unknown
 } SlynxRenderStats;
 
 // Creates the renderer on the platform's display (slynx_display_init must have run). max_instances bounds the

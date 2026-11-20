@@ -30,12 +30,17 @@ pub struct CameraZone {
     pub framing: Framing,
     /// Its frame.
     pub frame: ZoneFrame,
+    /// Sly 2 / Sly 3: the zone's mesh-and-tree volume, used instead of `volume` when set (`camera::sly2`).
+    pub tree: Option<super::sly2::TreeVolume>,
 }
 
 impl CameraZone {
     /// Whether the zone contains `p`.
     pub fn contains(&self, p: Vec3) -> bool {
-        self.volume.contains(p)
+        match &self.tree {
+            Some(t) => t.contains(p),
+            None => self.volume.contains(p),
+        }
     }
 }
 
@@ -148,6 +153,7 @@ pub fn zones_from_stream(data: &[u8], stream: &ObjectStream, table: &OptionTable
             air_takeover,
             framing,
             frame,
+            tree: None,
         });
     }
     Ok(out)
@@ -197,6 +203,7 @@ pub fn box_zone(record: u32, min: Vec3, max: Vec3, framing: Framing, frame: Zone
         air_takeover: false,
         framing,
         frame,
+        tree: None,
     }
 }
 

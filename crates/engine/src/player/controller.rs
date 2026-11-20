@@ -227,6 +227,10 @@ pub struct Player {
     pub position: Vec3,
     /// Velocity.
     pub velocity: Vec3,
+    /// The left stick's reader (player-moves.md 1.2), and this frame's (direction, deflection).
+    pub stick_reader: super::stick::StickReader,
+    /// See [`Player::stick_reader`].
+    pub stick_now: ([f32; 2], f32),
     /// Facing heading (radians about +z, 0 = +x).
     pub yaw: f32,
     /// State.
@@ -297,6 +301,8 @@ impl Player {
             position,
             velocity: [0.0; 3],
             yaw,
+            stick_reader: super::stick::StickReader::default(),
+            stick_now: ([0.0; 2], 0.0),
             state: State::Air { target: None },
             vitals: Vitals::default(),
             reward_mask: 0,
@@ -362,18 +368,14 @@ impl Player {
         self.state = s;
     }
 
-    /// The stick after the dead zone, response curve and `cap`: (unit world direction, deflection 0..1).
+    /// The stick as the game reads it this frame ([`super::stick`], player-moves.md 1.2), with `cap`: (unit world
+    /// direction, deflection 0..1).
     pub fn stick(&self, input: &PlayerInput, cap: f32) -> (Vec3, f32) {
-        let w = input.world_stick();
-        let raw = length(w).min(1.0);
-        let dz = self.tun.dead_zone;
-        if raw <= dz {
+        let (dir, u) = self.stick_now;
+        if u <= 0.0 {
             return ([0.0; 3], 0.0);
         }
-        let mut u = (raw - dz) / (1.0 - dz);
-        if self.tun.stick_exponent != 1.0 {
-            u = crate::math::exp(self.tun.stick_exponent * ln_approx(u));
-        }
+        let w = PlayerInput { stick: dir, ..*input }.world_stick();
         (normalize(w), u.min(cap))
     }
 
@@ -522,6 +524,7 @@ impl Player {
     /// One frame.
     pub fn update(&mut self, dt: f32, input: &PlayerInput, world: &PlayerWorld<'_>) -> PlayerOutput {
         let mut out = PlayerOutput { time_scale: 1.0, ..Default::default() };
+        self.stick_now = self.stick_reader.read_axes(input.stick);
         self.state_time += dt;
         self.flash = (self.flash - dt).max(0.0);
         self.update_power(dt, input, &mut out);
@@ -1508,20 +1511,6 @@ impl Player {
             }),
         }
     }
-}
-
-/// `ln x` for x in (0, 1], in f64 (only the stick response curve uses it).
-fn ln_approx(x: f32) -> f32 {
-    if x <= 0.0 {
-        return -88.0;
-    }
-    // Newton on e^y = x.
-    let mut y = 0.0f32;
-    for _ in 0..30 {
-        let e = crate::math::exp(y);
-        y -= (e - x) / e;
-    }
-    y
 }
 
 /// The distance along a polyline nearest to `p`, and that point.

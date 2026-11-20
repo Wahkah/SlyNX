@@ -93,7 +93,7 @@ fn machines_walk_to_their_goals_in_the_hub() {
     let p = sly2_anim::with(&mut g.world, |a, w| a.find_machine(w, house, machine)).flatten().expect("a playback");
     let state = |g: &Game| g.world.sly2.as_deref().unwrap().anim.machines[&p.index()].run.state;
     eprintln!("safe house machine starts in state {}", state(&g));
-    sly2_anim::with(&mut g.world, |a, _| a.goal(p, 10, false));
+    sly2_anim::with(&mut g.world, |a, _| a.goal(p, 10));
     for _ in 0..600 {
         g.step_fixed(&input);
         if state(&g) == 10 {
@@ -101,6 +101,12 @@ fn machines_walk_to_their_goals_in_the_hub() {
         }
     }
     assert_eq!(state(&g), 10, "the computer state is reached");
+    // Method 379 walks the route at once: each state entered raises event 8 (logged in `entered`).
+    let before = g.world.sly2.as_deref().unwrap().anim.entered.len();
+    sly2_anim::with(&mut g.world, |a, w| a.jump(w, p, 7));
+    let a = &g.world.sly2.as_deref().unwrap().anim;
+    assert_eq!(a.machines[&p.index()].run.state, 7);
+    assert!(a.entered.len() > before, "states entered on the way");
     // The characters' speaker machines: a mouth goal (target 5) from a voice line.
     for class in [53i16, 54, 55] {
         let Some(speaker) = sly2_anim::speaker(&g.world, class) else { continue };

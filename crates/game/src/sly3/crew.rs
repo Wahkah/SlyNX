@@ -81,7 +81,10 @@ pub fn collision_from_world(world: &World) -> CollisionWorld {
                 s.collision
                     .iter()
                     .filter(|p| !p.mesh.is_empty())
-                    .map(|p| cw.add_shape(Shape { main: TriMesh::new_wide(&p.mesh, p.tree.clone()), camera: None }))
+                    .map(|p| {
+                        let mesh = formats_sly3::collision::with_polygons(&p.mesh);
+                        cw.add_shape(Shape { main: TriMesh::new_wide(&mesh, p.tree.clone()), camera: None })
+                    })
                     .collect()
             })
             .clone();
@@ -109,14 +112,30 @@ pub struct CrewPlayer {
     pub arrival_id: i32,
     /// Classes counted as checkpoints (40 and the classes derived from it).
     pub checkpoint_classes: Vec<i16>,
-    collision: Option<CollisionWorld>,
-    handles: [Option<Handle>; 3],
+    /// The collision world the crew moves through (built on load).
+    pub(crate) collision: Option<CollisionWorld>,
+    /// The core three's objects (Sly, Murray, Bentley).
+    pub(crate) handles: [Option<Handle>; 3],
+    /// Sly 3 pose hook: the core three's clips by state (`engine::anim::sly3_pose`).
+    pub clips: engine::anim::sly3_pose::CrewClips,
+    /// Sly 3 hook (gadget grids): the item table in the gang's form (`Sly3ItemTable::to_item_table`), when the
+    /// executable gave one; the crew's slots and ownership read it.
+    pub items: Option<engine::gang::ItemTable>,
 }
 
 impl CrewPlayer {
     /// A crew arriving at `arrival_id`, checkpoints being objects of `checkpoint_classes`.
     pub fn new(arrival_id: i32, checkpoint_classes: Vec<i16>) -> CrewPlayer {
-        CrewPlayer { crew: None, arrival: None, arrival_id, checkpoint_classes, collision: None, handles: [None; 3] }
+        CrewPlayer {
+            crew: None,
+            arrival: None,
+            arrival_id,
+            checkpoint_classes,
+            collision: None,
+            handles: [None; 3],
+            clips: Default::default(), // Sly 3 pose hook
+            items: None,
+        }
     }
 
     /// The member being played.
@@ -155,6 +174,15 @@ impl CrewPlayer {
 }
 
 impl PlayerSystem for CrewPlayer {
+    /// Sly 3 hook (gadget grids): the core characters, for the assignment screen.
+    fn gang_mut(&mut self) -> Option<&mut engine::gang::Gang> {
+        self.crew.as_mut().map(|c| &mut c.gang)
+    }
+
+    fn gang(&self) -> Option<&engine::gang::Gang> {
+        self.crew.as_ref().map(|c| &c.gang)
+    }
+
     fn load(&mut self, world: &mut World, _collision: &dyn CollisionQueries) {
         self.collision = Some(collision_from_world(world));
         let first = |class: i16| world.slots_of_class(class).first().and_then(|&s| world.handle(s));
@@ -207,9 +235,18 @@ impl PlayerSystem for CrewPlayer {
         }
         // The current player first: `Crew::new` plays the first core member.
         present.sort_by_key(|p| p.0 != current);
-        let mut crew = Crew::new(&present, shared());
+        let mut sh = shared();
+        if let Some(t) = &self.items {
+            sh.items = t.clone(); // Sly 3 hook (gadget grids): the Sly 3 item table.
+        }
+        let mut crew = Crew::new(&present, sh);
+        // Sly's combo definitions (class 148 under his object, characters.md 5).
+        let combos = engine::gang::combo::ComboSet::for_class(world, Member::Sly.class());
         for c in &mut crew.gang.members {
             c.leave_ground();
+            if c.who == Who::Sly {
+                c.combo_defs = combos.clone();
+            }
         }
         self.crew = Some(crew);
         self.write_back(world);
@@ -220,6 +257,15 @@ impl PlayerSystem for CrewPlayer {
         let idle = FrameInput::default();
         let input = if world.shared.driving.is_some() { &idle } else { input };
         let (Some(crew), Some(cw)) = (self.crew.as_mut(), self.collision.as_ref()) else { return };
+        // Bouncers' launches (alarms-sensors.md 5): the launched member leaves the ground at the launch velocity.
+        for l in core::mem::take(&mut world.shared.launches) {
+            let Some(k) = self.handles.iter().position(|&h| h == Some(l.who)) else { continue };
+            let who = [Who::Sly, Who::Murray, Who::Bentley][k];
+            if let Some(c) = crew.gang.get_mut(who) {
+                c.leave_ground();
+                c.velocity = l.velocity;
+            }
+        }
         for (b, m) in [(Buttons::LEFT, Member::Sly), (Buttons::UP, Member::Murray), (Buttons::RIGHT, Member::Bentley)] {
             if input.pressed & b.0 != 0 {
                 crew.switch_to(m);
@@ -227,19 +273,31 @@ impl PlayerSystem for CrewPlayer {
         }
         let yaw = world.shared.camera_yaw;
         let gi = GangInput {
-            stick: input.left,
+            // Gang hook: the binocucom's view takes the left stick.
+            stick: if engine::gang::binocucom_on(world) { [0.0; 2] } else { input.left },
             camera_yaw: yaw,
             held: gang_buttons(input.buttons),
             pressed: gang_buttons(input.pressed),
             camera_eye: world.shared.camera_eye,
             camera_forward: [engine::math::cos(yaw), engine::math::sin(yaw), 0.0],
+            // Gang hook: the gang's stick reader fills the deflection (`player::stick`).
+            deflection: 0.0,
         };
         let gw =
             GangWorld { cw, filter: QueryFilter::default(), targets: &[], help: 0.0, safehouse: false, pools: &[] };
+        let events = if step.game_dt > 0.0 { crew.update(step.game_dt, &gi, &gw) } else { Vec::new() };
+        let player = self.handles[crew.gang.player.index()];
+        // Sly 3 pose hook: the core three's clips for their states, posed now.
         if step.game_dt > 0.0 {
-            crew.update(step.game_dt, &gi, &gw);
+            self.clips.drive(world, &crew.gang.members, &self.handles, &events, step.game_dt);
         }
         self.write_back(world);
+        // Gang hook: R3's binocucom on the played member (camera.md 6).
+        if let Some(me) = player
+            && events.iter().any(|(_, e)| matches!(e, engine::gang::GangEvent::Binocucom))
+        {
+            engine::gang::toggle_binocucom(world, me, false);
+        }
     }
 
     fn place(&mut self, world: &mut World, transform: Affine) {

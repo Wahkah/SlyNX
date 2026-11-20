@@ -526,3 +526,31 @@ fn gadget_and_pocket_tables() {
     assert_eq!(t.items[22].owner(), Some(Member::Murray), "Temporal Lock moved to Murray");
     assert_eq!(shared.items.drain(32), Some(3.0));
 }
+
+#[test]
+fn gadget_grids() {
+    if disc_path().is_none() {
+        return;
+    }
+    use engine::gang::sly3::{Sly3ItemTable, grids_from_executable};
+    let exe = &data().exe;
+    let t = Sly3ItemTable::from_executable(exe).unwrap();
+    let grids = grids_from_executable(exe, &t).unwrap();
+    // Three grids, one per core character, every cell's item owned by that character.
+    assert_eq!(grids.iter().map(|g| (g.0, g.2.len())).collect::<Vec<_>>(), vec![(1062, 15), (1063, 11), (1064, 8)]);
+    for (screen, who, cells) in &grids {
+        eprintln!("grid {screen}: {who:?}, items {:?}", cells.iter().map(|c| c.item).collect::<Vec<_>>());
+        for c in cells {
+            assert_eq!(t.items[c.item as usize].owner(), Some(*who), "screen {screen} item {}", c.item);
+            // The labels are three in a row (open, owned, selected = n + 1, n, n + 2), as Sly 2's.
+            assert_eq!([c.parts[0] - 1, c.parts[2] - 2], [c.parts[1], c.parts[1]]);
+            // Assignable exactly when the item goes on a button.
+            assert_eq!(c.assignable(), t.items[c.item as usize].button != -1, "item {}", c.item);
+        }
+    }
+    let whos: Vec<Member> = grids.iter().map(|g| g.1).collect();
+    assert!(whos.contains(&Member::Sly) && whos.contains(&Member::Bentley) && whos.contains(&Member::Murray));
+    // The first cell of screen 1062: item 25 at (165, 155), labels 1174, 1173, 1175, assignable.
+    let c = grids[0].2[0];
+    assert_eq!((c.item, c.parts, c.position, c.flags), (25, [1174, 1173, 1175], [165.0, 155.0], 1));
+}

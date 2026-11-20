@@ -83,6 +83,46 @@ fn requests_change_worlds() {
 }
 
 #[test]
+fn the_callers_world_wins_over_a_pending_respawn() {
+    let Some(path) = require_disc(Game::Sly1, "the_callers_world_wins_over_a_pending_respawn") else { return };
+    let mut s = session(&path);
+    let paris = s.find_world("Paris").unwrap();
+    s.load_world(paris, None, 0).unwrap();
+    // A respawn the world asked for starts a wipe back into Paris; the caller then asks for the hideout.
+    s.game.as_mut().unwrap().world.request(Request::Respawn);
+    s.update(&FrameInput::default(), 1.0 / 60.0).unwrap();
+    assert!(s.wiping());
+    let hideout = s.find_world("hideout").unwrap();
+    s.go_to(hideout, None, 1);
+    for _ in 0..600 {
+        s.update(&FrameInput::default(), 1.0 / 60.0).unwrap();
+        if !s.wiping() {
+            break;
+        }
+    }
+    assert_eq!(s.current().unwrap().index, hideout);
+}
+
+#[test]
+fn an_unloaded_session_renders_and_loads_again() {
+    let Some(path) = require_disc(Game::Sly1, "an_unloaded_session_renders_and_loads_again") else { return };
+    let mut s = session(&path);
+    let paris = s.find_world("Paris").unwrap();
+    s.load_world(paris, None, 0).unwrap();
+    s.update(&FrameInput::default(), 1.0 / 60.0).unwrap();
+    s.render(16.7).unwrap();
+    // The reset a failed upload makes: no world, and frames still update and render.
+    s.unload();
+    assert!(s.current().is_none() && s.game.is_none());
+    s.update(&FrameInput::default(), 1.0 / 60.0).unwrap();
+    s.render(16.7).unwrap();
+    s.load_world(paris, None, 0).unwrap();
+    s.update(&FrameInput::default(), 1.0 / 60.0).unwrap();
+    s.render(16.7).unwrap();
+    assert_eq!(s.current().unwrap().index, paris);
+}
+
+#[test]
 fn movies_play_hold_the_world_and_skip() {
     let Some(path) = require_disc(Game::Sly1, "movies_play_hold_the_world_and_skip") else { return };
     let mut s = session_with(&path, SessionOptions { wipes: false, ..Default::default() });

@@ -85,7 +85,27 @@ decompresses to `ZRB.`, a `u16` version **7** (Sly 2: 6), then the element set a
 | 1389 | job help (4686 "Jobs", 4687 "more jobs", 4684 "Goals", 5589 "Complete!", 5590 "Not complete") | 825,856: 13,282 → 39,576 |
 
 The shop file has **no sell page**: none of its 20 text elements is a selling text (Sly 2's file had "Sell Loot")
-[D]. Which grid belongs to which character is open.
+[D]. 1062 is Sly's grid, 1063 Bentley's and 1064 Murray's ([gadgets.md](gadgets.md) 2) [X].
+
+### 2.1 Screen sets in Sly 2's form [D: from the implementation's parse; partly re-checked]
+
+The element sets of Sly 3 screens map onto Sly 2's layout ([../sly2/user-interface.md](../sly2/user-interface.md) 3)
+with these differences:
+
+- A **group reference** is an item of kind 4: an `s32`, then the group (Sly 2: a `u16` sprite number).
+- Each **key placement** is:
+  - the element;
+  - 4 bytes: slot, an unknown byte, a flag, and a colour-pair index, where 127 means none (Sly 2: an `s16` with −1
+    for none);
+  - an `s32`;
+  - the matrix.
+- The **trailing bytes** of a key are the slots that the key empties before its placements apply, as in Sly 2.
+- The **idle marker** is **4869**.
+
+Check made here [D]: 4869 is not an immediate value anywhere in the executable, so it is data, not a fixed label in
+code. In the decompressed v_ext world, the 32-bit value 4869 occurs 31 times inside class-158 screen objects, and
+the 16-bit value 32 times. The rest of the layout was not re-parsed here. It rests on the implementation, which
+parses the screens to their last byte.
 
 ## 3. Shared inline screens [D] [R]
 
@@ -132,7 +152,7 @@ are labels of the same kind ([level-flow.md](level-flow.md) 7).
 ## 6. Open questions
 
 1. The roles of 874, 1042, 1054, 1057, 1701, 1909, 9904, 9925, and of classes 159, 160, 162 to 166.
-2. Which gadget grid belongs to which character; the grids' cell tables.
+2. (Settled: the grids and their cell tables, [gadgets.md](gadgets.md) 2.)
 3. Options 1210, 1213, 1236, 1242, 1243.
 4. The game-supplied strings not listed in section 3 (the table has 178 entries [R]).
 5. The HUD gauges and the menus' behaviour beyond Sly 2's.

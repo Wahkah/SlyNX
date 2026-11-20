@@ -2,9 +2,10 @@
 //!
 //! The disc image is the first of: the `disc` line of `sdmc:/switch/SlyNX/user/sly2.cfg`,
 //! `sdmc:/switch/SlyNX/sly2.iso`, and `romfs:/sly2.iso` (where `slynx-pack` puts it). Without one, the reason goes to
-//! the debug log and the program waits for − to quit. The session starts in the `world` of the settings file (a world
-//! id such as `0x41`, or a level-table row) or in the nightclub hub. − quits. A statistics line goes to the log every
-//! five seconds.
+//! the debug log. The session starts at the title (the logo movie, then the title over the boot world; new game,
+//! continue and load with the slots in `saves/sly2/`), or directly in the `world` of the settings file (a world id
+//! such as `0x41`, or a level-table row). Quit Game in the pause menu ends the program. A statistics line goes to the
+//! log every five seconds.
 
 use alloc::format;
 use alloc::string::String;
@@ -97,20 +98,43 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         debug_log(&format!("SlyNX 2: {e}\n"));
     }
     let mut session = Sly2Session::new(backend, disc, 7);
-    // Sly 2 hook: autosaves go to slot 1 in the user folder (saves/sly2/), SlyNX's own format.
-    let store = save::sly2::Sly2Store::new(fs);
-    let slot = save::Slot::new(0).expect("slot 1");
-    session.set_saver(Some(alloc::boxed::Box::new(move |p| store.save(slot, p).map_err(|e| format!("save: {e}")))));
+    // Sly 2 hook (front end): the three slots in the user folder (saves/sly2/, SlyNX's own format), and movies read
+    // through a second reader of the disc image.
+    session.set_slots(alloc::boxed::Box::new(save::sly2::Sly2Store::new(fs)));
+    let movie_settings = settings.clone();
+    session.set_movie_source(alloc::boxed::Box::new(move || {
+        let (root, path) = candidates(&movie_settings).into_iter().find(|(r, p)| fs.exists(*r, p))?;
+        let f = fs.open(root, &path).ok()?;
+        Some(alloc::boxed::Box::new(FsReader(f)) as alloc::boxed::Box<dyn formats::iso::ReadAt>)
+    }));
     session.renderer.set_clock(now);
-    if let Some(row) = start_row(&session, settings.world.as_deref()) {
-        platform.set_cpu_boost(true);
-        if let Err(e) = session.load_row(row) {
-            debug_log(&format!("SlyNX 2: {e}\n"));
+    platform.set_cpu_boost(true);
+    if settings.world.is_some() {
+        // A direct start: the named world; autosaves go to slot 1.
+        let store = save::sly2::Sly2Store::new(fs);
+        let slot = save::Slot::new(0).expect("slot 1");
+        session.set_saver(Some(alloc::boxed::Box::new(move |p| store.save(slot, p).map_err(|e| format!("save: {e}")))));
+        if let Some(row) = start_row(&session, settings.world.as_deref())
+            && let Err(e) = session.load_row(row)
+        {
+            debug_log(&format!(
+                "SlyNX 2: {e}
+"
+            ));
             session.message = Some(e);
         }
-        platform.set_cpu_boost(false);
+    } else if let Err(e) = session.start_front() {
+        // The title (level-flow.md 3): the boot world, the logo movie, then the title.
+        debug_log(&format!(
+            "SlyNX 2: {e}
+"
+        ));
+        session.message = Some(e);
     }
+    platform.set_cpu_boost(false);
 
+    let mut perf = render::perf::PerfMeter::new();
+    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let mut last = now();
     let mut log_at = last + LOG_EVERY_NS;
     let mut paused = false;
@@ -126,16 +150,19 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         let frame_ns = t - last;
         last = t;
         let input = frame_input(platform.input());
-        if input.pressed & platform_switch::platform_api::Buttons::MINUS.0 != 0 {
-            break;
-        }
+        // − is Select (the gadget grid); the pause menu's Quit Game ends the program.
         if !paused && !session.update(&input, frame_ns as f32 * 1e-9) {
             break;
         }
+        // The performance overlay: L + R + ZL; numbers to perf.log in the user folder every five seconds.
+        let _ = perf.show(&mut session.renderer, input.buttons, input.pressed);
         match session.render() {
-            Ok(_) => {}
+            Ok(stats) => perf.record(frame_ns, now() - t, &stats),
             Err(RenderError::LimitReached(what)) => session.message = Some(format!("renderer limit reached: {what}")),
             Err(e) => panic!("render: {e}"),
+        }
+        if perf.log_due() {
+            let _ = platform.fs().write_user(render::perf::LOG_PATH, perf.log().as_bytes());
         }
         if t >= log_at {
             for line in session.status_lines() {

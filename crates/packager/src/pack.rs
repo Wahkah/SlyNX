@@ -277,7 +277,14 @@ pub fn inspect_nro(path: &Path) -> io::Result<NroInfo> {
     let file_len = f.metadata()?.len();
     let mut head = vec![0u8; 0x80];
     f.read_exact(&mut head)?;
+    if head.get(0x10..0x14) != Some(b"NRO0") {
+        return Err(bad("no NRO0 magic at 0x10".into()));
+    }
     let size = u32::from_le_bytes(head[0x18..0x1C].try_into().unwrap()) as u64;
+    // The image must fit in the file, with the asset header after it, before anything is allocated for it.
+    if size < 0x80 || size.saturating_add(nro::ASSET_HEADER_SIZE) > file_len {
+        return Err(bad(format!("image size {size:#x} does not fit in a {file_len:#x}-byte file")));
+    }
     let mut image = vec![0u8; size as usize];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut image)?;
@@ -289,8 +296,15 @@ pub fn inspect_nro(path: &Path) -> io::Result<NroInfo> {
     let mut ah = vec![0u8; nro::ASSET_HEADER_SIZE as usize];
     f.read_exact(&mut ah)?;
     let assets = AssetLayout::parse(&ah)?;
-    if size + assets.len() != file_len {
-        return Err(bad(format!("asset section ends at {:#x}, file is {file_len:#x} bytes", size + assets.len())));
+    let end = size.saturating_add(assets.len());
+    if end != file_len {
+        return Err(bad(format!("asset section ends at {end:#x}, file is {file_len:#x} bytes")));
+    }
+    // Every part inside the file (a part may claim more than the layout's end).
+    for (what, (off, len)) in [("icon", assets.icon), ("NACP", assets.nacp), ("RomFS", assets.romfs)] {
+        if size.saturating_add(off).saturating_add(len) > file_len {
+            return Err(bad(format!("{what} runs past the end of the file")));
+        }
     }
     let mut read_part = |(off, len): (u64, u64)| -> io::Result<Vec<u8>> {
         let mut v = vec![0u8; len as usize];
@@ -307,7 +321,13 @@ pub fn inspect_nro(path: &Path) -> io::Result<NroInfo> {
     let nacp = Nacp::parse(&nacp_bytes).expect("size checked");
     let romfs_offset = size + assets.romfs.0;
     let (romfs, romfs_files) = if assets.romfs.1 > 0 {
+        let romfs_end = romfs_offset + assets.romfs.1;
         let r = RomfsReader::open(|off, len| {
+            // RomFS metadata names its own offsets: keep each read inside its part.
+            let end = romfs_offset.checked_add(off).and_then(|s| s.checked_add(len as u64));
+            if end.is_none_or(|e| e > romfs_end) {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "RomFS read past its part"));
+            }
             let mut v = vec![0u8; len];
             f.seek(SeekFrom::Start(romfs_offset + off))?;
             f.read_exact(&mut v)?;
@@ -372,6 +392,35 @@ mod tests {
         let text = String::from_utf8(read_span(&r.nro, info.romfs_offset + m.offset, m.size)).unwrap();
         assert!(text.contains("game=sly1-usa\n") && text.contains("image=romfs:/sly1.iso\n"), "{text}");
         assert!(!dir.join("out/switch/SlyNX/slynx-sly1.nro.part").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn inspect_refuses_forged_sizes() {
+        let dir = scratch("forged");
+        let (iso, program, _) = inputs(&dir);
+        let opts = PackOptions::new(&iso, dir.join("out"), &program);
+        let r = build_package(&opts, &GAMES[0], &[1; 32], |_, _| {}).unwrap();
+        let good = fs::read(&r.nro).unwrap();
+        let size = u32::from_le_bytes(good[0x18..0x1C].try_into().unwrap()) as usize;
+        let forged = dir.join("forged.nro");
+        let try_with = |patch: &dyn Fn(&mut Vec<u8>)| {
+            let mut b = good.clone();
+            patch(&mut b);
+            fs::write(&forged, &b).unwrap();
+            inspect_nro(&forged)
+        };
+        // An image size near 4 GiB: refused before anything that size is allocated.
+        assert!(try_with(&|b| b[0x18..0x1C].copy_from_slice(&0xFFFF_FFF0u32.to_le_bytes())).is_err());
+        // No NRO magic; a file cut short inside the image.
+        assert!(try_with(&|b| b[0x10] = b'X').is_err());
+        assert!(try_with(&|b| b.truncate(0x100)).is_err());
+        // A RomFS part that claims to run past the end of the file, or that overflows.
+        let romfs_len = size + 16 + 2 * 16;
+        assert!(try_with(&|b| b[romfs_len..romfs_len + 8].copy_from_slice(&(1u64 << 40).to_le_bytes())).is_err());
+        assert!(try_with(&|b| b[romfs_len..romfs_len + 8].copy_from_slice(&u64::MAX.to_le_bytes())).is_err());
+        // The untouched package still inspects.
+        assert!(try_with(&|_| {}).is_ok());
         fs::remove_dir_all(&dir).unwrap();
     }
 

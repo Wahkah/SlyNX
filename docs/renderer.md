@@ -136,6 +136,12 @@ own, except that overlapping volumes paint once instead of twice. The stencil is
   B.a` with alpha `T0.a x A.a`: T0 (`palettes[0]`) is the grey image, T1 the texture. It is flagged in bit 24 of the
   instance record's layers word. On a placed mesh each piece's grey layer rides in its placement record and the
   weights base moves to the record's morph field (placed meshes are never morphed).
+- Per-frame two colours (moving characters): `set_shader_light(id, Some(k))` makes the vertex shader compute A and B
+  from a 15-row light block stored as matrices `k .. k + 5` of the instance's bones (shadow colour, the starting
+  fourth channel, material colour, one-pass flag, and four lights: position or direction, colour, angular offset,
+  scale, distance factor). The block is rebuilt on the CPU only when the character moves (`stage::light::light_block`;
+  `block_two_colours` is the CPU reference the tests hold equal to the per-frame path); the GPU cost is a few dozen
+  vertex-shader instructions per vertex, and nothing is uploaded but 15 rows per part.
 - Fog (`set_fog`): per vertex, `t = clamp((1/near - 1/z) / (1/near - 1/far), 0, 1)` with `z` the distance from the
   camera, `fog = clamp(t * cap * strength * instance factor, 0, 1)` (`set_fog_factor`), then per pixel the colour
   moves toward the fog colour. Not for overlays or `no_fog` materials.
@@ -457,9 +463,44 @@ Keeping the order costs merges: without it the same views took about 1,900 draw 
 blended (far-to-near) draws, which cannot be merged without changing their order. Bigger cells save a few hundred
 more draws at the cost of coarser culling.
 
+### Sly 2 and Sly 3 game sessions (characters and shader lighting on)
+
+The Sly 2 and Sly 3 game sessions with skinned characters drawn and their two colours lit per frame in the vertex
+shader (see Characters). Frame times are the smoke run's (null backend, so CPU only: game update, stage and the
+renderer's build) on a desktop CPU, 10 s per world; the counters are the harness's (OpenGL on Mesa in WSL2):
+
+| World (spawn view) | Frame p95 | Draw commands | Triangles | Build (median) |
+|---|---|---|---|---|
+| Sly 2 hub (row 2) | 0.92 ms | 1,530 | 91,600 | 0.22 ms |
+| Sly 2 row 14 (heaviest p95) | 1.15 ms | 554 | 24,000 | |
+| Sly 2 row 0 | | 458 | 25,000 | |
+| Sly 2 row 3 | | 432 | 19,000 | |
+| Sly 3 heaviest (v_ext) | 0.45 ms | | | |
+| Sly 3 v_apt | | 294 | 9,700 | |
+| Sly 3 slot 15 | | 415 | 33,000 | |
+| Sly 3 slot 23 | | 404 | 22,600 | |
+
+Sly 3's first frame after a load used to take up to about 31 ms (m_ext): the follow camera configured itself on its
+first update, building its collision world from every solid. The session now configures it with the load, and the
+worst single Sly 3 frame is 2.3 ms (c_ext). Sly 2's first frame took 4 to 11 ms: reactive props (class 98) set off
+the explosions listed before their first event at load, filling the particle pool (8,192) on frame 0. Only their
+intact look applies at load now, and the worst single Sly 2 frame is 2.5 ms (row 14). The light
+block adds 15 rows (five bone matrices) per lit part and no per-vertex CPU work.
+
+Switch-class estimate for the hub, the heaviest view:
+
+- CPU: the Switch's A57 cores are about 5 to 8 times slower than the desktop, so a 1.15 ms p95 becomes about 6 to
+  9 ms.
+- Recording about 1,500 draw commands in deko3d: about 1 to 1.5 ms.
+- GPU: vertex work for about 92,000 triangles, character lighting included, is about 0.1 ms; filling 720p at about
+  three times overdraw is about 1 to 3 ms, and it overlaps the CPU.
+
+That is well under the 16.7 ms frame at 60 FPS. It is an estimate until the overlay's GPU timestamps (Performance
+overlay and log) are read on hardware.
+
 ### On the Switch
 
-Not measured yet (see below). The demo logs the following once a second through `svcOutputDebugString`:
+Not measured on hardware yet (see below). The demo logs the following once a second through `svcOutputDebugString`:
 
 - FPS;
 - renderer CPU (build + submit);
@@ -504,6 +545,26 @@ What the renderer needs from the platform layer, and what it uses today.
   - `crates/render/tools/build-switch-demo.sh [--debug]`: the box-grid demo (`--features switch-demo`) into
     `dist/slynx-render-demo.nro`;
   - `crates/viewer/tools/build-switch.sh [--debug]`: the level viewer into `dist/slynx-viewer.nro`.
+
+## Performance overlay and log
+
+For hardware tests every Switch program (the viewer and the Sly 1, 2 and 3 game NROs) has the same overlay and log
+(`render::perf`):
+
+- **Toggle:** hold L and R and press ZL. Two lines in the bottom-left corner: frames per second, frame time, the
+  program's CPU time per frame (update and render, without the wait for the display) and the renderer's share of
+  it, the GPU time, draw commands and triangles. Averages over about 16 frames.
+- **GPU time** comes from deko3d timestamp reports: one at the top of the pipe when a frame's commands start, one
+  at the end of the pipe before its fence; read when the frame slot comes round again, so the number is three
+  frames old. The reports are 32 bytes per slot (`SlynxRenderStats::gpu_ns`, `FrameStats::gpu_ns`); the timer runs
+  at 614.4 MHz (ticks x 625 / 384 = ns). OpenGL reports none.
+- **Log:** `perf.log` in the user folder (`sdmc:/switch/SlyNX/user/perf.log`), written whether the overlay is shown
+  or not, one line every five seconds: time, frames, FPS, average and worst frame time, average and worst CPU time,
+  average and worst GPU time, average draw commands. The file keeps its header and its newest 32 to 64 KiB and is
+  rewritten (atomically) each time a line is added.
+- **Cost:** the averages every frame; while shown, one text update (about 60 glyph instances). The text is the
+  renderer's own (`Renderer::enable_perf_text`, `set_perf_text`), added with every level commit, so programs need no
+  level resources for it.
 
 ## Not yet verified on Switch hardware
 
@@ -567,6 +628,40 @@ let mut anims = stage::texanim::Animator::new(&prepared.anims, &up.materials, &u
 
 `SceneInput::skip` leaves out scene instances whose record falls in the given byte ranges (drawn by another path).
 The game wraps these calls in `game::sly2::level::upload_stage` (Sly 2 and Sly 3 sessions).
+
+**Zone masks** (Sly 2 camera.md 0): every draw carries its record's zone mask (`SceneBuild::instance_zones`,
+`Geometry::draw_zones`), and static groups never mix masks (the mask is part of the group key, so merging still pays:
+a world has few distinct masks). `ZoneVisibility::new(geo, &up, &draws, &statics)` with `place_all`'s instances,
+then once per frame `zones.apply(r, world.shared.visibility_mask)` shows only the draws sharing a bit with the
+camera's mask (0xFF, outside every visibility volume, shows all); it does nothing while the mask is unchanged.
+
+**Characters** (`game::sly2::skin`, both games): each character's rigid meshes become skinned meshes posed every
+frame from their bone tables (`CharacterSkins::update`, culled by a sphere around the posed mesh). Only what is drawn
+as the character is kept: meshes admitted by the row (Sly 2 level conditions) or the world filter (Sly 3), whose
+shader kind and pass are drawn as the level's are (shadow hulls and projected volumes, kinds 2 and 3, are left
+out); each gets the material its shader's look calls for and two colours per vertex as a moving object (four
+strongest lights at the character's centre) computed in the vertex shader every frame, so characters relight as
+they move. Sly 3's crew (classes 52 to 60) is drawn the same
+way (`crew_draws`). 
+
+**Attached objects** (`game::sly2::attached`, Sly 2): the objects attached under a character in the object tree
+(gadgets parked on them, such as Bentley's bombs with their blast volumes and the trap; switch rings and bursts;
+held items) are not static. Their scene draws stay instances (`SceneInput::dynamic`, which wins over the
+characters' skipped ranges since these records nest in theirs) and are listed in `Prepared::dynamic`. Each keeps
+its placement relative to its object at load. Several objects can share a record (a pool's copies are proxies of
+it), so each object sharing it gets an instance of the record's draws. Every frame, `AttachedParts::update`
+moves each part to its object's world transform and shows it while the object is in the world, active and visible.
+Two cases the engine does not signal yet are held back:
+
+- a gadget object (classes 100 to 102) in a group directly under a character is its pool's template: not drawn;
+- a bomb's blast volumes (kinds 2 and 3 under a class-101 object) show only while the bomb is out of the characters
+  (placed), and only the volume of its blast's size (option 1104: 300 or 600; the meshes are 325 and 620). Two
+  volumes of each size exist on the disc (red and green at 325; purple and green at 620); which one a bomb shows is
+  not established, so both draw and the first painted wins.
+
+The harness option `place_bomb=1` (Sly 2 app) takes Bentley's Trigger Bomb out of his pool and places it between
+him and the player, which shows the bomb and its red blast volume in the cellar (row 3). Drawn in place at the spawn
+instead (before this), these objects made a flat green shape over Sly's head there.
 
 ## Hooking up `crates/game`
 
@@ -634,5 +729,14 @@ because blended draws are strictly back to front and every texture-pool change a
 - Lighting and fog for the Sly 1 levels (needs the rendering spec); BC1/BC3 pools.
 - Static and dynamic instance split: upload static transforms once, and write only moving objects per frame.
 - Fewer blended batches if hardware shows a need (depth buckets, or a pool-indexed texture table).
-- GPU timestamps on deko3d.
 - Optional: capture and replay of static command streams on deko3d.
+
+## Projectile streaks (`game::shot_marks`)
+
+For the renderer owner: the machines' projectiles (`engine::behavior::vehicles::shots`) have no mesh or effect in
+the specs yet, so the Sly 2 and Sly 3 sessions draw each one as a placeholder: a unit box stretched along the shot's
+velocity (0.02 s of flight, 40 to 400 units long, 10 wide), unlit, warm yellow (255, 220, 120), not fogged or
+darkened, its head on the shot. The mesh, a 1x1 white texture and the material are made in `upload_stage`'s
+before-commit closure (next to the 2D layer, marked `Vehicles hook`); instances are pooled and hidden when unused,
+and placed in `render` before the 2D layer. To replace it with the game's projectile meshes or effects later, only
+`ShotMarks::upload` and `streak` change.

@@ -73,6 +73,14 @@ pub trait PlayerSystem {
     fn place(&mut self, world: &mut World, transform: formats::geometry::Affine) {
         let _ = (world, transform);
     }
+    /// Sly 2 hook (menus): the Sly 2 gang, for the gadget assignment screen and the shop (none for other players).
+    fn gang_mut(&mut self) -> Option<&mut crate::gang::Gang> {
+        None
+    }
+    /// Sly 3 hook (gadget grids): the gang, read-only (none for other players).
+    fn gang(&self) -> Option<&crate::gang::Gang> {
+        None
+    }
     /// After physics, every game frame.
     fn after_physics(&mut self, world: &mut World, step: &StepInfo, collision: &dyn CollisionQueries) {
         let _ = (world, step, collision);
@@ -207,6 +215,8 @@ pub struct CameraExtras {
     pub faded: Vec<(u32, u16)>,
     /// Picture panels (dialogue speakers): eye, target, field of view, screen position.
     pub panels: [Option<PanelView>; 2],
+    /// Sly 2 / Sly 3: the object mask the visibility volumes select (camera.md 7.1), when the camera has them.
+    pub visibility_mask: Option<u32>,
 }
 
 /// The camera (camera.md): updated every frame after everything else, also while paused, on the real clock. It gets

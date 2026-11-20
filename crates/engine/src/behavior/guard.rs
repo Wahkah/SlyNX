@@ -69,6 +69,10 @@ pub mod opt {
     pub const STATE_ANIM: u16 = 656;
     /// The call form of [`STATE_ANIM`].
     pub const CALL_STATE_ANIM: u16 = 657;
+    /// Adds an attack effect: (effect object, damage kind) typed arguments (guards.md 6.2).
+    pub const ATTACK_EFFECT: u16 = 661;
+    /// The guard flies (a byte; guards.md 6.2): its thrown hits throw with no velocity.
+    pub const FLYING: u16 = 673;
     /// Attack range (min, max).
     pub const ATTACK_RANGE: u16 = 653;
     /// Attack interval range, seconds.
@@ -231,6 +235,48 @@ pub struct Guard {
     anim_done: bool,
     hurt_this_attack: bool,
     sneaking: bool,
+    /// Attack effects (option 661, at most 4): effect object OID and damage kind.
+    pub effects: Vec<(i16, u8)>,
+    /// The effect objects found, with their last position (for their motion at the contact).
+    effect_objects: Vec<(Handle, u8, Option<[f32; 3]>)>,
+    /// Flying guards (option 673) throw with no velocity (guards.md 6.2).
+    pub flying: bool,
+}
+
+/// A guard keeps at most this many attack effects (guards.md 6.2).
+pub const MAX_EFFECTS: usize = 4;
+/// An attack effect's throw: the effect's motion times 1.25 (elasticity 0.25 + 1), at most 1,200, at least 600 up.
+pub const THROW_SCALE: f32 = 1.25;
+/// See [`THROW_SCALE`].
+pub const THROW_MAX: f32 = 1200.0;
+/// See [`THROW_SCALE`].
+pub const THROW_MIN_UP: f32 = 600.0;
+
+/// An (effect object OID, damage kind) pair from option 661's arguments.
+fn attack_effect(args: &[Arg]) -> Option<(i16, u8)> {
+    let mut object = None;
+    let mut kind = None;
+    for a in args {
+        match *a {
+            Arg::Int(n) if kind.is_none() => kind = Some(n as u8),
+            Arg::Float(n) if kind.is_none() => kind = Some(n as u8),
+            Arg::Short(tag, n) if (4096..=8191).contains(&tag) && kind.is_none() => kind = Some(n as u8),
+            Arg::Short(_, n) if object.is_none() => object = Some(n),
+            _ => {}
+        }
+    }
+    Some((object?, kind.unwrap_or(damage::BLUNT)))
+}
+
+/// The velocity an attack effect throws the player at, from the effect's motion (guards.md 6.2).
+pub fn throw_velocity(motion: [f32; 3]) -> [f32; 3] {
+    let mut v = scale(motion, THROW_SCALE);
+    let l = length(v);
+    if l > THROW_MAX {
+        v = scale(v, THROW_MAX / l);
+    }
+    v[2] = v[2].max(THROW_MIN_UP);
+    v
 }
 
 /// The `(state, animation OID)` pairs of a state-animation option (typed arguments).
@@ -329,6 +375,9 @@ impl Guard {
             anim_done: true,
             hurt_this_attack: false,
             sneaking: false,
+            effects: Vec::new(),
+            effect_objects: Vec::new(),
+            flying: o.bool_or(opt::FLYING, false),
         }
     }
 
@@ -743,6 +792,55 @@ fn assign_group(world: &mut World, me: Handle) -> usize {
     gi
 }
 
+impl Guard {
+    /// Resolves the attack effects' objects (once).
+    fn resolve_effects(&mut self, cx: &mut Cx<'_>) {
+        if self.effects.len() == self.effect_objects.len() {
+            return;
+        }
+        self.effect_objects.clear();
+        for &(oid, kind) in &self.effects {
+            if let Some(h) = cx.world.find_oid(oid, Some(cx.me)) {
+                self.effect_objects.push((h, kind, None));
+            }
+        }
+        if self.effect_objects.is_empty() {
+            // None found: keep the effects from being looked up every frame.
+            self.effects.clear();
+        }
+    }
+
+    /// Keeps the effect objects' positions for their motion.
+    fn track_effects(&mut self, cx: &mut Cx<'_>) {
+        for (h, _, last) in &mut self.effect_objects {
+            *last = cx.world.world_transform(*h).map(|w| w.t);
+        }
+    }
+
+    /// The attack lands (guards.md 6.2): through its first attack effect still in the world, else as a blunt hit.
+    /// Blunt, and thrown from a guard that is not flying, throw the player by the effect's motion; thrown from a
+    /// flying guard throws with no velocity; fire and crush hurt without a throw. The effect is used up.
+    fn land_attack(&mut self, cx: &mut Cx<'_>) {
+        self.resolve_effects(cx);
+        let Some(i) = self.effect_objects.iter().position(|e| cx.world.in_world(e.0)) else {
+            cx.world.hurt_player(cx.me, damage::BLUNT, None);
+            return;
+        };
+        let (h, kind, last) = self.effect_objects[i];
+        let motion = match (last, cx.world.world_transform(h)) {
+            (Some(a), Some(b)) if cx.dt > 0.0 => scale(sub(b.t, a), 1.0 / cx.dt),
+            _ => [0.0; 3],
+        };
+        match kind {
+            damage::BLUNT => cx.world.hurt_player_thrown(cx.me, kind, throw_velocity(motion)),
+            damage::THROWN if !self.flying => cx.world.hurt_player_thrown(cx.me, kind, throw_velocity(motion)),
+            damage::THROWN => cx.world.hurt_player_thrown(cx.me, kind, [0.0; 3]),
+            _ => cx.world.hurt_player(cx.me, kind, None),
+        }
+        cx.world.set_in_world(h, false);
+    }
+}
+
 impl ClassBehavior for Guard {
     fn ticks(&self) -> bool {
         true
@@ -750,6 +848,14 @@ impl ClassBehavior for Guard {
 
     /// Option 657, the call form of 656: binds an animation segment to a state (guards.md 3).
     fn action(&mut self, _world: &mut World, _me: Handle, id: u16, args: &[Arg]) -> bool {
+        if id == opt::ATTACK_EFFECT {
+            if let Some(e) = attack_effect(args)
+                && self.effects.len() < MAX_EFFECTS
+            {
+                self.effects.push(e);
+            }
+            return true;
+        }
         if id != opt::CALL_STATE_ANIM {
             return false;
         }
@@ -893,8 +999,9 @@ impl ClassBehavior for Guard {
             let o = cx.world.options(cx.me);
             let [a, b] = o.and_then(|o| o.pair(opt::ATTACK_INTERVAL)).unwrap_or([0.2, 0.5]);
             self.attack_ready_at = now + cx.rng.range(a, b.max(a));
-            cx.world.hurt_player(cx.me, damage::BLUNT, None);
+            self.land_attack(cx);
         }
+        self.track_effects(cx);
 
         // Movement.
         let goal = match self.state {
@@ -959,4 +1066,19 @@ pub fn active_guards(world: &World) -> Vec<u32> {
         .filter(|&h| world.class(h).is_some_and(is_guard_class) && world.flags(h) & flags::ACTIVE != 0)
         .map(|h| h.index())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attack_effects_throw_by_their_motion() {
+        // Times 1.25, raised to 600 up.
+        assert_eq!(throw_velocity([100.0, 0.0, 0.0]), [125.0, 0.0, 600.0]);
+        // Shortened to 1,200 first.
+        let v = throw_velocity([2000.0, 0.0, 0.0]);
+        assert!((v[0] - 1200.0).abs() < 1e-3 && v[2] == 600.0);
+        assert_eq!(attack_effect(&[Arg::Short(6, 1234), Arg::Int(6)]), Some((1234, damage::THROWN)));
+    }
 }

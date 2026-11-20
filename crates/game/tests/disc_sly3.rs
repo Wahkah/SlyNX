@@ -58,18 +58,23 @@ fn every_world_loads_and_renders_deterministically() {
         let input = FrameInput::default();
         s.update(&input, 1.0 / 60.0);
         let stats = s.render().unwrap();
-        // The menu world's solids are hidden or outline-only: nothing static to draw.
-        if name != "dvd_menu" {
+        // The menu world's solids are hidden or outline-only: nothing static to draw. Loading it opens the episode
+        // menu (the front end), whose 2D layer is all that is in view there.
+        if name == "dvd_menu" {
+            assert_eq!(s.front_page(), Some(ui::sly2::front::Page::Episodes), "dvd_menu opens the episode menu");
+        } else {
             assert!(s.drawn() > 0, "{name}: nothing drawn");
-            assert_eq!(stats.instances, s.drawn(), "{name}");
+            // The level's instances, plus the 2D layer's (the HUD draws through the same renderer).
+            assert!(stats.instances >= s.drawn(), "{name}: {} < {}", stats.instances, s.drawn());
         }
         if stats.visible == 0 {
             unseen.push(name.clone());
         }
         eprintln!("{:?} visible {}", s.status_lines(), stats.visible);
     }
-    // The starting view (above the middle of the drawn instances) sees part of every world but the menu.
-    assert_eq!(unseen, ["dvd_menu"], "worlds with nothing in view from the start");
+    // The starting view (above the middle of the drawn instances) sees part of every world; the menu world shows its
+    // episode menu.
+    assert!(unseen.is_empty(), "worlds with nothing in view from the start: {unseen:?}");
     // Every world runs 60 frames the same way twice.
     for (slot, name) in &worlds {
         let a = run(&path, *slot, 60, false);
@@ -95,6 +100,15 @@ fn walk(path: &std::path::Path, name: &str, frames: usize) -> (Vec<u64>, Vec<(i1
     let (mut s, _) = session(path, false);
     let slot = s.find_world(name).unwrap();
     s.load_slot(slot).unwrap_or_else(|e| panic!("{name}: {e}"));
+    // The arrival's scripts may hold the pad for a cutscene (command 0x1F; v_apt's 2360 does for 2.5 s): wait
+    // them out.
+    s.update(&FrameInput::default(), 1.0 / 60.0);
+    let mut held = 0;
+    while s.script_paused && held < 1200 {
+        s.update(&FrameInput::default(), 1.0 / 60.0);
+        held += 1;
+    }
+    eprintln!("{name}: the pad was held {held} frames on arrival");
     let mut hashes = Vec::with_capacity(frames);
     let mut trail = Vec::with_capacity(frames);
     for f in 0..frames {
@@ -161,4 +175,18 @@ fn the_crew_arrives_at_its_checkpoint() {
     let cp = w.world_transform(a.handle).unwrap().t;
     let p = w.position(w.player.unwrap()).unwrap();
     assert!((p[0] - cp[0]).abs() < 1.0 && (p[1] - cp[1]).abs() < 1.0, "Sly at {p:?}, checkpoint at {cp:?}");
+}
+
+#[test]
+fn the_coffee_shop_floor_holds() {
+    let Some(path) = require_disc(Game::Sly3, "the_coffee_shop_floor_holds") else { return };
+    let (mut s, _) = session(&path, false);
+    s.load_slot(s.find_world("v_apt").unwrap()).unwrap();
+    let cw = game::sly3::crew::collision_from_world(&s.game.as_ref().unwrap().world);
+    let f = engine::collision::world::QueryFilter { two_sided: true, camera: false, ignore: None };
+    // Where Sly used to fall through (worlds.md, the collision test vector): the floor polygon (z −33) is there.
+    for (x, y) in [(-3109.0, 5002.0), (-2897.0, 5415.0), (-2848.0, 5579.0)] {
+        let g = cw.ground_probe([x, y, 20.0], 2000.0, &f).map(|h| h.point[2]);
+        assert!(g.is_some_and(|z| (z + 33.0).abs() < 2.0), "({x}, {y}): ground {g:?}");
+    }
 }

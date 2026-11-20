@@ -5,16 +5,19 @@
 //!   velocity is the stick's direction (camera-relative) × deflection × 1000; the ship accelerates toward it with
 //!   gain 5 per second and turns toward the stick's heading with the smoothing (25, 0, 0.25). No gravity. The guns
 //!   fire while the right stick is deflected (one shot every 0.15 s here [I]; the shots' objects are not spawned).
-//!   A hit (while not hit, docked or destroyed) costs hit points, queues task event 15 and holds state 2 for 0.5 s
-//!   (the hit animation's length, not read [I]); at 0 the ship is destroyed. Within 50 units of a dock's point (its
-//!   option 1394 / 1593, else the dock itself) it docks (state 3), which queues task event 57, ending the hack (the
-//!   docking animation is not waited for [I]).
+//!   A hit (while not hit, docked or destroyed) costs hit points; one that leaves the ship alive queues task event
+//!   15 and holds state 2 for 0.5 s (the hit animation's length, not read [I]); at 0 the ship is destroyed and
+//!   queues task event 16, which the job's macro answers by resetting the hack and restarting its sequence (10.2).
+//!   Within 50 units of a dock's point (its option 1394 / 1593, else the dock itself) it docks (state 3) and queues
+//!   task event 57 (no script handles it: the hack ends through the dock's own sequence; 10.2). Docking is armed
+//!   once the ship has been clear of every dock point [I]. The disc's ship sets 1363 to 100.
 //! - **Hit points**: maximum option 1363 (Sly 3: 937), default 10; a hit lowers them by its damage (1 for any hit
 //!   here [I]). At 0 an enemy leaves the world (its burst object, 1366 / 1553, is not set off yet).
 //! - **Knock-back** on a non-fatal hit: away from the hitter horizontally at `a + d·(b + d·c)` with (a, b, c) option
 //!   1369 / 1555 (default (300, 50, 0)), clamped to 1370 / 1556 (default (0, 800)).
 //! - **Enemies** chase the driven ship within 3,000 units [I] at their speed scale (1382 / 1576, default 250); one
-//!   that carries points (1365) dies when it touches the ship (within 100 units [I]), hitting it.
+//!   that carries points (1365) dies when it touches the ship (within 100 units [I]), hitting it. A killed enemy
+//!   queues task event 24.
 
 use super::{Title, camera_heading, flat_distance, pad_for, place, task_event};
 use crate::behavior::{ClassBehavior, Cx};
@@ -88,6 +91,7 @@ pub struct HackShip {
     hit_time: f32,
     gun_cool: f32,
     pub shots: u32,
+    dock_armed: bool,
 }
 
 impl HackShip {
@@ -106,6 +110,7 @@ impl HackShip {
             hit_time: 0.0,
             gun_cool: 0.0,
             shots: 0,
+            dock_armed: false,
         }
     }
 
@@ -115,9 +120,14 @@ impl HackShip {
             return false;
         }
         self.hit_points = (self.hit_points - damage).max(0.0);
-        task_event(world, 15);
+        if self.hit_points > 0.0 {
+            task_event(world, 15);
+        }
         if self.hit_points <= 0.0 {
             self.state = 4;
+            // Lost: task event 16, as a defeated gang member; the job's macro resets the hack and restarts its
+            // sequence (10.2).
+            task_event(world, 16);
         } else {
             self.state = 2;
             self.hit_time = 0.0;
@@ -148,6 +158,11 @@ impl HackShip {
 impl ClassBehavior for HackShip {
     fn ticks(&self) -> bool {
         true
+    }
+
+    /// Option 1364 (1363's current value in Sly 3's 937 terms): the hit points left.
+    fn get_option(&self, _world: &World, _me: Handle, id: u16) -> Option<crate::object::OptionValue> {
+        (id == 1364).then_some(crate::object::OptionValue::Float(self.hit_points))
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
@@ -190,8 +205,14 @@ impl ClassBehavior for HackShip {
         let Some(p) = cx.world.position(cx.me) else { return };
         let p = crate::math::madd(p, self.velocity, dt);
         place(cx.world, cx.me, p, super::orientation(self.heading, 0.0, 0.0));
+        // Docking is armed once the ship has been clear of every dock point (it may start beside one) [I].
+        let dock = self.dock_point(cx);
+        if dock.is_none_or(|d| flat_distance(p, d) > 2.0 * DOCK_RANGE) {
+            self.dock_armed = true;
+        }
         if self.state == 1
-            && let Some(d) = self.dock_point(cx)
+            && self.dock_armed
+            && let Some(d) = dock
             && flat_distance(p, d) <= DOCK_RANGE
         {
             self.state = 3;
@@ -237,6 +258,8 @@ impl HackEnemy {
 
     fn die(&mut self, cx: &mut Cx<'_>) {
         self.dead = true;
+        // An enemy killed: task event 24 (10.2).
+        task_event(cx.world, 24);
         cx.world.set_in_world(cx.me, false);
     }
 }

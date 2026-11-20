@@ -16,8 +16,11 @@ sources:
     used_for: >-
       first reading of the camera-fade groups, the material option and its tables, and the floor, wall and ledge
       thresholds. The data facts were re-checked on the disc; the thresholds could not be and are marked
+  - kind: disc
+    what: SCUS-97198, worlds 1, 2 and 12, every collision surface of every solid (31,704), re-checked 2026-11-19
+    used_for: section 1.2 (edge ends against the plane, the triangle and the convex hull; sphere containment; perimeter coverage) and the test vector
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-19
 ---
 
 # Sly 1 collision
@@ -29,8 +32,9 @@ game derives from them. Notation as in [disc.md](disc.md).
 
 ## 1. Collision mesh
 
-A set of planar **surfaces** (triangles) over a shared position list, in the owning object's local space (world
-space for the static world mesh, which is placed at the identity).
+A set of planar **surfaces** over a shared position list, in the owning object's local space (world space for the
+static world mesh, which is placed at the identity). Each surface is a **convex polygon**; its three stored corners
+only fix its plane (1.2). Earlier drafts called surfaces triangles; that was wrong for a quarter of them.
 
 - **Plane.** A surface's plane comes from its three corners: normal `n = normalise((p1 − p0) × (p2 − p0))`,
   offset `n · p0`. The normal points **out of the solid** (evidence: convex edges, below, are exactly those where the
@@ -51,8 +55,8 @@ space for the static world mesh, which is placed at the identity).
   tolerance, matching corners by position instead of index) move these counts by a few hundred at most, never the
   rule. Earlier drafts gave 33,992 / 7 / 43 / 17,793; another measurement gave 34,503 / 7 / 41 / 18,226. The
   definitions above are the ones to test against.
-  Edge end points are not always corners of the surface that owns the record (T-junctions). A surface can have up
-  to 98 edges; 124,367 surfaces have none.
+  Edge end points are often not corners of the surface: the surface is a polygon larger than its triangle (1.2), not
+  a T-junction. A surface can have up to 98 edges; 124,367 surfaces have none.
 - Totals: the header's edge total always equals the sum of the per-surface counts.
 
 ### 1.1 What edges are used for
@@ -61,6 +65,34 @@ space for the static world mesh, which is placed at the identity).
 other **wall-like** (normal z < 0.55) is a **ledge** the player can grab; its outward direction is the horizontal
 perpendicular to the edge that points the same way as the wall surface's normal. Edges also let moving bodies
 collide with corners, not just faces.
+
+### 1.2 Surfaces are convex polygons
+
+Measured on every collision surface of every solid in worlds 1, 2 and 12 (31,704 surfaces) [D]:
+
+- **7,993 surfaces (25 %) are larger than their triangle**: at least one end of an edge that names them lies in their
+  plane but outside the triangle of the three corners. 7,394 of these are four-sided; the largest outline found has
+  20 sides (world 1, world mesh, surface 4642).
+- Every edge lies in the planes of both surfaces it joins (1, Edges) [D].
+- The polygon is convex: in 30,063 of the 30,530 surfaces with edges (98.5 %) every edge end lies on the boundary of
+  the convex hull of the corners and edge ends; 44 have an end inside it by less than 1 % of the surface's size,
+  423 (1.4 %) by more [D]. The corners are usually polygon vertices, but in 325 of the larger surfaces one to three
+  corners lie inside the polygon [D].
+- The stored bounding sphere (radius and centre) encloses the whole polygon on all 30,530 surfaces with edges, not
+  just the triangle [D].
+- **The edge records do not give the whole outline**: only convex shared sides are stored (1, Edges). The stored
+  edges' total length equals the outline's perimeter on 8,969 of the 30,530 surfaces [D]. Concave sides and open
+  borders are not in the data.
+- The reference port keeps only the surface's plane (normal and offset, from one corner) for contact tests, and no
+  point-in-triangle test exists [R]. A surface's extent is therefore bounded by the collision tree (2), whose cells
+  are cut by other surfaces' planes [I]. A port must not clip contacts to the triangle.
+
+Test vector [D] (world 1 "Paris, France", static world mesh, collision surface 1275, corners 1191, 1190, 1187): a
+five-sided polygon in the plane x ≈ 1,943–1,945. Its edge ends are positions 1183, 1184, 1187, 1190 and 1191; 1183
+(1,944.95, 1,300.56, −626.71) and 1184 (1,944.95, 1,300.44, −354.55) lie outside the triangle. Edge records naming it:
+1183–1187 stored under it (other surface 1288), 1190–1191 stored under 1277, 1184–1190 stored under 1278.
+
+The Sly 2 layout behaves the same way (../sly2/classes/solid-object.md 2.1).
 
 ## 2. Collision tree
 

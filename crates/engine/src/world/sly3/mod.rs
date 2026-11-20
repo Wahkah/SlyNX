@@ -62,6 +62,8 @@ pub struct Sly3Options {
     pub slot: Option<i16>,
     /// The selection context; `None`: the slot with option set 0's condition (a fresh load).
     pub context: Option<Context>,
+    /// Sly 3 hook: the option set chosen (its copy counts apply; conditions.md); 0 for a fresh load.
+    pub set: usize,
     /// Which world this is.
     pub info: WorldInfo,
     /// Deepest chain of placements followed.
@@ -75,6 +77,7 @@ impl Default for Sly3Options {
         Sly3Options {
             slot: None,
             context: None,
+            set: 0,
             info: WorldInfo::default(),
             max_depth: 8,
             multipliers: formats_sly3::anim::DEFAULT_MULTIPLIERS,
@@ -145,6 +148,8 @@ pub struct Sly3Level {
     pub game_objects: BTreeMap<u32, u32>,
     /// Sly 3 host hook: pickpocket items marked collected (operations 146 and 147).
     pub pickpocket: alloc::collections::BTreeSet<i32>,
+    /// Sly 3 pose hook: the crew's clips applied to their poses (`anim::sly3_pose`).
+    pub poser: crate::anim::sly3_pose::Sly3Poser,
     objects: Vec<Sly3Object>,
     /// Slots by object ID (built at load; a destroyed object leaves it), for the ID searches.
     ids: alloc::collections::BTreeMap<i32, Vec<u32>>,

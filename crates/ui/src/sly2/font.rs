@@ -70,6 +70,11 @@ fn ceil(v: f32) -> f32 {
     if t < v { t + 1.0 } else { t }
 }
 
+/// Largest glyph cell in sheet pixels (the disc's glyphs need about 40); bigger glyph boxes are cut to it.
+pub const MAX_GLYPH_CELL: usize = 128;
+/// Largest sheet height in pixels; glyphs that would go past it are left out.
+pub const MAX_SHEET_HEIGHT: usize = 4096;
+
 fn edge(a: [f32; 2], b: [f32; 2], p: [f32; 2]) -> f32 {
     (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
 }
@@ -88,18 +93,24 @@ impl FontSheet {
                         b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
                     }
                 }
-                if b[0] > b[2] {
+                if b[0] > b[2] || b.iter().any(|v| !v.is_finite()) {
                     b = [0.0; 4];
                 }
+                // At most a [`MAX_GLYPH_CELL`] cell (with its margin): corrupt shapes cannot make the sheet huge.
+                let most = (MAX_GLYPH_CELL - 2) as f32 / SHEET_SCALE;
+                b[2] = b[2].min(b[0] + most);
+                b[3] = b[3].min(b[1] + most);
                 cw = cw.max(ceil((b[2] - b[0]) * SHEET_SCALE) as usize + 2);
                 ch = ch.max(ceil((b[3] - b[1]) * SHEET_SCALE) as usize + 2);
                 cells.push((f, g, b));
             }
         }
         let cols = 16usize;
+        cells.truncate(cols * (MAX_SHEET_HEIGHT / ch));
         let rows = cells.len().div_ceil(cols).max(1);
+        // At most 16 x 128 by 4096 pixels: well inside `u32`.
         let (width, height) = ((cols * cw) as u32, (rows * ch) as u32);
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
         let mut out: Vec<Font> = fonts.iter().map(|_| Font::default()).collect();
         for (i, &(f, g, b)) in cells.iter().enumerate() {
             let (cx, cy) = ((i % cols) * cw, (i / cols) * ch);
@@ -142,7 +153,7 @@ impl FontSheet {
                         }
                     }
                     if n > 0.0 {
-                        let at = (((cy + py) as u32 * width + (cx + px) as u32) * 4) as usize;
+                        let at = ((cy + py) * width as usize + cx + px) * 4;
                         for k in 0..3 {
                             pixels[at + k] = ((col[k] / n).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                         }
@@ -217,8 +228,9 @@ impl FontSheet {
                     }
                     b'2' if i + 2 < text.len() => {
                         // A button icon: the next character in the icon font.
+                        // Icons keep their own colours (only the alpha follows the text).
                         let icon = text[i + 2] as u32;
-                        pen += self.glyph(list, 1, icon, [pen, base, k], colours[1]);
+                        pen += self.glyph(list, 1, icon, [pen, base, k], [1.0, 1.0, 1.0, colours[1][3]]);
                         i += 3;
                         continue;
                     }
@@ -263,6 +275,24 @@ impl FontSheet {
         self.draw(&mut list, text, 0.0, 0.0, size, [[1.0; 4]; 2], None).0
     }
 
+    /// Draws glyph `code` of font `font` with its origin at `at`, `k` canvas units per font unit; false when the
+    /// sheet has no such glyph.
+    pub fn draw_glyph(
+        &self,
+        list: &mut DrawList,
+        font: usize,
+        code: u32,
+        at: [f32; 2],
+        k: f32,
+        colour: [f32; 4],
+    ) -> bool {
+        let found = self.fonts.get(font).is_some_and(|f| f.glyphs.contains_key(&code));
+        if found {
+            self.glyph(list, font, code, [at[0], at[1], k], colour);
+        }
+        found
+    }
+
     fn glyph(&self, list: &mut DrawList, font: usize, c: u32, at: [f32; 3], colour: [f32; 4]) -> f32 {
         let [pen, base, k] = at;
         let Some(g) = self.fonts.get(font).and_then(|f| f.glyphs.get(&c)) else { return 0.0 };
@@ -302,5 +332,24 @@ mod tests {
         let mut list = DrawList::default();
         let (_, h) = s.draw(&mut list, b"A A", 0.0, 0.0, SIZE_UNIT, [[1.0; 4]; 2], Some(30.0));
         assert!(h > s.line_height(SIZE_UNIT));
+    }
+
+    #[test]
+    fn huge_or_broken_glyphs_stay_in_bounds() {
+        // A glyph a million units wide and one with a non-finite point: the cell is capped, the sheet stays small.
+        let huge =
+            GlyphShape { code: 1, advance: 1.0, triangles: vec![([[0.0, 0.0], [1.0e6, 0.0], [0.0, 1.0e6]], [1.0; 4])] };
+        let nan = GlyphShape {
+            code: 2,
+            advance: 1.0,
+            triangles: vec![([[f32::NAN, 0.0], [1.0, 0.0], [0.0, 1.0]], [1.0; 4])],
+        };
+        let s = FontSheet::build(&[vec![huge, nan]]);
+        assert!(s.width as usize <= 16 * MAX_GLYPH_CELL && s.height as usize <= MAX_GLYPH_CELL);
+        assert_eq!(s.pixels.len(), s.width as usize * s.height as usize * 4);
+        // Many glyphs: the sheet stops at its height limit.
+        let many: Vec<GlyphShape> = (0..20_000).map(square).collect();
+        let s = FontSheet::build(&[many]);
+        assert!(s.height as usize <= MAX_SHEET_HEIGHT);
     }
 }

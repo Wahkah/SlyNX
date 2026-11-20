@@ -91,6 +91,26 @@ the pairs its animation or sound entries [I]. Open.
 
 - **Slots**: three per character on L1, L2 and R2, button masks `0x4`, `0x1`, `0x2`: the executable's 3-entry table
   at `0x349040` [X] (Sly 2 `0x2C3258`). Assignment, ownership and the refusal rules: Sly 2 section 2 [R].
+- **Assignment-screen grids** [X]: three tables of 32-byte cells in Sly 2's cell layout
+  ([../sly2/safehouse-and-shop.md](../sly2/safehouse-and-shop.md) 6): `s32` item record, three `s32` screen-part
+  IDs, `s32` −1, `f32` x, `f32` y, `s32` flags. They sit just before the slot table. The code at `0x0021FC48` picks
+  the screen ID, the cell count and the table address together, one set per character:
+
+  | Address | Cells | Screen | Character | Items, in cell order |
+  |---|---:|---:|---|---|
+  | `0x348BE0` | 15 | 1062 | Sly | 25, 26, 29, 30, 27, 31, 35, 33, 28, 36, 32, 34, 38, 39, 40 |
+  | `0x348DC0` | 11 | 1063 | Bentley | 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 11 |
+  | `0x348F20` | 8 | 1064 | Murray | 17, 18, 20, 21, 22, 23, 24, 19 |
+
+  - The item owners (record +4: 24 Sly, 25 Bentley, 26 Murray) match each grid. Sly's item 37 is on no grid [X].
+  - For a cell whose first part ID is n + 1, the three part IDs are (n + 1, n, n + 2). In Sly 2's order these are
+    the open, owned and selected parts. Sly's first cell holds (1174, 1173, 1175); the IDs run from 1116 (Bentley)
+    to 1217 (Sly).
+  - The flags are 1 exactly when the item's button use (record +0) is not −1. The four flag-0 cells are items 27,
+    28, 11 and 19, the passive ones.
+  - Positions, as x values by row: Sly, three rows of five, x 165, 255, 345, 435, 525 at y 155, 235, 315. Bentley:
+    x 175, 285, 395, 505 at y 155 and 235, then 228, 333, 443 at y 315. Murray: x 185, 325, 465 at y 155 and 235,
+    then 265, 385 at y 315.
 - **Power**: Sly 2 section 3 [R] (maximum 100; cost taken once from record field +12). The **held** items (button
   use 1) of Sly 3 are 32 to 36: Shadow Power 1, Thief Reflexes, Shadow Power 2, Rocket Boots, Treasure Map [D].
 - **Drain of held items** [X]: field +16 is the drain in power per second, stored as an integer. The routine at

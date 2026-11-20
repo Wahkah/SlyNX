@@ -24,6 +24,7 @@ pub mod movie;
 pub mod saving;
 pub mod session;
 pub mod settings;
+pub mod shot_marks; // Vehicles hook: the projectiles' placeholder streaks
 pub mod sly2;
 pub mod sly3; // Sly 3 hook: the Sly 3 session (first stage).
 pub mod smoke;
@@ -32,6 +33,8 @@ pub mod ui_layer;
 
 #[cfg(not(target_os = "horizon"))]
 pub mod pc;
+#[cfg(not(target_os = "horizon"))]
+pub mod pc_sly;
 
 #[cfg(all(
     target_os = "horizon",

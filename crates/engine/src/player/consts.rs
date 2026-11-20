@@ -367,10 +367,6 @@ impl PlayerConstants {
 /// checked against the running game.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tunables {
-    /// Stick dead zone: deflections below this count as 0, the rest is rescaled to 0..1.
-    pub dead_zone: f32,
-    /// Stick response exponent applied after the dead zone (1 = linear).
-    pub stick_exponent: f32,
     /// Collision capsule radius.
     pub radius: f32,
     /// Distance between the capsule's sphere centres.
@@ -409,8 +405,6 @@ pub struct Tunables {
 impl Default for Tunables {
     fn default() -> Self {
         Tunables {
-            dead_zone: 0.15,
-            stick_exponent: 1.0,
             radius: 30.0,
             height: 100.0,
             ground_probe: 2.0,

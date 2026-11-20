@@ -296,6 +296,12 @@ the values, R for the names]. When the effect object touches the player [R]:
   object's motion at the contact point × 1.25 (elasticity 0.25 + 1), shortened to at most 1,200 units/s, with its
   upward part raised to at least 600 units/s.
 - **6 thrown** from a flying guard: the throw reaction with zero velocity.
+- **Which guards are flying**: it is a per-template flag, not a class. Option **673** (a byte) sets it [R for the
+  meaning]. On the disc only six **class-10** (proximity guard) templates set it, all to 1, all in Vicious Voodoo
+  worlds [D]: OID 1612 in world 21 (The Dread Swamp Path), 1993 in 23 (The Lair of the Beast), 1601 and 1729 in 24
+  (A Grave Undertaking), 1772 in 27 (A Ghastly Voyage) and 1429 in 28 (Down Home Cooking). Every other guard,
+  including all flashlight guards, is not flying. The same flag also gives flying guards a tilted drive while moving
+  [R].
 - **2 fire**, **4 crush**: the damage of that kind with no throw (crush sets the player's velocity to (0, 0, −1,000),
   player-moves.md 7).
 - The effect objects are removed after the hit (one shot).

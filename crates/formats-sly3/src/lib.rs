@@ -10,7 +10,8 @@
 //! - [`stream`], [`options`], [`geometry`], [`collision`]: the object stream with every class layout, mesh sets
 //!   with filtered meshes, bone tables, colour tables and per-vertex weights;
 //! - [`anim`]: clip data with shared key-time lists and packed tracks (curves as `formats::anim` curves);
-//! - [`scene`]: a `formats::scene::Scene` for a world.
+//! - [`scene`]: a `formats::scene::Scene` for a world;
+//! - [`screen`]: a screen object's element set and group tree in Sly 2's screen form.
 //!
 //! `no_std` + `alloc`; the `std` feature (default) adds opening a disc image by path. See `docs/formats-sly3.md`.
 #![no_std]
@@ -28,6 +29,7 @@ pub mod filter;
 pub mod geometry;
 pub mod options;
 pub mod scene;
+pub mod screen;
 pub mod stream;
 pub mod textures;
 pub mod world;

@@ -78,6 +78,8 @@ pub struct StaticGroup {
     /// Index into [`Geometry::meshes`] of the mesh the group's placed meshes are uploaded right after: where it
     /// falls in the renderer's draw order (by mesh). Groups are listed in upload order.
     pub after_mesh: u32,
+    /// The zone mask its pieces share ([`ZoneVisibility`]).
+    pub zone: u32,
     /// In draw order.
     pub pieces: Vec<StaticPiece>,
 }
@@ -107,6 +109,8 @@ pub struct GeometryRef<'a> {
     pub draws: &'a [DrawItem],
     pub weights: &'a [VertexWeights],
     pub static_groups: &'a [StaticGroup],
+    /// Per draw: its zone mask (empty: every draw is always shown).
+    pub draw_zones: &'a [u32],
 }
 
 /// A level's geometry, owned.
@@ -121,6 +125,8 @@ pub struct Geometry {
     pub draws: Vec<DrawItem>,
     pub weights: Vec<VertexWeights>,
     pub static_groups: Vec<StaticGroup>,
+    /// Per draw: its zone mask (empty: always shown).
+    pub draw_zones: Vec<u32>,
 }
 
 impl Geometry {
@@ -135,6 +141,7 @@ impl Geometry {
             draws: &self.draws,
             weights: &self.weights,
             static_groups: &self.static_groups,
+            draw_zones: &self.draw_zones,
         }
     }
 }
@@ -148,8 +155,60 @@ pub struct Uploaded {
     pub materials: Vec<MaterialId>,
     /// Per draw: its weights' base in the renderer.
     pub weight_bases: Vec<Option<u32>>,
-    /// (mesh, material, mirrored, weights base) per placed mesh.
-    pub static_draws: Vec<(MeshId, MaterialId, bool, Option<u32>)>,
+    /// (mesh, material, mirrored, weights base, zone mask) per placed mesh.
+    pub static_draws: Vec<(MeshId, MaterialId, bool, Option<u32>, u32)>,
+}
+
+/// The camera's mask that shows every zone (the camera outside every visibility volume).
+pub const ALL_ZONES: u32 = 0xFF;
+
+/// Draws shown only while their zone mask shares a bit with the camera's visibility mask (Sly 2 camera.md 0; the
+/// engine's `World::shared.visibility_mask`). Draws whose mask covers every zone are not tracked.
+#[derive(Clone, Debug, Default)]
+pub struct ZoneVisibility {
+    entries: Vec<(InstanceId, u32)>,
+    mask: u32,
+}
+
+impl ZoneVisibility {
+    /// The instances of a placed level (`draws` from [`place`], `statics` from [`place_all`]) and their masks.
+    pub fn new(g: GeometryRef<'_>, up: &Uploaded, draws: &[InstanceId], statics: &[InstanceId]) -> ZoneVisibility {
+        let mut entries = Vec::new();
+        for (&id, &zone) in draws.iter().zip(g.draw_zones) {
+            if zone & ALL_ZONES != ALL_ZONES {
+                entries.push((id, zone));
+            }
+        }
+        for (&id, s) in statics.iter().zip(&up.static_draws) {
+            if s.4 & ALL_ZONES != ALL_ZONES {
+                entries.push((id, s.4));
+            }
+        }
+        ZoneVisibility { entries, mask: ALL_ZONES }
+    }
+
+    /// Instances tracked.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether none are.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Shows and hides the tracked instances for the camera's `mask` ([`ALL_ZONES`] shows all); does nothing while
+    /// the mask is unchanged.
+    pub fn apply<B: Backend>(&mut self, r: &mut Renderer<B>, mask: u32) -> Result<(), RenderError> {
+        if mask == self.mask {
+            return Ok(());
+        }
+        self.mask = mask;
+        for &(id, zone) in &self.entries {
+            r.set_visible(id, mask == ALL_ZONES || zone & mask != 0)?;
+        }
+        Ok(())
+    }
 }
 
 /// The renderer material of a prepared one.
@@ -184,6 +243,7 @@ pub fn render_material(m: &MaterialDesc, textures: &[TextureId], lit: bool) -> M
 /// Adds the level's textures, meshes (each static group's placed meshes right after the mesh it follows, which is
 /// its place in the draw order), materials and weights. Call it after `clear_level` and before `commit`.
 pub fn upload<B: Backend>(r: &mut Renderer<B>, g: GeometryRef<'_>) -> Result<Uploaded, RenderError> {
+    check(g)?;
     let mut out = Uploaded::default();
     // Meshes drawn only as parts of static groups are not uploaded on their own.
     let mut used = alloc::vec![g.static_groups.is_empty(); g.meshes.len()];
@@ -242,6 +302,40 @@ pub fn upload<B: Backend>(r: &mut Renderer<B>, g: GeometryRef<'_>) -> Result<Upl
     Ok(out)
 }
 
+/// Checks that every index between the prepared arrays is in range, so a damaged level fails with an error instead
+/// of a panic.
+pub fn check(g: GeometryRef<'_>) -> Result<(), RenderError> {
+    let bad = |what| Err(RenderError::BadMesh(what));
+    let (nm, nt, nmat) = (g.meshes.len(), g.textures.len(), g.materials.len());
+    for m in g.meshes {
+        let v = (m.first_vertex as usize).checked_add(m.vertex_count as usize);
+        let i = (m.first_index as usize).checked_add(m.index_count as usize);
+        if v.is_none_or(|v| v > g.vertices.len()) || i.is_none_or(|i| i > g.indices.len()) {
+            return bad("prepared mesh outside the level's arrays");
+        }
+        if m.skinned && v.is_none_or(|v| v > g.skin.len()) {
+            return bad("skinned mesh without skin data");
+        }
+    }
+    for m in g.materials {
+        if m.texture as usize >= nt || m.palettes.is_some_and(|p| p.iter().any(|&t| t as usize >= nt)) {
+            return bad("material texture out of range");
+        }
+    }
+    let piece_ok = |mesh: u32, material: u32| (mesh as usize) < nm && (material as usize) < nmat;
+    for d in g.draws {
+        if !piece_ok(d.mesh, d.material) {
+            return bad("draw mesh or material out of range");
+        }
+    }
+    for s in g.static_groups {
+        if (s.material as usize) >= nmat || s.pieces.iter().any(|p| !piece_ok(p.mesh, p.material)) {
+            return bad("static group mesh or material out of range");
+        }
+    }
+    Ok(())
+}
+
 /// Places the static groups' meshes and one instance per draw (after `commit`); returns the draws' instances, in
 /// [`GeometryRef::draws`] order.
 pub fn place<B: Backend>(
@@ -249,12 +343,23 @@ pub fn place<B: Backend>(
     g: GeometryRef<'_>,
     up: &Uploaded,
 ) -> Result<Vec<InstanceId>, RenderError> {
-    for &(mesh, material, mirrored, weights) in &up.static_draws {
+    place_all(r, g, up).map(|(draws, _)| draws)
+}
+
+/// [`place`], also returning the placed meshes' instances (in [`Uploaded::static_draws`] order).
+pub fn place_all<B: Backend>(
+    r: &mut Renderer<B>,
+    g: GeometryRef<'_>,
+    up: &Uploaded,
+) -> Result<(Vec<InstanceId>, Vec<InstanceId>), RenderError> {
+    let mut statics = Vec::with_capacity(up.static_draws.len());
+    for &(mesh, material, mirrored, weights, _) in &up.static_draws {
         let id = r.add_instance(mesh, material, Mat4::IDENTITY)?;
         r.set_mirrored(id, mirrored)?;
         if weights.is_some() {
             r.set_weights(id, weights)?;
         }
+        statics.push(id);
     }
     let mut instances = Vec::with_capacity(g.draws.len());
     for (d, base) in g.draws.iter().zip(&up.weight_bases) {
@@ -272,7 +377,41 @@ pub fn place<B: Backend>(
         }
         instances.push(id);
     }
-    Ok(instances)
+    Ok((instances, statics))
+}
+
+/// Most vertices in one placed mesh (16-bit indices).
+pub const MAX_PLACED_VERTICES: usize = 65535;
+
+/// A prepared mesh's vertices and indices; an error if its ranges lie outside the level's arrays.
+fn mesh_slices<'a>(level: GeometryRef<'a>, m: &MeshRange) -> Result<(&'a [Vertex], &'a [u16]), RenderError> {
+    let bad = || RenderError::BadMesh("prepared mesh outside the level's arrays");
+    let v =
+        level.vertices.get(m.first_vertex as usize..).and_then(|v| v.get(..m.vertex_count as usize)).ok_or_else(bad)?;
+    let i =
+        level.indices.get(m.first_index as usize..).and_then(|i| i.get(..m.index_count as usize)).ok_or_else(bad)?;
+    Ok((v, i))
+}
+
+/// Appends one piece to a placed mesh being built, its indices moved past the vertices already there; returns the
+/// first vertex. Refuses a piece whose indices point past its own vertices or that would not fit 16-bit indices.
+fn append_piece(
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u16>,
+    src_vertices: &[Vertex],
+    src_indices: &[u16],
+) -> Result<u16, RenderError> {
+    if vertices.len() + src_vertices.len() > MAX_PLACED_VERTICES {
+        return Err(RenderError::BadMesh("placed piece past 65,535 vertices"));
+    }
+    if src_indices.iter().any(|&i| i as usize >= src_vertices.len()) {
+        return Err(RenderError::BadMesh("piece index past its vertices"));
+    }
+    let base = vertices.len() as u16;
+    vertices.extend_from_slice(src_vertices);
+    // Below 65,535 by the checks above.
+    indices.extend(src_indices.iter().map(|&i| base + i));
+    Ok(base)
 }
 
 /// Builds the placed meshes of static groups (after the level's textures): per group, one mesh per texture pool and
@@ -285,7 +424,7 @@ fn upload_static<'a, B: Backend>(
     groups: impl Iterator<Item = &'a StaticGroup>,
     textures: &[TextureId],
     looks: &mut BTreeMap<(u32, u32), MaterialId>,
-    out: &mut Vec<(MeshId, MaterialId, bool, Option<u32>)>,
+    out: &mut Vec<(MeshId, MaterialId, bool, Option<u32>, u32)>,
 ) -> Result<(), RenderError> {
     // One placed mesh and its weights.
     let mut place = |r: &mut Renderer<B>,
@@ -294,11 +433,12 @@ fn upload_static<'a, B: Backend>(
                      p: &[PlacedPiece],
                      w: &[VertexWeights],
                      material: MaterialId,
-                     mirrored: bool|
+                     mirrored: bool,
+                     zone: u32|
      -> Result<(), RenderError> {
         let mesh = r.add_placed_mesh(&MeshData { vertices: v, indices: i }, p)?;
         let weights = if w.is_empty() { None } else { Some(r.add_vertex_weights(w)?) };
-        out.push((mesh, material, mirrored, weights));
+        out.push((mesh, material, mirrored, weights, zone));
         Ok(())
     };
     for g in groups {
@@ -334,22 +474,20 @@ fn upload_static<'a, B: Backend>(
             let mut placed: Vec<PlacedPiece> = Vec::new();
             let mut weights: Vec<VertexWeights> = Vec::new();
             for p in pieces {
-                let src = level.meshes[p.mesh as usize];
-                if vertices.len() + src.vertex_count as usize > 65535 {
-                    place(r, &vertices, &indices, &placed, &weights, material, g.mirrored)?;
+                let src = *level.meshes.get(p.mesh as usize).ok_or(RenderError::InvalidHandle)?;
+                let (src_vertices, src_indices) = mesh_slices(level, &src)?;
+                if !placed.is_empty() && vertices.len() + src_vertices.len() > MAX_PLACED_VERTICES {
+                    place(r, &vertices, &indices, &placed, &weights, material, g.mirrored, g.zone)?;
                     vertices.clear();
                     indices.clear();
                     placed.clear();
                     weights.clear();
                 }
-                let base = vertices.len() as u16;
-                vertices.extend_from_slice(&level.vertices[src.first_vertex as usize..][..src.vertex_count as usize]);
-                let tri = &level.indices[src.first_index as usize..][..src.index_count as usize];
-                indices.extend(tri.iter().map(|&i| base + i));
-                let n = src.vertex_count as usize;
+                let base = append_piece(&mut vertices, &mut indices, src_vertices, src_indices)?;
+                let n = src_vertices.len();
                 if lit {
-                    match p.weights {
-                        Some(w) => weights.extend_from_slice(&level.weights[w as usize..][..n]),
+                    match p.weights.and_then(|w| level.weights.get(w as usize..)?.get(..n)) {
+                        Some(w) => weights.extend_from_slice(w),
                         None => weights.extend(core::iter::repeat_n(VertexWeights::default(), n)),
                     }
                 }
@@ -363,9 +501,122 @@ fn upload_static<'a, B: Backend>(
                 });
             }
             if !placed.is_empty() {
-                place(r, &vertices, &indices, &placed, &weights, material, g.mirrored)?;
+                place(r, &vertices, &indices, &placed, &weights, material, g.mirrored, g.zone)?;
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verts(n: usize) -> Vec<Vertex> {
+        alloc::vec![Vertex::new([0.0; 3], [0.0; 2], [0.0, 0.0, 1.0], [255; 4]); n]
+    }
+
+    #[test]
+    fn pieces_append_within_16_bit_indices() {
+        let (mut v, mut i) = (Vec::new(), Vec::new());
+        assert_eq!(append_piece(&mut v, &mut i, &verts(3), &[0, 1, 2]).unwrap(), 0);
+        assert_eq!(append_piece(&mut v, &mut i, &verts(3), &[2, 1, 0]).unwrap(), 3);
+        assert_eq!(i, [0, 1, 2, 5, 4, 3]);
+        // An index past the piece's own vertices is refused, not wrapped into the next piece.
+        assert!(append_piece(&mut v, &mut i, &verts(3), &[0, 1, 3]).is_err());
+        // A piece that would pass 65,535 vertices is refused instead of overflowing the indices.
+        let big = verts(MAX_PLACED_VERTICES);
+        assert!(append_piece(&mut v, &mut i, &big, &[0, 1, 2]).is_err());
+        let (mut v2, mut i2) = (Vec::new(), Vec::new());
+        assert!(append_piece(&mut v2, &mut i2, &verts(MAX_PLACED_VERTICES + 1), &[0, 1, 2]).is_err());
+        assert_eq!(append_piece(&mut v2, &mut i2, &big, &[0, 1, 65534]).unwrap(), 0);
+    }
+
+    #[test]
+    fn damaged_levels_fail_the_check() {
+        let mut g = Geometry::default();
+        g.textures.push(TextureData::rgba8(1, 1, alloc::vec![255; 4]).unwrap());
+        g.vertices = verts(3);
+        g.indices = alloc::vec![0, 1, 2];
+        g.meshes.push(MeshRange { first_vertex: 0, vertex_count: 3, first_index: 0, index_count: 3, skinned: false });
+        let look = DrawLook {
+            pass: Pass::Opaque,
+            order: 5,
+            blend: BlendMode::None,
+            sort: SortMode::Grouped,
+            two_step: false,
+            no_darkening: false,
+        };
+        g.materials.push(MaterialDesc {
+            texture: 0,
+            palettes: None,
+            look,
+            tint: [255; 4],
+            cutoff: None,
+            two_colour: false,
+        });
+        let draw =
+            DrawItem { mesh: 0, material: 0, transform: Mat4::IDENTITY, weights: None, sort_key: None, fog: 1.0 };
+        g.draws.push(draw);
+        assert!(check(g.as_ref()).is_ok());
+        g.draws.push(DrawItem { mesh: 9, ..draw });
+        assert!(check(g.as_ref()).is_err());
+        g.draws.pop();
+        g.meshes[0].vertex_count = 4;
+        assert!(check(g.as_ref()).is_err());
+        // The upload itself refuses it (no panic).
+        let mut r = Renderer::new(render::NullBackend::new(64, 64));
+        assert!(upload(&mut r, g.as_ref()).is_err());
+    }
+
+    #[test]
+    fn zone_masks_hide_and_show() {
+        let mut g = Geometry::default();
+        g.textures.push(TextureData::rgba8(1, 1, alloc::vec![255; 4]).unwrap());
+        g.vertices = verts(3);
+        g.indices = alloc::vec![0, 1, 2];
+        g.meshes.push(MeshRange { first_vertex: 0, vertex_count: 3, first_index: 0, index_count: 3, skinned: false });
+        let look = DrawLook {
+            pass: Pass::Opaque,
+            order: 5,
+            blend: BlendMode::None,
+            sort: SortMode::Grouped,
+            two_step: false,
+            no_darkening: false,
+        };
+        g.materials.push(MaterialDesc {
+            texture: 0,
+            palettes: None,
+            look,
+            tint: [255; 4],
+            cutoff: None,
+            two_colour: false,
+        });
+        let draw =
+            DrawItem { mesh: 0, material: 0, transform: Mat4::IDENTITY, weights: None, sort_key: None, fog: 1.0 };
+        g.draws = alloc::vec![draw; 3];
+        // Zone 1, zone 2, and every zone.
+        g.draw_zones = alloc::vec![1, 2, u32::MAX];
+        let mut r = Renderer::new(render::NullBackend::new(64, 64));
+        let up = upload(&mut r, g.as_ref()).unwrap();
+        r.commit().unwrap();
+        let (draws, statics) = place_all(&mut r, g.as_ref(), &up).unwrap();
+        let mut z = ZoneVisibility::new(g.as_ref(), &up, &draws, &statics);
+        assert_eq!(z.len(), 2, "draws in every zone are not tracked");
+        let cam = render::Camera {
+            eye: render::math::Vec3::new(0.0, -5.0, 0.0),
+            target: render::math::Vec3::ZERO,
+            up: render::math::Vec3::Z,
+            fov_y: 1.0,
+            near: 0.1,
+            far: 100.0,
+        };
+        let shown = |r: &mut Renderer<render::NullBackend>| r.render(&cam, [0.0; 4]).unwrap().visible;
+        z.apply(&mut r, 1).unwrap();
+        let one = shown(&mut r);
+        z.apply(&mut r, ALL_ZONES).unwrap();
+        assert_eq!(shown(&mut r), one + 1, "the zone-2 draw comes back");
+        z.apply(&mut r, 4).unwrap();
+        assert_eq!(shown(&mut r), one - 1, "only the all-zone draw is left");
+    }
 }

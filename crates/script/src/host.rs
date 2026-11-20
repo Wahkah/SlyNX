@@ -197,6 +197,13 @@ pub trait ScriptHost {
     fn poll_event(&mut self) -> Option<RaisedEvent> {
         None
     }
+
+    /// Sly 2 hook (run-time objects): the module of an object the interpreter has not attached, such as a
+    /// state-machine playback that runs its machine's module. `None` (the default): no module.
+    fn module_of(&mut self, object: ObjectId) -> Option<u32> {
+        let _ = object;
+        None
+    }
 }
 
 /// A host that does nothing (every default).

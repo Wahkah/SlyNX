@@ -320,9 +320,21 @@ impl Game {
         let mut ticking = core::mem::take(&mut self.ticking);
         self.world.ticking_snapshot(&mut ticking);
         let t = self.clock.game_time;
+        // Sly 2 / Sly 3: inside a visibility volume only objects sharing a bit of its mask are active.
+        let mask = self.world.shared.visibility_mask;
+        let by_mask = self.world.sly2.is_some() && mask != 0xFF;
         for &s in &ticking {
             let f = self.world.flags_column()[s as usize];
             if f & flags::ACTIVE == 0 || (f & flags::REAL_CLOCK != 0) != real || self.world.is_postponed(s, t) {
+                continue;
+            }
+            // Vehicles hook: the driven machine runs wherever it is (the hacking ship flies far above the level).
+            if by_mask
+                && self
+                    .world
+                    .handle(s)
+                    .is_some_and(|h| self.world.shared.driving != Some(h) && self.world.sly2_zone_mask(h) & mask == 0)
+            {
                 continue;
             }
             self.run_behaviour(s, dt, false);
@@ -379,6 +391,7 @@ impl Game {
             self.apply_player_events();
             self.world.integrate_movers(steps.game, steps.real, self.clock.game_time);
             self.update_objects(false, steps.game);
+            crate::behavior::vehicles::shots::step(&mut self.world, steps.game); // Vehicles hook: projectiles
             self.world.clear_inboxes();
             self.process_anim_commands();
         }
@@ -404,11 +417,20 @@ impl Game {
                 let touched = i.buttons != 0 || i.left != [0.0; 2] || i.right != [0.0; 2];
                 sly2_jobs::step(self, steps.game, touched);
                 self.flush_events();
+                // Vehicles hook: a job's machine is handed to the player while the job runs.
+                let (job, task) = self
+                    .world
+                    .sly2
+                    .as_deref()
+                    .and_then(|l| l.jobs.as_deref())
+                    .map_or((None, None), crate::behavior::vehicles::shots::job_of);
+                crate::behavior::vehicles::shots::follow_job(&mut self.world, job, task.as_deref());
             }
             // Sly 2 hook: state-machine and clip playbacks.
             if self.world.sly2.is_some() {
                 sly2_anim::step(&mut self.world, steps.game);
                 crate::anim::sly2_pose::step(&mut self.world); // Sly 2 hook: the clips applied to the poses
+                crate::behavior::sly2_commands::animation_sequence_starts(&mut self.world);
             }
             self.process_anim_commands();
             self.render.texture_time += steps.game;
@@ -432,6 +454,9 @@ impl Game {
         }
         let view = self.systems.camera.update(&self.world, &self.input, steps.real, self.systems.physics.queries());
         self.render.camera_extras = self.systems.camera.extras();
+        if let Some(m) = self.render.camera_extras.visibility_mask {
+            self.world.shared.visibility_mask = m;
+        }
         self.render.camera = view;
         let fwd = crate::math::normalize(crate::math::sub(view.target, view.eye));
         let left = crate::math::normalize(crate::math::cross(view.up, fwd));

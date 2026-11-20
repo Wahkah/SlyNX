@@ -350,7 +350,13 @@ impl PlayerSystem for SlyPlayer {
         for d in damage {
             if d.target.is_none() || d.target == Some(h) {
                 let mut out = Default::default();
-                p.damage(DamageKind::from_code(d.kind as i16), &mut out);
+                let r = p.damage(DamageKind::from_code(d.kind as i16), &mut out);
+                // A guard's attack effect throws the player (guards.md 6.2).
+                if let Some(v) = d.throw
+                    && r == crate::player::status::DamageOutcome::CharmLost
+                {
+                    p.velocity = v;
+                }
                 let crate::player::controller::PlayerOutput { events: ev, .. } = out;
                 events.extend(ev);
                 if let Some(r) = d.recover_to {

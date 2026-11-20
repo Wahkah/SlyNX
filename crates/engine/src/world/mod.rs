@@ -905,7 +905,7 @@ impl World {
 
     /// Hurts an object (the player): queued for the player system, and noticed by the target's behaviour.
     pub fn hurt(&mut self, target: Handle, source: Handle, kind: u8, recover_to: Option<[f32; 3]>) {
-        self.shared.damage.push(Damage { target: Some(target), source, kind, recover_to });
+        self.shared.damage.push(Damage { target: Some(target), source, kind, recover_to, throw: None });
         self.notify(target, Notice::Hit(source));
     }
 
@@ -913,7 +913,15 @@ impl World {
     pub fn hurt_player(&mut self, source: Handle, kind: u8, recover_to: Option<[f32; 3]>) {
         match self.player_target() {
             Some(p) => self.hurt(p, source, kind, recover_to),
-            None => self.shared.damage.push(Damage { target: None, source, kind, recover_to }),
+            None => self.shared.damage.push(Damage { target: None, source, kind, recover_to, throw: None }),
+        }
+    }
+
+    /// Hurts the player and throws it at `velocity` (guards' attack effects, guards.md 6.2).
+    pub fn hurt_player_thrown(&mut self, source: Handle, kind: u8, velocity: [f32; 3]) {
+        self.hurt_player(source, kind, None);
+        if let Some(d) = self.shared.damage.last_mut() {
+            d.throw = Some(velocity);
         }
     }
 

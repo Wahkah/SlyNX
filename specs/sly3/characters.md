@@ -37,7 +37,7 @@ sources:
     what: SafeHouse @ c70803ce, Sly3-Release/aihit.cpp, guard.cpp, damage.cpp, asegevent.cpp
     used_for: what the guard modes do (target lists, damage scaling) and event kinds 7 and 8; marked [R] in section 10
 reviewed_by: pending
-date: 2026-11-18
+date: 2026-11-19
 ---
 
 # Sly 3 playable characters
@@ -385,3 +385,177 @@ Mode 16 behaves as 14 and mode 15 as 12 [X]. A mode is not entered twice (the ti
 guard turns on other guards, and it spreads). The code that sends these two hit kinds was not found as an immediate
 in the executable; it is probably taken from data (an option of the hitting object) and is the remaining step to
 confirm this pairing, together with the reach of the hit.
+
+## 11. Stick input [X]
+
+Sly 3 reads the sticks with Sly 1's routine (`0x001A8930`, called for each stick by the pad update `0x001A8B88`:
+bytes 38/39 the left stick, 36/37 the right). Steps 1 to 4 are identical:
+
+1. **Bytes to axes.** Each stick gives two bytes, b_x and b_y (0 to 255). x = 2·b_x / 255 − 1 and
+   y = 1 − 2·b_y / 255, so up is positive y.
+2. **Waking up.** A stick reads (0, 0) until it is first seen in use: its bytes change from one frame to the next,
+   or either byte leaves the window 96 … 160. From then on it is read every frame. The flag is kept per stick.
+3. **Self-calibrating range.** The routine keeps, per stick, a range [lo, hi] for each of four directions d:
+   (1, 0), (0, 1), (0.7, 0.7) and (0.7, −0.7) (the table at `0x00345108`). The ranges start at **[−0.75, 0.75]** when
+   the pad is (re)connected (`0x001A88CC`). Each frame, for each direction:
+   - p = x·d.x + y·d.y;
+   - if p ≥ 0, hi = max(hi, p), else lo = min(lo, p);
+   - r = p / hi (or p / lo when p < 0).
+
+   The raw deflection is e = the largest r of the four (0 when none is positive).
+4. **Dead zone and response.** u = clamp(2·(e − 0.35), 0, 1): **no response below 35 % of the calibrated range**,
+   linear above it, and **full deflection from 85 %**. With the starting range this is 0.2625 to 0.6375 of the raw
+   axis.
+5. **Output (differs from Sly 1).**
+   - When u ≥ s − 0.2 (s is a remembered value, the previous frame's u in the normal case), s becomes u, and the direction is (x, y) × u × |v|, with
+     |v| = √(x² + y²). It is **not normalised** as in Sly 1, so a partly deflected stick gives a smaller vector
+     than u alone [X: `0x001A8B24` … `0x001A8B50`].
+   - When u falls faster than that, the remembered value s becomes s − 0.2 (never below 0) and the previous
+     direction is scaled by u / s. So the direction vector fades out over a few frames when the stick is released.
+   - The reported deflection is always u.
+
+## 12. Lookup slots by state: which clip each state plays
+
+### 12.1 Method [X] [R]
+
+Each lookup record (3.2) ends with the field where the game stores what it found. The reference's mapping file pairs
+every Sly 3 record with the Sly 2 field that holds the same thing [R]. A slot is named here only when that Sly 2
+field's role is established. Walk and run were traced in the executable (12.3).
+
+### 12.2 Slot → state → clip (object IDs) [X] [R]
+
+| Slot (Sly 3 field) | State | Sly (`0x345140`) | Bentley (`0x342890`) | Murray (`0x345FD8`) |
+|---|---|---|---|---|
+| +0x1134 | **idle**: the idle state machine (Sly 2 +0x1028) | 172 (record 0) | 451 (2) | 451 (2) |
+| walk gait, clips 0 and 1 (gait at +0x1470: clips at +0x1484, +0x14C4) | **full-speed move** at weight 1 (Sly 2's state-1 run; 12.3 corrects the earlier "walk" label) | 173, 174 (records 1, 2) | 449, 447 (0, 1) | 449, 447 (0, 1) |
+| run gait, clips 0 and 1 (Sly +0x1C90, Bentley +0x1770, Murray +0x1680) | **stick-driven move** (the gait `0x00173068` returns; 12.3) | 307, 308 (second table `0x345638`, records 6, 7) | 535, 534 (26, 27) | 535, 534 (33, 34) |
+| Murray's third gait (+0x15A0) | **carry** gait (12.3) [D] | — | — | 528, 529 (17, 18) |
+| jump block +0x3E0 … +0x3F0 | **jump**: five segments, by the jump's sub-kind 0 to 4 | 200, 204, 203, 201, 202 (records 15, 19, 18, 16, 17) | 696, 700, 699, 697, 698 (33, 37, 36, 34, 35) | 696, 700, 699, 697, 698 (53, 57, 56, 54, 55) |
+| fall block (Sly, Murray +0x3F4 … +0x404; Bentley +0x408, +0x420, —, +0x40C, +0x410) | **fall**: the same five sub-kinds | 208, 212, 211, 209, 210 (20, 24, 23, 21, 22) | 707, 710, —, 708, 709 (38, 42, —, 39, 40) | 701, 705, 704, 702, 703 (58, 62, 61, 59, 60) |
+| Sly +0x41C, Bentley +0x424 (Sly 2 jump +0x154) | **ledge hang** | 217 (14) | 711 (43) | 706 (63) [I by the shared layout] |
+| Sly +0x1EB0 / +0x1EB4 (Sly 2 +0x2000 / +0x2004) | **combat dodge**, left and right | 312, 313 (80, 81) | — | — |
+| Sly +0x1A74, +0x1A80, +0x1A8C; +0x1A50 | **swing on a hook**: the swing blend's three clips; the hang state machine | 213, 214, 215; 216 (54 to 57) | — | — |
+| shared table `0x342DD0` records 23 to 29 | **paraglide**: the opening clip, the five glide-blend clips, the glider's camera zone | 1727; 1728, 1729, 1730, 1732, 1731; 1733 | the same | the same |
+
+- **Attack** is not a lookup slot: the cane, chair and Murray attacks are the combo definitions' clips (class 148,
+  options 1673 standing, 1676 moving, 1679 follow-up; section 5) [X].
+- **Land**: Sly 2 has no separate landing slot either; landing is the end of the fall segment and the return to the
+  idle state machine [R].
+
+The same IDs name different clips for each character: each looks them up inside its own group (Sly 2 9) [D].
+
+### 12.3 Posing answers: directions, gait speeds, hang, punches, blends
+
+**Jump and fall sub-kinds** [X: `0x001B8EB0`, the same rule and constants as Sly 2]. At take-off the game takes the
+stick's angle minus the body's facing, normalised to −π … π. Positive means the stick points to the left of the
+facing, counter-clockwise seen from above with z up. Then:
+
+| Sub-kind | Direction | Rule | Sly jump / fall | Turn applied to the heading after the move [R] |
+|---:|---|---|---|---:|
+| 0 | none: the default before a direction is chosen, and every fixed launch (hang, climb, scripted) | — | 200 / 208 | 0 |
+| 1 | stick to the **right** | 1.0996 ≤ \|a\| ≤ 2.0420 and a ≤ 0 | 204 / 212 | +π/2 |
+| 2 | stick to the **left** | 1.0996 ≤ \|a\| ≤ 2.0420 and a > 0 | 203 / 211 | −π/2 |
+| 3 | **forward** | \|a\| < 1.0996 (`0x3F8CBE4C`) | 201 / 209 | 0 |
+| 4 | **backward** | \|a\| > 2.0420 (`0x4002B0B4`) | 202 / 210 | π |
+
+The choice is made once per jump phase, for the initial jump and again for the double jump. In the fall state the
+same index picks the fall clip. A missing clip falls back to index 0 [R]. The jump and fall clips have no root
+travel (201 moves 0.4 units in 3.17 s) [D]. Their motion comes from the launch and gravity.
+
+**Gait speeds** (v_apt, root travel of transform 1 over one play; Sly is group `jt`) [D]. Sly 3 keeps Sly 2's pairs
+unchanged. One correction to 12.2: the gait at +0x1470 is the **full-speed** gait, played at weight u = 1 (Sly 2's
+state-1 "run"). The gait that `0x00173068` returns is the **stick-driven** one (Sly 2's walk / move). Sly's
+full-speed code (`0x001AD868`) sets the weight to 1 (`0x00258CF0`), takes the blended velocity (`0x00258DA0`) and
+multiplies it by **1.3** [X], as Sly 2 does.
+
+| Character | Gait | Slow clip: length, travel, speed | Fast clip | Weight | Speed |
+|---|---|---|---|---|---|
+| Sly | +0x1470 | 173: 1.0 s, 160, 160/s | 174: 0.5 s, 320, 640/s | 1 | 640 × 1.3 = **832** [X] |
+| Sly | +0x1C90 (stick) | 307: 1.3333 s, 300.8, 225.6/s | 308: 0.6667 s, 340, 510/s | stick | 225.6 to 510 |
+| Bentley | +0x1470 | 449: 1.0 s, 100, 100/s | 447: 0.3333 s, 250, 750/s | 1 [R] | **750** |
+| Bentley | +0x1770 (stick) | 535: 2.0 s, 220, 110/s | 534: 0.5 s, 255, 510/s | stick | 110 to 510 |
+| Murray | +0x1470 | 449: 0.3333 s, 170, 510/s | 447: 0.5 s, 400, 800/s | 1 [R] | **800** |
+| Murray | +0x1680 (stick) | 535: 1.3333 s, 300, 225/s | 534: 0.5 s, 255, 510/s | stick | 225 to 510 |
+| Murray | +0x15A0 | 528: 1.0 s, 125, 125/s | 529: 0.6 s, 310, 516.7/s | stick | 125 to 516.7 |
+
+- Murray's third gait is his **carry gait**. Its clips match Sly 2's carry pair (482 / 483) exactly, which settles
+  that question.
+- Speed at weight u: Sly 2's footfall-weighted rule ([../sly2/characters.md](../sly2/characters.md) 1.1),
+  `((1 − u)·d_slow + u·d_fast) / ((1 − u)·T_slow + u·T_fast)`.
+- The playback rate is 1, unless something scales the blend. To match a crew member's actual speed v with one
+  clip, play it at v / (the clip's speed).
+
+**Ledge hang (Sly 217, Bentley 711, Murray 706)** [R]. This is the jump machine's ledge state (Sly 2's jump state
+17, which enters the ledge and plays this slot). It is used when a jump or fall catches a ledge edge, and only under
+player control. Crew posing never needs it. In v_apt, Sly's 217 is loaded (6.3333 s) and Murray's 706 is loaded
+(1.6667 s), but Bentley's group has no 711 [D]. *Interpretation:* Bentley cannot catch ledges, and the record is
+left over from the shared table layout [I].
+
+**Murray's punches: lookup records, not combo definitions** [X] [D]. Murray has no class-148 combo records in any
+world. Those exist only in the groups `jt`, `bentley`, `penelope`, `shaman` and `panda_king`. His punches keep Sly
+2's scheme: five consecutive lookup records of his table `0x345FD8`, records 5 to 9, fill the fields +0x187C to
++0x188C (Sly 2's +0x17FC to +0x180C).
+
+| Punch index | Field | Clip (v_apt) | Length | Sly 2 role [R] (Sly 2 clip) |
+|---:|---|---:|---:|---|
+| 0 | +0x187C | **457** | 0.6667 s | Square, first (424) |
+| 1 | +0x1880 | **458** | 0.6667 s | Square, second (425) |
+| 2 | +0x1884 | **468** | 0.6667 s | Triangle, first (435) |
+| 3 | +0x1888 | **467** | 0.6667 s | Triangle, second (434) |
+| 4 | +0x188C | **244** | 0.9167 s | the fifth, special punch (196) |
+
+- The punch-state routine `0x001E1018` takes the punch index n (−1 none, 0 to 4). It stores n at +0x1890 and the
+  game time at +0x1894, clears +0x1898 to +0x18A4, and plays the clip in field +0x187C + 4n. Index 4 takes a
+  separate branch.
+- The lengths match Sly 2's pattern exactly (four of 0.6667 s, one of 0.9167 s) [D].
+
+**Swing blend (Sly 213, 214, 215, in that order)** [R: Sly 2's swing, same three-clip layout]:
+
+- Weights: (active × speed, active × (1 − speed), 1 − active).
+- active and speed are smoothed toward targets by sub-state: hanging still (0) 1 and 1; pushing (2) 1 and 0;
+  free-swinging (1) 0, and speed 1 when the current speed is above 0.5, else 0. Smoothing uses (1, 0, 0.1) for
+  active and (4, 0, 0.1) for speed.
+- The blend's time follows the swing angle: target time = length × (clamp(angle / 1.7, −1, 1) + 1) / 2, reached at
+  no more than 3 per second.
+- A still pose is weights (1, 0, 0), that is 213 alone, at the middle time (0.3333 s of 0.6667 s).
+
+**Glide blend (1728, 1729, 1730, 1732, 1731: lookup records 24 to 28, in that order)** [R: Sly 2's glide]:
+
+- On entering the glide, the weights are (1, 0, 0, 0, 0).
+- Each frame, with m the stick deflection, a = the stick angle − the heading, s = m·sin a and c = m·cos a:
+  - w0 (1728, neutral) = 1 − m;
+  - for m > 0, q = m / (|s| + |c|);
+  - w1 (1729) = s·q when s ≥ 0 (stick left);
+  - w2 (1730) = −s·q when s < 0 (stick right);
+  - w3 (1732) = c·q when c > 0 (forward);
+  - w4 (1731) = −c·q otherwise (back).
+- The weights sum to 1.
+- The opening clip is 1727 (0.25 s). All five blend clips are 2.0833 s long [D].
+
+**Accessory records** (flag `0x20`, IDs listed in 12.4): not settled. In v_apt they are not group records, nested
+objects or transform IDs of the three characters [D]. The next place to look is the characters' mesh pieces
+(globs), which carry filters and conditions ([classes/solid-object.md](classes/solid-object.md)). The states that
+show them are still open.
+
+### 12.4 Not settled
+
+- **Walk and run: settled** [X]. Each character's start-up code builds its gaits with the footstep sound 111
+  (`0x00258930`): Sly at +0x1470 and +0x1C90 (`0x001AA118`), Bentley at +0x1470 and +0x1770 (`0x0013D2D0`), Murray
+  at +0x1470, +0x15A0 and +0x1680 (`0x001DCA30`). A gait's two clips sit at its +0x14 and +0x54, and the lookup
+  tables fill exactly those fields (12.2; Sly's run clips come from his second table, `0x345638`, which his
+  post-load reads at `0x001AA2D4`). The routine at `0x00173068` returns each character's run gait (Sly +0x1C90,
+  Bentley +0x1770, Murray +0x1680), which fixes which gait is the run. A run gait can be replaced while the
+  character holds an object whose own gait is active (`0x00173408` on the object at +0x1108; for example a carried
+  object) [X; I for the example].
+- **The other slots** (Sly 106, Bentley 84, Murray 127 records) need their Sly 2 fields named first.
+- **Accessory meshes.** Records with flag `0x20` are parts or meshes of the character, not looked up by object ID:
+  - Sly: 254, 256, 257 to 260, 252, 253, 255;
+  - Bentley: 611, 714, 715, 753 to 756;
+  - Murray: 714, 715, 542 to 545, 753 to 756;
+  - all three: 1710.
+
+  Which are shown only in some states, and when, is open (12.3).
+- **Collision toggles (option 812)**: each playable character carries 14 entries (index, object, collision tag),
+  for example Sly (0, 8043, 14790), (1, 8031, 14791) [D]. At load the game finds each tag among the character's
+  collision entries and **turns it off** [R: the handler `0x00109BD0`]. Some states switch the entries back on;
+  which states is open. These are collision shapes, not meshes.

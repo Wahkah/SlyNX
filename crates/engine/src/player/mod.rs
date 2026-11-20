@@ -20,6 +20,7 @@ pub mod consts;
 pub mod controller;
 pub mod input;
 pub mod status;
+pub mod stick;
 
 #[cfg(test)]
 mod tests;

@@ -248,6 +248,13 @@ pub enum GangEvent {
     },
     /// Sly 3: the combo ended (back from state 23).
     ComboEnded,
+    /// A pop-up hit's second, held reaction begins (sound 0x6A; characters.md 2.2).
+    HeldReaction,
+    /// Sly 3: the Grapple-Cam was put away (`grabbed`: after the grab, phase 7).
+    GrappleCamEnded {
+        /// It ended through the grab.
+        grabbed: bool,
+    },
     /// Sly 3: Bentley's chair melee (Insanity Strike 34, Size Destabilizer 8): the clip played and the hit kind its
     /// hits carry (`sly3::hit`).
     ChairMelee {
@@ -312,6 +319,11 @@ impl Fishing {
     pub const LET_GO: f32 = 400.0;
 }
 
+/// Contact kind `0x8000`: the swarmers' pop-up cobra and tentacle (characters.md 2.2).
+pub const POPUP_KIND: u32 = 0x8000;
+/// Sound of a pop-up hit's second reaction.
+pub const HELD_REACTION_SOUND: i32 = 0x6A;
+
 /// Sly 3's Rocket Boots (gadgets.md 6.2): the start-up lasts at least this long.
 pub const ROCKET_START: f32 = 0.07;
 /// Rocket Boots: the start-up also lasts until Sly's heading is within this of the stick's direction.
@@ -323,8 +335,15 @@ pub const ROCKET_WALL: f32 = -0.6;
 pub const MAP_MIN_TIME: f32 = 0.5;
 /// Sly 3's Be The Ball (gadgets.md 6.4): the ball's collision radius.
 pub const BALL_RADIUS: f32 = 75.0;
-/// Be The Ball: Square's impulse per unit of stick forward (14 × 4).
-pub const BALL_KICK: f32 = 56.0;
+/// Be The Ball (gadgets.md 6.10): Square's spin target per unit of stick magnitude (rad/s), about the axis at the
+/// heading + π/2.
+pub const BALL_SPIN: f32 = 14.0;
+/// Be The Ball: the most one Square press changes the spin by (rad/s).
+pub const BALL_SPIN_STEP: f32 = 4.0;
+/// Be The Ball: the random spin added on entering the ball (length range, rad/s; any horizontal direction).
+pub const BALL_TUMBLE: [f32; 2] = [1.5, 2.5];
+/// Sly 3's treasure map snaps Sly's heading to this many directions (45°; written by the map's set-up, 6.10).
+pub const MAP_DIRECTIONS: u32 = 8;
 /// Be The Ball: Cross jumps to this height (the launch speed is √(|g| × 630)).
 pub const BALL_JUMP: f32 = 315.0;
 
@@ -431,6 +450,15 @@ pub struct Character {
     pub fishing: Option<Fishing>,
     /// Sly 3: time since the treasure map was taken out.
     pub map_time: f32,
+    /// Sly 3: Be The Ball's spin (angular velocity, rad/s; the ball moves only by rolling on it).
+    pub ball_spin: Vec3,
+    /// Sly 3: the state of the ball's random spins (deterministic).
+    pub ball_seed: u32,
+    /// A pop-up hit (contact kind `0x8000`, characters.md 2.2): 1 while the knock-back reaction runs, 2 during the
+    /// second, held reaction that follows it; 0 otherwise.
+    pub held_reaction: u8,
+    /// Sly 3: Bentley's Grapple-Cam controller while the camera is out, and the time in its phase.
+    pub grapple: Option<(super::sly3::GrappleCam, f32)>,
     /// Sly 3: Murray rolling (Be The Ball).
     pub rolling: bool,
     /// Sly 3: the cane combo: Triangle presses so far and the time since the last.
@@ -496,6 +524,10 @@ impl Character {
             wall: None,
             fishing: None,
             map_time: 0.0,
+            ball_spin: [0.0; 3],
+            ball_seed: 0x9E37_79B9,
+            held_reaction: 0,
+            grapple: None,
             rolling: false,
             cane: (0, 0.0),
             combo_defs: super::combo::ComboSet::default(),
@@ -618,6 +650,7 @@ impl Character {
                 self.aim = None;
             }
             self.set_state(dmg, out);
+            self.held_reaction = u8::from(h.kind & POPUP_KIND != 0);
         }
         if r != Reaction::Ignored {
             out.push(GangEvent::Hurt(r));
@@ -665,14 +698,17 @@ impl Character {
         self.dart_reload = (self.dart_reload - dt).max(0.0);
     }
 
-    /// The stick as (unit world direction, deflection after the dead zone).
+    /// The stick as (unit world direction, deflection): the gang's stick reader has applied the games' rule
+    /// (`player::stick`); without one (a hand-made input) the stick's length is the deflection.
     fn stick(&self, input: &GangInput, s: &Shared) -> (Vec3, f32) {
+        let _ = s;
         let w = input.world_stick();
-        let l = length(w).min(1.0);
-        if l <= s.tun.dead_zone {
+        let l = length(w);
+        if l <= 1e-4 {
             return ([0.0; 3], 0.0);
         }
-        (normalize(w), (l - s.tun.dead_zone) / (1.0 - s.tun.dead_zone))
+        let u = if input.deflection > 0.0 { input.deflection } else { l.min(1.0) };
+        (normalize(w), u.min(1.0))
     }
 
     /// Ground or air movement with collisions; returns whether the character is on the ground afterwards.
@@ -687,6 +723,7 @@ impl Character {
         let g = if gravity && !self.grounded { spec::GRAVITY } else { 0.0 };
         let vz1 = if self.grounded { 0.0 } else { vz0 + g * dt };
         let delta = [want[0] * dt, want[1] * dt, if self.grounded { 0.0 } else { 0.5 * (vz0 + vz1) * dt }];
+        let start_z = self.position[2];
         let r = move_and_slide(world.cw, &world.filter, shape, self.origin(s), delta, &params);
         self.position = sub(r.position, [0.0, 0.0, self.body_radius(s)]);
         self.velocity = [want[0], want[1], vz1];
@@ -703,7 +740,25 @@ impl Character {
                 self.velocity[2] = 0.0;
             }
         }
-        let on = r.ground.is_some() && self.velocity[2] <= 0.0;
+        let mut on = r.ground.is_some() && self.velocity[2] <= 0.0;
+        // A floor whose stored surfaces do not cover this point (an incomplete outline): the collision tree's
+        // one-sided rule finds it (TriMesh::tree_floor). Only where no stored surface is below within the reach, so
+        // a floor the mesh has keeps its own height.
+        // It also wins over a lower surface the capsule's snap found beside the hole.
+        if self.velocity[2] <= 0.0 {
+            // From just above the feet (or, after a snap down, above where the step began) down this frame's drop
+            // and the 30-unit snap while walking: a floor the character reaches now, never one above its feet.
+            let from = [self.position[0], self.position[1], start_z.max(self.position[2]) + 2.0];
+            let reach = (from[2] - self.position[2]) + if self.grounded { 30.0 } else { 0.0 } + (-delta[2]).max(0.0);
+            if world.cw.ground_probe(from, reach + 50.0, &world.filter).is_none()
+                && let Some(g) = world.cw.tree_ground_probe(from, reach, &world.filter)
+                && g.is_ground
+                && (!on || (g.point[2] > self.position[2] && g.point[2] - self.position[2] <= 8.0))
+            {
+                self.position[2] = g.point[2];
+                on = true;
+            }
+        }
         if on {
             self.velocity[2] = 0.0;
             self.off_floor = 0.0;
@@ -958,6 +1013,10 @@ impl Character {
         if self.fishing.is_some() {
             self.fish(dt, input, world, s, out);
         }
+        // Sly 3's Grapple-Cam.
+        if self.grapple.is_some() {
+            self.grapple_cam(dt, s, out);
+        }
         // A move item running.
         if let Some((item, t)) = self.moving {
             let t = t - dt;
@@ -1179,9 +1238,27 @@ impl Character {
         match b {
             // Holding the button keeps the line out (gadgets.md 6.5).
             behaviour::FISHING_POLE => self.fishing = Some(Fishing { button: btn, ..Fishing::default() }),
-            behaviour::GRAPPLE_CAM => out.push(GangEvent::GrappleCam),
+            // The item's own button deploys the camera straight into phase 4 (control); pressed again in phases 4
+            // to 6 it goes to phase 7 (gadgets.md 6.10).
+            behaviour::GRAPPLE_CAM => match &mut self.grapple {
+                None => {
+                    let mut g = super::sly3::GrappleCam::default();
+                    g.deploy();
+                    self.grapple = Some((g, 0.0));
+                    out.push(GangEvent::GrappleCam);
+                }
+                Some((g, t)) => {
+                    if g.item_pressed() {
+                        *t = 0.0;
+                    }
+                }
+            },
             behaviour::BE_THE_BALL => {
                 self.rolling = !self.rolling;
+                self.ball_spin = [0.0; 3];
+                if self.rolling {
+                    self.tumble();
+                }
                 out.push(GangEvent::Rolling(self.rolling));
             }
             behaviour::ROCKET_BOOTS => {
@@ -1202,6 +1279,50 @@ impl Character {
                 out.push(GangEvent::Disguise(self.disguise));
             }
             _ => {}
+        }
+    }
+
+    /// Be The Ball's random spin (gadgets.md 6.10): a horizontal vector at a random angle with a random length of
+    /// 1.5 to 2.5, added to the spin.
+    fn tumble(&mut self) {
+        let mut next = || {
+            self.ball_seed ^= self.ball_seed << 13;
+            self.ball_seed ^= self.ball_seed >> 17;
+            self.ball_seed ^= self.ball_seed << 5;
+            (self.ball_seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let a = (next() * 2.0 - 1.0) * core::f32::consts::PI;
+        let l = BALL_TUMBLE[0] + next() * (BALL_TUMBLE[1] - BALL_TUMBLE[0]);
+        self.ball_spin = add(self.ball_spin, [l * cos(a), l * sin(a), 0.0]);
+    }
+
+    /// Sly 3's Grapple-Cam while out (gadgets.md 6.9, 6.10): in control (phases 4 to 6) Cross or Square within
+    /// 0.1 s goes to phase 7 (the grab) and Triangle or Circle releases; phase 7 ends after its animation (taken as
+    /// `activation_time` when no animation driver reports it).
+    fn grapple_cam(&mut self, dt: f32, s: &Shared, out: &mut Vec<GangEvent>) {
+        let Some((mut g, t)) = self.grapple else { return };
+        let t = t + dt;
+        let i = super::sly3::GrappleCamInput {
+            playback_done: t >= s.tun.activation_time,
+            continue_press: self.buffer.take(button::CROSS, 0.1) || self.buffer.take(button::SQUARE, 0.1),
+            release_press: self.buffer.take(button::TRIANGLE, 0.1) || self.buffer.take(button::CIRCLE, 0.1),
+            ..super::sly3::GrappleCamInput::default()
+        };
+        let phase = g.phase;
+        let cue = g.step(&i);
+        let t = if g.phase != phase { 0.0 } else { t };
+        self.grapple = Some((g, t));
+        match cue {
+            Some(super::sly3::GrappleCamCue::Release) => out.push(GangEvent::GrappleCamEnded { grabbed: false }),
+            Some(super::sly3::GrappleCamCue::Exit) => {
+                self.grapple = None;
+                out.push(GangEvent::GrappleCamEnded { grabbed: phase == 7 });
+            }
+            Some(super::sly3::GrappleCamCue::ReleaseAndExit) => {
+                self.grapple = None;
+                out.push(GangEvent::GrappleCamEnded { grabbed: false });
+            }
+            None => {}
         }
     }
 
@@ -1485,7 +1606,7 @@ impl Character {
             // The treasure map: with the stick forward, the heading snaps to n directions (gadgets.md 6.3).
             if self.active.is_some_and(|a| a.0 == behaviour::TREASURE_MAP) && input.stick[1] > 0.0 {
                 let w = input.world_stick();
-                let step = core::f32::consts::TAU / t.map_directions.max(1) as f32;
+                let step = core::f32::consts::TAU / MAP_DIRECTIONS as f32;
                 let q = atan2(w[1], w[0]) / step;
                 self.yaw = (q + 0.5 - crate::math::rem_euclid(q + 0.5, 1.0)) * step;
             }
@@ -1687,6 +1808,14 @@ impl Character {
         }
         if self.grounded && self.state_time >= s.tun.hurt_time && self.health.value > 0.0 {
             self.velocity = [0.0; 3];
+            if self.held_reaction == 1 {
+                // A pop-up hit: sound 0x6A and a second, held reaction before getting up (characters.md 2.2).
+                self.held_reaction = 2;
+                self.state_time = 0.0;
+                out.push(GangEvent::HeldReaction);
+                return;
+            }
+            self.held_reaction = 0;
             self.set_state(stand, out);
         }
     }
@@ -1754,16 +1883,27 @@ impl Character {
                 self.set_state(murray::AIR, out);
                 return;
             }
-            let mut v = [self.velocity[0], self.velocity[1], 0.0];
-            if self.buffer.take(button::SQUARE, spec::WINDOW_SHORT) {
-                v = madd(v, heading(self.yaw), BALL_KICK * input.stick[1]);
-            }
             let (dir, u) = self.stick(input, s);
             if u > 0.0 {
                 self.yaw = turn_toward(self.yaw, atan2(dir[1], dir[0]), t.turn_rate, dt);
             }
-            let k = (t.ball[1] * dt).min(1.0);
-            v = madd(v, sub(scale(dir, t.ball[0] * u), v), k);
+            // Square: the spin moves by at most 4 toward 14 × the stick's magnitude about the sideways axis.
+            if self.buffer.take(button::SQUARE, spec::WINDOW_SHORT) {
+                let h = heading(self.yaw);
+                let target = scale(
+                    [-h[1], h[0], 0.0],
+                    BALL_SPIN * crate::math::length([input.stick[0], input.stick[1], 0.0]).min(1.0),
+                );
+                let mut d = sub(target, self.ball_spin);
+                let l = length(d);
+                if l > BALL_SPIN_STEP {
+                    d = scale(d, BALL_SPIN_STEP / l);
+                }
+                self.ball_spin = add(self.ball_spin, d);
+            }
+            // Rolling without slipping on the 75-unit sphere: v = R · (ω × up).
+            let w = self.ball_spin;
+            let v = scale([w[1], -w[0], 0.0], BALL_RADIUS);
             self.move_body(dt, world, s, v, true);
             return;
         }
@@ -2009,6 +2149,11 @@ impl Character {
     fn bentley(&mut self, dt: f32, input: &GangInput, world: &GangWorld<'_>, s: &Shared, out: &mut Vec<GangEvent>) {
         let t = &s.tun;
         let c = &s.consts;
+        // Sly 3: while the Grapple-Cam is out the buttons are the camera's.
+        if self.grapple.is_some() {
+            self.move_body(dt, world, s, [0.0; 3], true);
+            return;
+        }
         // Crossbow swing (Square within 0.1 s).
         // Sly 3's Bentley is in his wheelchair: no crossbow swing.
         if !s.items.is_sly3()

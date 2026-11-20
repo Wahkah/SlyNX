@@ -183,6 +183,7 @@ impl Hud {
         // Prompt.
         if let (Some(p), Some(f)) = (&self.prompt, font)
             && self.prompt_screen.visible()
+            && !p.text.is_empty()
         {
             let a = self.prompt_screen.coverage();
             let w = (cw * 0.6).min(420.0);

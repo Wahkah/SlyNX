@@ -220,7 +220,12 @@ pub struct Walk<'a, 't> {
     /// Bodies the spec's rule could not decide, parsed with the other form because it ends exactly at the body's
     /// declared size: (class, body offset, what).
     pub undecided: Vec<(i16, u32, &'static str)>,
+    /// Object lists entered and not yet left.
+    depth: u32,
 }
+
+/// Deepest nesting of object lists read (the disc's are a few levels deep).
+pub const MAX_OBJECT_DEPTH: u32 = 64;
 
 fn header(r: &mut Reader<'_>) -> Result<Header> {
     let parent = r.i16()?;
@@ -237,7 +242,7 @@ fn skip_string(r: &mut Reader<'_>) -> Result<(u32, u32)> {
 
 impl<'a, 't> Walk<'a, 't> {
     pub fn new(data: &'a [u8], table: &'t OptionTable, shared: &'t BTreeMap<i32, bool>) -> Walk<'a, 't> {
-        Walk { data, table, shared, errors: Vec::new(), bodies: 0, undecided: Vec::new() }
+        Walk { data, table, shared, errors: Vec::new(), bodies: 0, undecided: Vec::new(), depth: 0 }
     }
 
     fn options(&self, r: &mut Reader<'_>) -> Result<OptionList> {
@@ -250,7 +255,14 @@ impl<'a, 't> Walk<'a, 't> {
         if n < 0 {
             return Err(r.corrupt("negative object count"));
         }
-        (0..n).map(|_| self.record(r)).collect()
+        // Lists nest through bodies; corrupt data must not recurse without bound.
+        if self.depth >= MAX_OBJECT_DEPTH {
+            return Err(r.corrupt("object lists nested too deeply"));
+        }
+        self.depth += 1;
+        let list = (0..n).map(|_| self.record(r)).collect();
+        self.depth -= 1;
+        list
     }
 
     /// Reads one object record (2.2) and parses its body.
@@ -266,7 +278,7 @@ impl<'a, 't> Walk<'a, 't> {
             return Err(r.corrupt("negative body size"));
         }
         let body_offset = r.pos();
-        let end = body_offset + size as usize;
+        let end = body_offset.saturating_add(size as usize);
         if end > self.data.len() {
             return Err(r.corrupt("body runs past the end of the world"));
         }
@@ -824,5 +836,19 @@ mod tests {
         let mut r = Reader::new(&c);
         vector_curve(&mut r, 4).unwrap();
         assert_eq!(r.pos(), c.len());
+    }
+
+    #[test]
+    fn nesting_is_capped() {
+        let table = OptionTable::default();
+        let shared = BTreeMap::new();
+        let d = 0i16.to_le_bytes();
+        let mut w = Walk::new(&d, &table, &shared);
+        // An empty list reads at any depth below the cap, and is refused at it.
+        w.depth = MAX_OBJECT_DEPTH - 1;
+        assert!(w.object_list(&mut Reader::new(&d)).is_ok());
+        assert_eq!(w.depth, MAX_OBJECT_DEPTH - 1, "the depth is restored");
+        w.depth = MAX_OBJECT_DEPTH;
+        assert!(w.object_list(&mut Reader::new(&d)).is_err());
     }
 }

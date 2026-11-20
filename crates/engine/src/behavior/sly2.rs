@@ -40,6 +40,8 @@ use crate::world::{Notice, World};
 pub mod opt {
     /// Hit points.
     pub const HIT_POINTS: u16 = 254;
+    /// Block capacity: hits are absorbed by it before they reach the hit points (vehicles-and-minigames.md 7.2).
+    pub const BLOCK: u16 = 257;
     /// Ignores hit damage.
     pub const IGNORE_HITS: u16 = 232;
     /// Attacks (action objects, *add*).
@@ -94,6 +96,11 @@ pub mod class {
     pub const SWARMER: i16 = 57;
     /// Guard.
     pub const GUARD: i16 = 58;
+    /// Bosses and story characters on the guards' engine (vehicles-and-minigames.md 7.1 and 7.2: Dimitri 59 to
+    /// the bear cub 67).
+    pub const BOSS_FIRST: i16 = 59;
+    /// See [`BOSS_FIRST`].
+    pub const BOSS_LAST: i16 = 67;
 }
 
 /// Eye height above the guard (3).
@@ -128,6 +135,36 @@ pub const GUARD_STRIKE: (f32, u32) = (10.0, 0x200);
 pub const SWARMER_STRIKE: (f32, u32) = (3.0, 0x200);
 /// Hit points one attack of the gang takes. *Placeholder*: characters.md does not give them.
 pub const GANG_HIT: f32 = 20.0;
+/// An action's animation reference (guards.md 6.4): (object ID of a clip or state machine, start index).
+pub const ACTION_ANIM: u16 = 364;
+/// Clip events that switch damage parts on and off by tag (guards.md 6.3).
+pub const PART_ON: i8 = 15;
+/// See [`PART_ON`].
+pub const PART_OFF: i8 = 16;
+/// Event raised when hit (vehicles-and-minigames.md 7.5): (object, attacker, value).
+pub const EVENT_HIT: u32 = 11;
+/// Event raised before using an action: (object, action); the scripts' answer allows or refuses it.
+pub const EVENT_ACTION: u32 = 24;
+/// Two-character framing (camera.md 2.1): a method on Rajan, 1 on, 0 off.
+pub const PAIR_FRAMING: u16 = 1438;
+/// Rajan's class (the only one that frames a pair).
+pub const RAJAN_CLASS: i16 = 61;
+/// Murray's class (the other of the pair).
+pub const MURRAY_CLASS: i16 = 54;
+/// Bentley's class: his hits never count in a boss fight (vehicles-and-minigames.md 7.5).
+pub const BENTLEY_CLASS: i16 = 55;
+
+/// Jean Bison's fight (vehicles-and-minigames.md 7.5). His second attack is refused until the 12th counted hit,
+/// then allowed once per random interval. The job scripts answer event 24 with this rule; the script host gives
+/// events no answers yet, so the guard applies it itself.
+pub mod bison {
+    /// His second action (clip 32387).
+    pub const SECOND_ACTION: i32 = 32373;
+    /// Counted hits before it is allowed.
+    pub const SECOND_AFTER: u32 = 12;
+    /// The random interval between its uses (custom property 1464), seconds.
+    pub const SECOND_INTERVAL: [f32; 2] = [2.5, 3.5];
+}
 
 /// A noise (4): a short-lived point of interest.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -246,6 +283,62 @@ pub struct Attack {
     pub wait: [f32; 2],
     /// Half the angle within which the target must be, radians.
     pub half_angle: f32,
+    /// The action object's ID (−1: the default attack).
+    pub action: i32,
+    /// Its clip's length (option 364), seconds; 0 when it has none (the attack lands at once).
+    pub length: f32,
+    /// The windows its clip switches damage parts on (events 15 and 16): (on, off, part tag), the first
+    /// [`Attack::windows`] used.
+    pub strike: [Window; MAX_WINDOWS],
+    /// How many of [`Attack::strike`] are used.
+    pub windows: u8,
+}
+
+/// A strike window: (on, off, part tag), seconds into the attack's clip.
+pub type Window = (f32, f32, u32);
+
+/// At most this many strike windows are kept per attack clip (the wolf's bite has three).
+pub const MAX_WINDOWS: usize = 6;
+
+/// A damage part of a guard's body (guards.md 6.3, classes/solid-object.md 2 row 7): its tag, contact kind and
+/// the health units a touch takes (the contact value negated).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DamagePart {
+    /// The tag clips switch it by.
+    pub tag: u32,
+    /// Contact kind bits.
+    pub kind: u32,
+    /// Health units a touch takes.
+    pub amount: f32,
+}
+
+/// The damage parts of a body: its collision parts with a contact value below 0 (in the object's own record and
+/// the records under it).
+pub fn damage_parts(world: &World, h: Handle) -> Vec<DamagePart> {
+    let mut out = Vec::new();
+    let Some(r) = world.sly2_record(h) else { return out };
+    let mut stack = alloc::vec![r];
+    while let Some(r) = stack.pop() {
+        let formats_sly2::stream::Body::Solid(s) = &r.body else { continue };
+        for p in &s.collision {
+            if p.contact_value() < 0 && p.contact_kind() != 0 && !out.iter().any(|d: &DamagePart| d.tag == p.tag()) {
+                out.push(DamagePart { tag: p.tag(), kind: p.contact_kind(), amount: -f32::from(p.contact_value()) });
+            }
+        }
+        stack.extend(s.children.iter());
+    }
+    out
+}
+
+/// An attack being played: which, for how long, whether it has landed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Acting {
+    /// The attack.
+    pub attack: Attack,
+    /// Seconds into it.
+    pub t: f32,
+    /// Which windows have struck (bit per window).
+    pub landed: u32,
 }
 
 /// A Sly 2 guard or swarming creature.
@@ -255,6 +348,10 @@ pub struct Sly2Guard {
     pub swarmer: bool,
     /// Hit points left.
     pub hit_points: f32,
+    /// Block left (option 257).
+    pub block: f32,
+    /// A boss or story character (classes 59 to 67).
+    pub boss: bool,
     /// The job.
     pub job: Job,
     /// The detector's state for the player: 0 unseen, 1 seen, 2 lost.
@@ -285,24 +382,50 @@ pub struct Sly2Guard {
     pub route_clock: f32,
     /// Length of the current pause time.
     pub route_pause: f32,
+    /// The attack it is playing.
+    pub acting: Option<Acting>,
+    /// Its body's damage parts (guards.md 6.3).
+    pub parts: Vec<DamagePart>,
+    /// Hits counted as a boss fight counts them: not by Bentley, and only when the hit points went down.
+    pub counted_hits: u32,
+    /// Hit points at the last counted hit.
+    pub counted_at: f32,
+    /// Game time from which Bison's second attack may be used again.
+    pub second_allowed_at: f32,
 }
 
 impl Sly2Guard {
     /// A guard for object `h`.
     pub fn new(world: &World, h: Handle) -> Sly2Guard {
         let o = world.options(h);
-        let attacks: Vec<Attack> = o
-            .map(|o| o.all(opt::ACTIONS).filter_map(|v| v.as_i32()).collect::<Vec<_>>())
-            .unwrap_or_default()
+        // Its actions: option 233 values, and the action entries the loader kept (the usual form on the disc).
+        let mut ids: Vec<i32> = o.map(|o| o.all(opt::ACTIONS).filter_map(|v| v.as_i32()).collect()).unwrap_or_default();
+        if let (Some(level), Some(slot)) = (world.sly2.as_deref(), world.slot(h)) {
+            for (_, _, args) in level.actions.iter().filter(|(s, id, _)| *s == slot && *id == opt::ACTIONS) {
+                ids.extend(args.iter().filter_map(|a| match *a {
+                    crate::object::Arg::Int(n) => Some(n),
+                    crate::object::Arg::Short(_, n) => Some(i32::from(n)),
+                    _ => None,
+                }));
+            }
+        }
+        ids.dedup();
+        let attacks: Vec<Attack> = ids
             .into_iter()
             .filter_map(|id| world.find_sly2_id(id, Some(h)))
-            .filter_map(|a| world.options(a).map(attack_of))
-            .flatten()
+            .filter_map(|a| attack_of(world, a))
             .collect();
         let w = world.world_transform(h).unwrap_or(Affine::IDENTITY);
         Sly2Guard {
             swarmer: world.class(h) == Some(class::SWARMER),
             hit_points: o.and_then(|o| o.f32(opt::HIT_POINTS)).unwrap_or(40.0),
+            block: o.and_then(|o| o.f32(opt::BLOCK)).unwrap_or(0.0),
+            boss: world.class(h).is_some_and(|c| (class::BOSS_FIRST..=class::BOSS_LAST).contains(&c)),
+            counted_at: o.and_then(|o| o.f32(opt::HIT_POINTS)).unwrap_or(40.0),
+            counted_hits: 0,
+            second_allowed_at: 0.0,
+            acting: None,
+            parts: damage_parts(world, h),
             job: Job::Patrol,
             sight: 0,
             last_seen: f32::NEG_INFINITY,
@@ -324,6 +447,39 @@ impl Sly2Guard {
     /// Knocked out.
     pub fn knocked_out(&self) -> bool {
         self.job == Job::KnockedOut
+    }
+
+    /// The strike's contact (guards.md 6.3): kind and value of the guard's part with `tag` (its body's), else of
+    /// its first damage part, else the default for guards or swarmers.
+    fn strike(&mut self, cx: &mut Cx<'_>, player: Option<Handle>, me: [f32; 3], tag: Option<u32>) {
+        let part = tag.and_then(|t| self.parts.iter().find(|p| p.tag == t)).or(self.parts.first());
+        let (amount, kind) =
+            part.map_or(if self.swarmer { SWARMER_STRIKE } else { GUARD_STRIKE }, |p| (p.amount, p.kind));
+        if let Some(t) = player {
+            cx.world.shared.gang_hits.push(super::sly2_sensors::GangHit { target: t, amount, kind, source: me });
+        } else {
+            cx.world.hurt_player(cx.me, damage::BLUNT, None);
+        }
+    }
+
+    /// A hit (7): raises event 11 (object, attacker, value) and counts it as a boss fight does (7.5: not by
+    /// Bentley, and only when the hit points went down since the last counted hit). Call before the hit points
+    /// change; the count looks at the drop the previous hits made.
+    fn count_hit(&mut self, cx: &mut Cx<'_>, by: Option<Handle>) {
+        cx.raise(
+            EVENT_HIT,
+            alloc::vec![
+                script::Value::Object(Some(cx.me.to_script())),
+                script::Value::Object(by.map(|b| b.to_script())),
+                script::Value::Float(GANG_HIT),
+            ],
+        );
+        let bentley = by.is_some_and(|b| cx.world.class(b) == Some(BENTLEY_CLASS));
+        let through = (GANG_HIT - self.block).max(0.0);
+        if !bentley && through > 0.0 && self.hit_points - through < self.counted_at {
+            self.counted_hits += 1;
+            self.counted_at = (self.hit_points - through).max(0.0);
+        }
     }
 
     /// Whether the guard's detector sees `p` (3), the player's position.
@@ -440,14 +596,23 @@ impl Sly2Guard {
             match n {
                 Notice::Attack { .. } | Notice::Hit(_) | Notice::Blast(..) if !self.knocked_out() => {
                     self.hits_taken += 1;
+                    let by = match n {
+                        Notice::Attack { by, .. } | Notice::Hit(by) => Some(by),
+                        _ => None,
+                    };
                     if ignore_hits {
                         continue;
                     }
+                    self.count_hit(cx, by);
                     let surprise = cx.time - self.last_seen > SURPRISE_WINDOW && self.sight != 1;
-                    if surprise && !no_surprise {
+                    // Bosses are not knocked out by surprise: their fights are staged (vehicles-and-minigames.md 7).
+                    if surprise && !no_surprise && !self.boss {
                         self.knock_out(cx);
                     } else {
-                        self.hit_points = (self.hit_points - GANG_HIT).max(0.0);
+                        // The block absorbs the hit first (option 257; what is left of it, 258).
+                        let through = (GANG_HIT - self.block).max(0.0);
+                        self.block = (self.block - GANG_HIT).max(0.0);
+                        self.hit_points = (self.hit_points - through).max(0.0);
                         if self.hit_points <= 0.0 {
                             self.knock_out(cx);
                         } else {
@@ -504,22 +669,89 @@ fn to_local(frame: &Affine, p: [f32; 3]) -> [f32; 3] {
     [0, 1, 2].map(|k| (d[0] * c[k][0] + d[1] * c[k][1] + d[2] * c[k][2]) / n(c[k]))
 }
 
-fn default_attack() -> Attack {
-    let (distance, height, wait, angle) = DEFAULT_ATTACK;
-    Attack { distance, height, wait, half_angle: angle.to_radians() * 0.5 }
+/// Whether an action may be used now (the answer to event 24): Bison's second attack only after 12 counted hits and
+/// once its interval has passed; every other action always.
+pub fn allowed(action: i32, counted: u32, now: f32, allowed_at: f32) -> bool {
+    action != bison::SECOND_ACTION || (counted >= bison::SECOND_AFTER && now >= allowed_at)
 }
 
-fn attack_of(o: &crate::object::OptionStore) -> Option<Attack> {
+fn default_attack() -> Attack {
+    let (distance, height, wait, angle) = DEFAULT_ATTACK;
+    Attack {
+        distance,
+        height,
+        wait,
+        half_angle: angle.to_radians() * 0.5,
+        action: -1,
+        length: 0.0,
+        strike: [(0.0, 0.0, 0); MAX_WINDOWS],
+        windows: 0,
+    }
+}
+
+/// The attack of action object `a` (6.1), with its clip (6.4).
+fn attack_of(world: &World, a: Handle) -> Option<Attack> {
+    let o = world.options(a)?;
     if !o.bool_or(opt::ACT_ENABLED, true) {
         return None;
     }
     let d = default_attack();
+    let (length, list) = action_clip(world, a).unwrap_or((0.0, Vec::new()));
+    let mut strike = [(0.0, 0.0, 0); MAX_WINDOWS];
+    for (s, w) in strike.iter_mut().zip(&list) {
+        *s = *w;
+    }
     Some(Attack {
         distance: o.pair(opt::ACT_DISTANCE).unwrap_or(d.distance),
         height: o.pair(opt::ACT_HEIGHT).unwrap_or(d.height),
         wait: o.pair(opt::ACT_WAIT).unwrap_or(d.wait),
         half_angle: o.f32(opt::ACT_ANGLE).map_or(d.half_angle, |a| a.to_radians() * 0.5),
+        action: world.sly2_id(a).unwrap_or(-1),
+        length,
+        strike,
+        windows: list.len().min(MAX_WINDOWS) as u8,
     })
+}
+
+/// The clip an action object's option 364 names (guards.md 6.4): its length, and the windows its events 15 and 16
+/// switch damage parts on: (on, off, tag), each event 15 to the next event 16 naming the same tag (the clip's end
+/// when none). A state machine or anything else: none.
+pub fn action_clip(world: &World, a: Handle) -> Option<(f32, Vec<Window>)> {
+    let level = world.sly2.as_deref()?;
+    let slot = world.slot(a)?;
+    let args = level.actions.iter().find(|(s, id, _)| *s == slot && *id == ACTION_ANIM).map(|(_, _, args)| args)?;
+    let id = args.iter().find_map(|x| match *x {
+        crate::object::Arg::Int(n) => Some(n),
+        crate::object::Arg::Short(_, n) => Some(i32::from(n)),
+        _ => None,
+    })?;
+    let clip = world.find_sly2_id(id, Some(a))?;
+    let c = formats_sly2::anim::Clip::of_record(&world.level.bytes, world.sly2_record(clip)?, &level.table).ok()?;
+    Some((c.duration, part_windows(&c.timed, c.duration)))
+}
+
+/// The part tag an event 15 or 16 names (its second `s32`; the first is −1 on the guards' clips).
+fn event_tag(e: &formats::anim::Event) -> Option<u32> {
+    let b = e.payload.get(4..8)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// The windows (on, off, tag) of a clip's timed events 15 and 16, in time order.
+pub fn part_windows(timed: &[formats::anim::Event], duration: f32) -> Vec<Window> {
+    let at = |e: &formats::anim::Event| e.frame.map(|f| f32::from(f) / 60.0);
+    let mut out = Vec::new();
+    for e in timed.iter().filter(|e| e.kind == PART_ON) {
+        let (Some(on), Some(tag)) = (at(e), event_tag(e)) else { continue };
+        let off = timed
+            .iter()
+            .filter(|o| o.kind == PART_OFF && event_tag(o) == Some(tag))
+            .filter_map(at)
+            .filter(|&t| t > on)
+            .fold(f32::INFINITY, f32::min);
+        out.push((on, if off.is_finite() { off } else { duration }, tag));
+    }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
 }
 
 impl ClassBehavior for Sly2Guard {
@@ -529,6 +761,14 @@ impl ClassBehavior for Sly2Guard {
 
     /// Option 233 called by a script: adds an attack (an action object, by ID) to the guard (6.1).
     fn action(&mut self, world: &mut World, me: Handle, id: u16, args: &[crate::object::Arg]) -> bool {
+        // Option 1438 on Rajan (class 61): 1 frames Murray and him as a pair (the pair view at priority 6), 0 ends
+        // it (camera.md 2.1).
+        if id == PAIR_FRAMING && world.class(me) == Some(RAJAN_CLASS) {
+            let on = args.iter().any(|a| matches!(*a, crate::object::Arg::Int(1) | crate::object::Arg::Short(_, 1)));
+            let murray = world.handles().find(|&h| world.class(h) == Some(MURRAY_CLASS));
+            world.shared.camera_pair = if on { murray.map(|m| (m, me)) } else { None };
+            return true;
+        }
         if id != opt::ACTIONS {
             return false;
         }
@@ -538,8 +778,9 @@ impl ClassBehavior for Sly2Guard {
                 crate::object::Arg::Short(_, n) => i32::from(n),
                 _ => continue,
             };
-            if let Some(at) = world.find_sly2_id(oid, Some(me)).and_then(|o| world.options(o)).and_then(attack_of)
+            if let Some(at) = world.find_sly2_id(oid, Some(me)).and_then(|o| attack_of(world, o))
                 && self.attacks.len() < 8
+                && !self.attacks.iter().any(|x| x.action == at.action && at.action >= 0)
             {
                 self.attacks.push(at);
             }
@@ -650,8 +891,25 @@ impl ClassBehavior for Sly2Guard {
                 let d = libm_hypot(p[0] - me[0], p[1] - me[1]);
                 let stop = if d > far { near } else { near * 0.5 };
                 self.walk(cx, p, CHASE_SPEED, stop.min(self.attacks.iter().map(|a| a.distance[1]).fold(0.0, f32::max)));
-                // Attack (6.1) when an action's ranges hold.
-                if self.attack_wait <= 0.0 {
+                // An attack playing: its strike lands once while its part is on and the target is in reach.
+                if let Some(mut act) = self.acting.take() {
+                    act.t += cx.dt;
+                    let a = act.attack;
+                    let me = cx.world.position(cx.me).unwrap_or(me);
+                    let reach = libm_hypot(p[0] - me[0], p[1] - me[1]) <= a.distance[1];
+                    for (i, &(on, off, tag)) in a.strike[..a.windows as usize].iter().enumerate() {
+                        if act.landed & (1 << i) == 0 && reach && act.t >= on && act.t <= off {
+                            act.landed |= 1 << i;
+                            self.strike(cx, player, me, Some(tag));
+                        }
+                    }
+                    if act.t < a.length {
+                        self.acting = Some(act);
+                    } else {
+                        self.attack_wait = cx.rng.range(a.wait[0], a.wait[1].max(a.wait[0]));
+                    }
+                } else if self.attack_wait <= 0.0 {
+                    // Attack (6.1) when an action's ranges hold.
                     let me = cx.world.position(cx.me).unwrap_or(me);
                     let d = libm_hypot(p[0] - me[0], p[1] - me[1]);
                     let dz = p[2] - me[2];
@@ -666,8 +924,10 @@ impl ClassBehavior for Sly2Guard {
                         }
                         a.abs()
                     };
+                    let (now, counted, allowed_at) = (cx.time, self.counted_hits, self.second_allowed_at);
                     let chosen = self.attacks.iter().copied().find(|a| {
-                        d >= a.distance[0]
+                        allowed(a.action, counted, now, allowed_at)
+                            && d >= a.distance[0]
                             && d <= a.distance[1]
                             && dz >= a.height[0]
                             && dz <= a.height[1]
@@ -675,19 +935,26 @@ impl ClassBehavior for Sly2Guard {
                     });
                     match chosen {
                         Some(a) => {
-                            // The strike's contact (guards.md 6.3): kind and value of the guard's striking part.
-                            let (amount, kind) = if self.swarmer { SWARMER_STRIKE } else { GUARD_STRIKE };
-                            if let Some(t) = player {
-                                cx.world.shared.gang_hits.push(super::sly2_sensors::GangHit {
-                                    target: t,
-                                    amount,
-                                    kind,
-                                    source: me,
-                                });
-                            } else {
-                                cx.world.hurt_player(cx.me, damage::BLUNT, None);
+                            // Before an action the guard raises event 24 (object, action) for the scripts.
+                            cx.raise(
+                                EVENT_ACTION,
+                                alloc::vec![
+                                    script::Value::Object(Some(cx.me.to_script())),
+                                    script::Value::Int(a.action),
+                                ],
+                            );
+                            if a.action == bison::SECOND_ACTION {
+                                let [lo, hi] = bison::SECOND_INTERVAL;
+                                self.second_allowed_at = cx.time + cx.rng.range(lo, hi);
                             }
-                            self.attack_wait = cx.rng.range(a.wait[0], a.wait[1].max(a.wait[0]));
+                            if a.length > 0.0 {
+                                // Played (6.4): it strikes while its clip's damage part is on.
+                                self.acting = Some(Acting { attack: a, t: 0.0, landed: 0 });
+                            } else {
+                                // No clip: the strike lands at once.
+                                self.strike(cx, player, me, None);
+                                self.attack_wait = cx.rng.range(a.wait[0], a.wait[1].max(a.wait[0]));
+                            }
                         }
                         None => self.attack_wait = 0.25,
                     }
@@ -758,7 +1025,9 @@ pub const NOISE_TEMPLATE_CLASS: i16 = 117;
 /// The behaviour of a Sly 2 object, from its class.
 pub fn for_class(world: &World, h: Handle) -> Behavior {
     match world.class(h) {
-        Some(class::GUARD | class::SWARMER) => Behavior::Sly2Guard(Box::new(Sly2Guard::new(world, h))),
+        Some(class::GUARD | class::SWARMER | class::BOSS_FIRST..=class::BOSS_LAST) => {
+            Behavior::Sly2Guard(Box::new(Sly2Guard::new(world, h)))
+        }
         Some(NOISE_TEMPLATE_CLASS) => Behavior::Sly2Noise(Box::default()),
         Some(85) => Behavior::Sly2Laser(Box::new(super::sly2_sensors::Laser::new(world, h))),
         Some(83) => Behavior::Sly2Pad(Box::default()),
@@ -771,6 +1040,7 @@ pub fn for_class(world: &World, h: Handle) -> Behavior {
         Some(88) => Behavior::Sly2Barrel(Box::default()),
         Some(79 | 81 | 82) => Behavior::Sly2Thrown(Box::default()),
         Some(152) => Behavior::Sly2SoundManager(Box::default()),
+        Some(super::sly2_vault::VAULT_CLASS) => Behavior::Sly2Vault(Box::default()),
         Some(113) => Behavior::Sly2Commands(Box::new(super::sly2_commands::CommandList::new(world, h))),
         Some(24 | 25) => Behavior::Sly2Volume(Box::default()),
         Some(c @ 91..=95) => super::sly2_pickups::Sly2Pickup::new(world, h, c)
@@ -907,5 +1177,18 @@ mod tests {
             g.step_fixed(&FrameInput::default());
         }
         assert!(g.world.position(gh).unwrap()[0] < -100.0, "then walks toward the object");
+    }
+}
+
+#[cfg(test)]
+mod combat_tests {
+    use super::*;
+
+    #[test]
+    fn bison_second_attack_waits_for_twelve_counted_hits() {
+        assert!(allowed(19643, 0, 0.0, 0.0));
+        assert!(!allowed(bison::SECOND_ACTION, 11, 10.0, 0.0));
+        assert!(allowed(bison::SECOND_ACTION, 12, 10.0, 0.0));
+        assert!(!allowed(bison::SECOND_ACTION, 12, 10.0, 12.0));
     }
 }

@@ -17,6 +17,35 @@ use crate::object::Handle;
 use crate::physics::spring::{SmoothParams, Smoother};
 use crate::world::World;
 
+/// A turret shot's default speed: the missile family's, used when the turret has no launcher or its launcher has no
+/// speed setting (10.4).
+pub const SHOT_SPEED: f32 = 800.0;
+/// The Sly 2 turret's launcher option (class 112's object; set by the turret jobs' scripts) and the launcher's speed
+/// setting (script ID 509) (10.4).
+pub const LAUNCHER_OPTION: u16 = 1003;
+pub const LAUNCHER_SPEED: u16 = 509;
+
+/// The object a turret option names (a Sly 2 or Sly 3 ID, resolved from the turret).
+fn referenced(world: &World, me: Handle, option: u16) -> Option<Handle> {
+    if option == 0 {
+        return None;
+    }
+    let id = world.options(me)?.i32(option)?;
+    if world.sly2.is_some() { world.find_sly2_id(id, Some(me)) } else { world.find_sly3_id(id, Some(me)) }
+}
+
+/// A turret's shot speed: its launcher's speed setting (Sly 2 option 1003's object, option 509), else
+/// [`SHOT_SPEED`] (10.4).
+pub fn shot_speed(world: &World, me: Handle) -> f32 {
+    if world.sly2.is_none() {
+        return SHOT_SPEED;
+    }
+    referenced(world, me, LAUNCHER_OPTION)
+        .and_then(|l| world.options(l))
+        .map_or(SHOT_SPEED, |o| o.f32_or(LAUNCHER_SPEED, SHOT_SPEED))
+        .max(0.0)
+}
+
 /// The angular-speed decay record (5, 0, 0.5) [D 0x002C4408].
 pub const DECAY: SmoothParams = SmoothParams { fast: 5.0, slow: 0.0, fast_time: 0.5, max_speed_change: None };
 
@@ -39,6 +68,8 @@ pub struct Turret {
     pub fov_range: [f32; 2],
     /// Shots fired.
     pub shots: u32,
+    /// The camera mount option (Sly 2 1008; Sly 3 has none: 0).
+    mount_option: u16,
 }
 
 impl Turret {
@@ -62,6 +93,7 @@ impl Turret {
             pan_limits: pair(pan, [-1.5, 1.5]),
             fov_range: pair(fov, [0.1, 1.0]),
             shots: 0,
+            mount_option: if title == Title::Sly2 { 1008 } else { 0 },
         }
     }
 
@@ -111,16 +143,43 @@ impl ClassBehavior for Turret {
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
-        if !super::driven(cx.world, cx.me) && self.pan_speed == 0.0 && self.tilt_speed == 0.0 {
+        let driven = super::driven(cx.world, cx.me);
+        // The camera rides the mount (option 1008's object, else the turret) while the turret is driven; no eye
+        // offset (none in the spec) [I].
+        let mount = referenced(cx.world, cx.me, self.mount_option).unwrap_or(cx.me);
+        if driven {
+            cx.world.shared.camera_mount = Some((mount, [0.0; 3]));
+        } else if cx.world.shared.camera_mount.is_some_and(|m| m.0 == mount) {
+            cx.world.shared.camera_mount = None;
+        }
+        if !driven && self.pan_speed == 0.0 && self.tilt_speed == 0.0 {
             return;
         }
         let pad = pad_for(cx.world, cx.me);
-        if self.step(&pad, cx.dt) {
-            cx.raise(5, alloc::vec::Vec::new());
-        }
+        let fired = self.step(&pad, cx.dt);
         if let Some(mut w) = cx.world.world_transform(cx.me) {
             w.cols = self.rotation();
             cx.world.set_world_transform(cx.me, w);
+            if fired {
+                // A shot along the barrel (+X) at its launcher's speed (10.4); its blast and damage are
+                // `shots::BLAST_RADIUS` and `shots::DAMAGE`.
+                let fwd = w.cols[0];
+                let speed = shot_speed(cx.world, cx.me);
+                super::shots::fire(
+                    cx.world,
+                    super::shots::Projectile {
+                        position: crate::math::madd(w.t, fwd, 100.0),
+                        velocity: crate::math::scale(fwd, speed),
+                        life: 4.0,
+                        owner: cx.me,
+                        damage: super::shots::DAMAGE,
+                        gravity: 0.0,
+                    },
+                );
+            }
+        }
+        if fired {
+            cx.raise(5, alloc::vec::Vec::new());
         }
     }
 }

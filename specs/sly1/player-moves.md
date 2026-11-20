@@ -20,7 +20,7 @@ sources:
       jump rules and constants, gravity ratio, timers, input mapping, the lookup-list roles, damage selection, the
       marker interval used for the run speed; values with an executable address there were read as stated and
       re-read from the executable; values without one are [R] until located in the executable
-date: 2026-11-14
+date: 2026-11-19
 ---
 
 # Player character moves
@@ -50,6 +50,31 @@ the origin [D]; the walking leg's base point is 35 units (option 709 default) be
 standing on the ground the origin is **90 units above the ground contact point** [D for 55, R for the rule that
 the shape is used at the origin, without the child's own 15-unit placement]. Specs that give heights relative to
 the player (jump height, ledge hang, camera focus) mean this origin.
+
+## 1.2 Stick input [X]
+
+The routine at `0x0016E738` (pad set-up at `0x0016E630`) turns each analog stick into a direction and a deflection:
+
+1. **Bytes to axes.** Each stick gives two bytes, b_x and b_y (0 to 255). x = 2·b_x / 255 − 1 and
+   y = 1 − 2·b_y / 255, so up is positive y.
+2. **Waking up.** A stick reads (0, 0) until it is first seen in use: its bytes change from one frame to the next,
+   or either byte leaves the window 96 … 160. From then on it is read every frame. The flag is kept per stick.
+3. **Self-calibrating range.** The routine keeps, per stick, a range [lo, hi] for each of four directions d:
+   (1, 0), (0, 1), (0.7, 0.7) and (0.7, −0.7) (the table at `0x00262A30`). The ranges start at **[−0.75, 0.75]** when
+   the pad is (re)connected (`0x0016E6C8`). Each frame, for each direction:
+   - p = x·d.x + y·d.y;
+   - if p ≥ 0, hi = max(hi, p), else lo = min(lo, p);
+   - r = p / hi (or p / lo when p < 0).
+
+   The raw deflection is e = the largest r of the four (0 when none is positive).
+4. **Dead zone and response.** u = clamp(2·(e − 0.35), 0, 1): **no response below 35 % of the calibrated range**,
+   linear above it, and **full deflection from 85 %**. With the starting range this is 0.2625 to 0.6375 of the raw
+   axis.
+5. **Output.** The deflection is u. The direction is (x, y) normalised and scaled by u: (u·x / |v|, u·y / |v|)
+   with |v| = √(x² + y²). It is (0, 0) when |v| ≤ 0.0001 (`0x38D1B717`).
+
+So the left stick's deflection used by the running rules (section 2, "u") is this u. The menus' thresholds (0.8,
+0.25; [ui-and-menus.md](ui-and-menus.md) 7) apply to the same value.
 
 ## 2. Running
 
@@ -341,9 +366,7 @@ Entries of the player's lookup list (animation.md 7) [D for the OIDs and segment
 1. Ground acceleration and deceleration while running (the turn rate is now in section 2).
 2. The mid-deflection run speed of section 2 should still be checked by measurement in the running game.
 3. (Settled: section 4 gives 66.0 and 365.3 units/s.)
-4. Input dead zones and the stick response curve. (Searched: no dead-zone or turn-rate value is stored as a data word
-   near the player's other constants; they appear to be immediate values in code. Menu navigation thresholds are
-   in ui-and-menus.md 7.)
+4. (Settled: the stick dead zone and response curve, section 1.2.)
 5. The [R] constants above (gravity −1750 and ratio 1.3, ledge-grab box, dive radii) are not stored as data words
    in the executable; they are probably immediate operands in code and are confirmed only by the reference.
 6. A dedicated perch pose, if any.

@@ -232,6 +232,12 @@ pub struct Jobs {
     pub respawn: i32,
     /// The world's exits.
     pub exits: Vec<Exit>,
+    /// Sly 3 hook: the script event a job or task object gets for one of [`script_event`]'s (`None`: not raised).
+    /// Sly 2's are as listed; Sly 3 numbers its events differently (`game::sly3::jobs`).
+    pub script_events: fn(u32) -> Option<u32>,
+    /// Sly 3 hook: the class whose objects in the world also hear every task event, after the tasks and before the
+    /// current job (Sly 3's macro-package listeners, class 147; missions.md 4.2). `None` in Sly 2.
+    pub listener_class: Option<i16>,
     /// Sly 3 hook: exits fired that are not in [`Jobs::exits`] (a Sly 3 world's exits are run by the Sly 3
     /// session, which takes these).
     pub fired_elsewhere: Vec<i32>,
@@ -306,6 +312,8 @@ impl Jobs {
             respawn: flow::DEFAULT_POINT,
             exits: if sly3 { Vec::new() } else { flow::exits(world) },
             fired_elsewhere: Vec::new(),
+            script_events: Some,
+            listener_class: None,
             load: None,
             place: None,
             notices: Vec::new(),
@@ -381,16 +389,21 @@ impl Jobs {
             }
             self.states[t] = s;
         }
-        // Locked tasks whose prerequisites are done become available, in graph order (to a fixed point).
-        loop {
-            let open: Vec<usize> =
-                (0..self.states.len()).filter(|&t| self.states[t] == state::LOCKED && self.prereqs_met(t)).collect();
-            if open.is_empty() {
-                break;
-            }
-            for t in open {
+        // A task with no saved state is available if it has no prerequisites, otherwise locked (missions.md 7). The
+        // restore does not propagate: a saved locked task whose prerequisites are met stays locked, as it was in
+        // live play (where successors are re-evaluated only when a task becomes done or closed, missions.md 4). An
+        // earlier fixed-point pass opened such tasks (task 1776, `t1_recon_brawl`, after a save and continue).
+        for t in 0..self.states.len() {
+            if self.states[t] == state::LOCKED && self.graph.tasks[t].prereq.is_empty() {
                 self.states[t] = state::AVAILABLE;
                 self.save_state(t);
+                // Object-model hook (level-flow.md 4.1): the change raises the task's "after state change" event, which
+                // the episodes' macro modules answer by starting the opening sequence. Not for a new game, whose
+                // queued task (1583) lies past the intro's attract-mode tasks that would answer it.
+                if queued.is_none() {
+                    let slot = self.graph.tasks[t].slot;
+                    self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
+                }
             }
         }
         for t in 0..self.graph.tasks.len() {
@@ -465,6 +478,10 @@ impl Jobs {
     /// Asks for task `t` to reach state `want` (missions.md 4). A request for "available" is a request to become
     /// current. Returns whether it was applied.
     pub fn request(&mut self, t: usize, want: i8, forced: bool) -> bool {
+        // −1 and 4 ask for the task to become current (missions.md 3.1, method 1280's first argument).
+        if want == -1 || i32::from(want) == state::BECAME_CURRENT {
+            return self.states[t] != state::CLOSED && self.request_current(t, forced);
+        }
         let s = self.states[t];
         if s == state::CLOSED || !(state::LOCKED..=state::CLOSED).contains(&want) {
             return want == s;
@@ -652,6 +669,10 @@ impl Jobs {
         if task.checkpoint.is_some() {
             self.checkpoint = Some(t);
         }
+        // Sly 3 hook: option 1405 asks for "done" at once, before the task's exit fires (sly3/missions.md 4).
+        if task.done_on_current {
+            self.request(t, state::DONE, false);
+        }
         if let Some(e) = task.exit {
             self.effects.push(Effect::FireExit(e));
         }
@@ -705,10 +726,31 @@ impl Jobs {
     fn complete_job(&mut self, j: usize) {
         let def = self.graph.jobs[j].clone();
         self.notices.push(Notice::JobComplete { job: def.id, screen: def.screen });
-        if let Some(last) = def.last
+        // Sly 3 hook (sly3/missions.md 4.1): completion mode 2 sends the first task back to 0 instead.
+        if def.replay {
+            if let Some(first) = def.first {
+                self.set_state(first, state::LOCKED);
+            }
+        } else if let Some(last) = def.last
             && !def.keep_open
         {
             self.set_state(last, state::CLOSED);
+        }
+        // Sly 3 hook: the item granted, and the following job's resume task as the forced checkpoint.
+        if let Some(item) = def.item {
+            self.progress.set_named(&["powerUps", "mppukfAcquired"], Some(item as usize), SaveValue::Flag(true));
+        }
+        if let Some(last) = def.last {
+            let resume = self.graph.tasks[last]
+                .succ
+                .iter()
+                .filter_map(|&c| self.graph.tasks[c].job)
+                .find_map(|k| self.graph.jobs[k].resume);
+            if let Some(r) = resume {
+                let t = &self.graph.tasks[r];
+                self.progress.set_named(&["oidCheckpointForce"], None, SaveValue::Int(t.id));
+                self.progress.set_named(&["widCheckpointForce"], None, SaveValue::Int(t.row.map_or(-1, |w| w as i32)));
+            }
         }
         put(&mut self.progress, &def.keys.complete, SaveValue::Flag(true));
         self.effects.push(Effect::Broadcast { event: event::JOB_CLOSED, object: None });
@@ -757,7 +799,8 @@ impl Jobs {
 
     /// Forces task `t` to state `s` (task methods 1290 to 1293): the request skips the checks.
     pub fn force_state(&mut self, t: usize, s: i8) {
-        if self.states[t] != state::CLOSED {
+        // An index from another world's graph names nothing here (a stale index after a load).
+        if self.states.get(t).is_some_and(|&x| x != state::CLOSED) {
             self.set_state(t, s);
         }
     }
@@ -966,31 +1009,36 @@ impl Jobs {
                             Some(e) => vec![script::Value::Int(e as i32), script::Value::Object(None)],
                             None => Vec::new(),
                         };
-                        world.raise(h, event, args);
+                        if let Some(event) = (self.script_events)(event) {
+                            world.raise(h, event, args);
+                        }
                     }
                 }
                 Effect::Broadcast { event, object } => {
-                    // To the current job's available tasks, then the current job.
-                    let Some(job) = self.job else { continue };
+                    // To the current job's available tasks, then the current job; with no current job, to every
+                    // available task with no job (missions.md 3).
+                    let job = self.job;
                     let obj = script::Value::Object(object.and_then(|s| world.handle(s)).map(Handle::to_script));
                     let mut slots: Vec<u32> = self
                         .graph
                         .tasks
                         .iter()
                         .enumerate()
-                        .filter(|(i, t)| t.job == Some(job) && self.states[*i] == state::AVAILABLE)
+                        .filter(|(i, t)| t.job == job && self.states[*i] == state::AVAILABLE)
                         .map(|(_, t)| t.slot)
                         .collect();
-                    slots.push(self.graph.jobs[job].slot);
+                    if let Some(c) = self.listener_class {
+                        slots.extend(world.slots_of_class(c).iter().copied());
+                    }
+                    if let Some(j) = job {
+                        slots.push(self.graph.jobs[j].slot);
+                    }
+                    let Some(task_event) = (self.script_events)(script_event::TASK_EVENT) else { continue };
                     for s in slots {
                         if let Some(h) = world.handle(s)
                             && world.in_world(h)
                         {
-                            world.raise(
-                                h,
-                                script_event::TASK_EVENT,
-                                vec![script::Value::Int(event as i32), obj.clone()],
-                            );
+                            world.raise(h, task_event, vec![script::Value::Int(event as i32), obj.clone()]);
                         }
                     }
                 }

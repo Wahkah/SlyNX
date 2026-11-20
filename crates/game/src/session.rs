@@ -355,7 +355,7 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
         let mut ui_layer = None;
         let mut iris = None;
         let mut video = None;
-        self.gpu = upload(&mut self.renderer, &game.world, &scene, |r| {
+        let uploaded = upload(&mut self.renderer, &game.world, &scene, |r| {
             if overlay {
                 ov = Some(TextOverlay::new(r, OVERLAY_CHARS)?);
             }
@@ -367,8 +367,14 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
                 ui_layer = Some(UiLayer::new(r, sheet)?);
             }
             Ok(())
-        })
-        .map_err(|e| format!("{}: {e}", entry.name))?;
+        });
+        self.gpu = match uploaded {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                self.unload();
+                return Err(format!("{}: {e}", entry.name));
+            }
+        };
         self.overlay = ov;
         self.ui = ui_layer;
         self.iris = iris;
@@ -395,8 +401,24 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
         Ok(())
     }
 
-    /// Asks for world `index` through a wipe of `kind` (at once when wipes are off).
+    /// Asks for world `index` through a wipe of `kind` (at once when wipes are off). The caller's choice wins over
+    /// a load the world asked for that has not happened yet (a respawn after a death, for example): the running
+    /// wipe goes on and ends in `index`.
     pub fn go_to(&mut self, index: usize, warp: Option<i16>, kind: u8) {
+        if !self.options.wipes {
+            self.load_or_report(index, warp, kind);
+            return;
+        }
+        if self.pending.is_some() {
+            self.pending = Some(Pending { index, warp, wipe: kind });
+            return;
+        }
+        self.request_world(index, warp, kind);
+    }
+
+    /// A load the world asked for (an exit, a respawn, a game over): through a wipe, unless a load is already
+    /// waiting (the first one wins).
+    fn request_world(&mut self, index: usize, warp: Option<i16>, kind: u8) {
         if !self.options.wipes {
             self.load_or_report(index, warp, kind);
             return;
@@ -501,13 +523,13 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
             match r {
                 Request::LoadWorld { identity, warp, wipe } => {
                     if let Some(i) = self.world_of_identity(identity) {
-                        self.go_to(i, warp, wipe);
+                        self.request_world(i, warp, wipe);
                         break;
                     }
                 }
                 Request::LoadWorldNamed { name, warp, wipe } => {
                     if let Some(i) = self.find_world(&name) {
-                        self.go_to(i, warp, wipe);
+                        self.request_world(i, warp, wipe);
                         break;
                     }
                 }
@@ -522,7 +544,7 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
                         .as_ref()
                         .and_then(|g| g.progress.respawn.filter(|r| r.world == g.world.info.id).and_then(|r| r.warp));
                     if let Some(i) = current {
-                        self.go_to(i, warp, 1);
+                        self.request_world(i, warp, 1);
                     }
                     break;
                 }
@@ -534,7 +556,7 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
                         g.progress = Progress { levels, difficulty_tables: tables, ..Progress::new_game() };
                     }
                     if let Some(i) = current {
-                        self.go_to(i, None, 1);
+                        self.request_world(i, None, 1);
                     }
                     break;
                 }
@@ -551,13 +573,13 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
         match target {
             Some((identity, warp, wipe)) => {
                 if let Some(i) = self.world_of_identity(identity) {
-                    self.go_to(i, warp, wipe);
+                    self.request_world(i, warp, wipe);
                 }
             }
             None => {
                 // No default exit: restart the current world (level-flow.md 2).
                 if let Some(i) = self.current.as_ref().map(|c| c.index) {
-                    self.go_to(i, None, 1);
+                    self.request_world(i, None, 1);
                 }
             }
         }
@@ -629,6 +651,22 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
         if let Err(e) = self.load_world(index, warp, wipe) {
             self.message = Some(e);
         }
+    }
+
+    /// Drops the current world (after a failed upload, for example): an empty, committed level, and nothing left
+    /// holding handles into the old one, so the next frames render (nothing) instead of failing. The progress stays.
+    pub fn unload(&mut self) {
+        self.renderer.clear_level();
+        let _ = self.renderer.commit();
+        self.gpu = LevelGpu::default();
+        self.overlay = None;
+        self.ui = None;
+        self.iris = None;
+        self.video = None;
+        if let Some(old) = self.game.take() {
+            self.progress = old.progress;
+        }
+        self.current = None;
     }
 
     /// The debug status lines.
@@ -707,7 +745,7 @@ impl<B: Backend, R: ReadAt> Session<B, R> {
                     && let Some(f) = m.frame()
                 {
                     let p = f.planes();
-                    pack_planes(&p, &mut self.video_buf);
+                    crate::movie::pack_planes(&p, &mut self.video_buf);
                     let [y, u, v] = &self.video_buf;
                     let (fw, fh) = (p.width as u32, p.height as u32);
                     self.renderer.set_video_frame(Some(render::video::VideoFrame {
@@ -796,22 +834,6 @@ pub fn iris_open(wipe: Wipe) -> Option<f32> {
         Wipe::In { t, kind } => (kind, 1.0 - t / wipe_times(kind).1),
     };
     (kind == 1).then_some(1.0 - closed.clamp(0.0, 1.0))
-}
-
-/// Copies a decoded frame's planes without their row padding.
-fn pack_planes(p: &video::Planes<'_>, out: &mut [Vec<u8>; 3]) {
-    let (w, h) = (p.width, p.height);
-    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-    let copy = |src: &[u8], stride: usize, w: usize, h: usize, dst: &mut Vec<u8>| {
-        dst.clear();
-        for row in 0..h {
-            dst.extend_from_slice(&src[row * stride..][..w]);
-        }
-    };
-    let [y, u, v] = out;
-    copy(p.y, p.y_stride, w, h, y);
-    copy(p.cb, p.chroma_stride, cw, ch, u);
-    copy(p.cr, p.chroma_stride, cw, ch, v);
 }
 
 /// Where a world point lands on the target, in pixels from the top left (`None` behind the camera).

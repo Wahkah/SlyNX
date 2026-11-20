@@ -42,8 +42,40 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release (sly.cpp, gang.cpp, climb.cpp, interact.cpp clip slots; alo.cpp, so.cpp contacts)
     used_for: which state or item uses which slot [R]
+  - kind: disc
+    what: SCUS-97316, 2026-11-19 (nightclub hub world, row 2; Sly, Murray and Bentley object trees and meshes, every conditional mesh's level rows, clips 1518-1523 and 5517-5518; executable SCUS_973.16 SHA-256 a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73, lookup tables at 0x002BE990, 0x002BF1B0, 0x002BC390, 0x002C0270, 0x002BC9F0 for slots 0x1028, 0x438, 0x440-0x470, 0x47C, 0x1D20, 0x1D24)
+    used_for: the idle machines and clips (9.2), the paraglider and per-level meshes (9.3) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release (sly.cpp idle-state entry, look mask and paraglider machine at load; gang.cpp idle states; smrun.cpp; jump.cpp states 19 and 20 and the glide parts)
+    used_for: idle start states, run rules and the paraglider open/close rule (9.2, 9.3) [R]
+  - kind: disc
+    what: SCUS-97316, 2026-11-19 (nightclub hub world, row 2; root channels of clips 281, 282, 152-164, 165-167, 259-261, 1519-1523; lookup slots 0x3E0-0x404, 0x440-0x470, 0x174C-0x17E4; idle machine flag words; executable SCUS_973.16 SHA-256 a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73, floats at 0x002BF554-0x002BF590, 0x002BF818, 0x002C3CB8)
+    used_for: dodge sides, jump-clip directions, crossbow slot pairs, blend constants and the glide slot order (1.1, 1.2, 5.3, 9.1.1, 9.2) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release (jump.cpp directional jump clip and glide weights; sly.cpp dodge side, Stealth Slide weights, look mask; slyhang.cpp swing weights; gang.cpp crossbow swing modes; smrun.cpp transition masks); sly2-decomp @ 33e2bab9 src/new_1942f0 (jump direction thresholds)
+    used_for: the rules marked [R] in 1.1, 1.2, 5.3, 9.1.1 and 9.2 (2026-11-19)
+  - kind: disc
+    what: SCUS-97316, nightclub hub (row 2), Bentley's package: object 580 (class 3, body offset 5636301, 56 bytes) and Bentley's transforms 52 and 75; executable SCUS_973.16 (SHA-256 above), lookup record at 0x002BC390 table (flags 0x300, key 0x244, slot 0x17F4) and the zero vector at 0x002A2DD0
+    used_for: the crossbow side part and its rest-pose side (5.3) [D] (2026-11-19)
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9 src/bbmark-blend/SetLookRigState.cpp (the side test of routine 0x136F48); SafeHouse @ c70803ce Sly2-Release/gang.cpp
+    used_for: how the side is read (5.3) [R] (2026-11-19)
+  - kind: disc
+    what: >-
+      SCUS-97316, 2026-11-20 (nightclub hub world, row 2): objects 316, 317, 318 (Sly), 586 and 685 (all three
+      characters), the packages goal_object_jt, goal_object_murray, goal_object_bentley and the placements 1569,
+      1570, 1571; executable SCUS_973.16 (SHA-256 a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73)
+      lookup tables at 0x002BE990, 0x002BF1B0, 0x002BC390, 0x002C0270 and 0x002BC9F0 (records for 316, 317, 318,
+      586, 685, 1569, 1570, 1571)
+    used_for: the meshes, parents and lookup flags of 9.3.1 [D]
+  - kind: reference-project
+    what: >-
+      SafeHouse @ c70803ce, Sly2-Release (sly.cpp cane parts and the mode-change swap, interact.cpp hiding spot,
+      loaders.cpp lookup-table binding, trail.cpp and jtthrow.cpp throw marker, jt.cpp target tracking and ring);
+      sly2-decomp @ 33e2bab9 (Sly's hide routine, the cane fade, the mode-change routine)
+    used_for: the cane rule, the throw marker and the target ring (9.3.1) [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-20
 ---
 
 # Sly 2 playable characters
@@ -105,7 +137,14 @@ Clips and root motion measured on the nightclub hub (row 2) [D]; which state use
 
 Murray also has a second fast pair (`0x1644` / `0x1684`: clip 431 at 510/s and clip 430 at 800/s) used by one of
 his held states [R]. Sly's sneak (state 10) and fight-stance moves use separate root blends, not gaits [R]. Sly's
-combat-dodge clips (`0x2000`, `0x2004`: objects 281 and 282) each move 500 in 0.3333 s (1,500/s) [D].
+combat-dodge clips (`0x2000`, `0x2004`: objects 281 and 282) each move 500 in 0.3333 s (1,500/s) [D]: 281
+moves transform 1 from (0, 0, 0) to (0, +500, 0), a side-step to Sly's **left**, and 282 to (0, −500, 0), to his
+**right** [D] (the body frame has +X forward and +Z up, so +Y is left [R]). The side [R]: with the stick pushed and a
+target, the direction 90° clockwise from the stick is tested; when the target lies on that side the dodge is 281
+(left), otherwise 282 (right); so, facing the target, stick left gives 281 and stick right 282 [I]. With the stick
+released the last side is repeated. The dodge's start velocity is the clip's root velocity at time 0 turned by the
+heading [R]. Leaving the dodge halves the
+velocity (`0x002BC9B8` [D]).
 
 The same clip object IDs serve the characters in every world they appear in [I]. The gait sets only the horizontal
 velocity; the character's own collision part keeps it on the floor [R].
@@ -128,15 +167,31 @@ Murray and Bentley have no double jump [R] [O]. Horizontal velocity carries over
 stick steers the horizontal velocity toward **515 × stick** in the stick's direction (`0x002BF730` [D]), times a
 per-jump factor that is 1 for the ordinary jump [R].
 
-**Jump clips** (lookup slots `0x3E0` to `0x41C`) [D for the resolution, R for the roles]: five take-off clips chosen
-by the stick's direction relative to the heading (straight or none, then two angle bands at about 1.10 and 2.04 rad
-[R]), five falls and up to five landings:
+**Jump clips** (lookup slots `0x3E0` to `0x41C`) [D for the resolution, R for the roles]: two sets of five
+directional clips and up to five landings. The **take-off set** (`0x3E0`…`0x3F0`) is played by the launch and the
+rising and falling phases of an ordinary jump or a fall; the **second set** (`0x3F4`…`0x404`, called "fall" in
+earlier notes) is played by the second jump (animation states 2 and 3: Sly's double jump) [R].
 
-| | Take-off (`0x3E0`…`0x3F0`) | Fall (`0x3F4`…`0x404`) | Landing (`0x408`, `0x40C`, `0x414`, `0x418`, `0x41C`) |
-|---|---|---|---|
-| Sly | 152, 156, 155, 153, 154 | 160, 164, 163, 161, 162 | 158, 159, 169, 601, 602 |
-| Murray | 590, 594, 593, 591, 592 | 595 (the others are not clips in the hub) | 600 (at `0x414`) |
-| Bentley | 590, 594, 593 (the others are not clips in the hub) | 595 | 478 (`0x408`), 600 (`0x414`) |
+Direction index (2026-11-19) [R, D for the angles]: a launch starts with index 0 (straight, or no stick). During the
+first **0.15 s** of the take-off or of the second jump (`0x002BF818`), the first frame on which the stick is pushed
+past 0.5 picks a direction once: the angle of the stick relative to the body's actual facing (its object matrix,
+not the heading goal), counter-clockwise positive. Below **1.0996 rad** (`0x3F8CBE4C`, 63°) → index 3
+(**forward**); above **2.0420 rad** (`0x4002B0B4`, 117°) → index 4 (**backward**); otherwise positive → index 2
+(**left**), negative → index 1 (**right**). The clip is swapped for the chosen one at the same playback time; a
+missing clip falls back to index 0 of its set, then to take-off index 0. Index `i` is slot base + 4·`i`:
+
+| Index (direction) | 0 (straight) | 1 (right) | 2 (left) | 3 (forward) | 4 (backward) |
+|---|---|---|---|---|---|
+| Sly take-off (`0x3E0`…) | 152 | 156 | 155 | 153 | 154 |
+| Sly second jump (`0x3F4`…) | 160 | 164 | 163 | 161 | 162 |
+| Murray take-off | 590 | 594 | 593 | 591 | 592 |
+| Murray second set | 595 | — | — | — | — |
+| Bentley take-off | 590 | 594 | 593 | — | — |
+| Bentley second set | 595 | — | — | — | — |
+
+"—": not a clip in the hub, so index 0 plays (Bentley jumping forward or backward plays 590) [D for the absence, R
+for the fallback]. Landings (`0x408`, `0x40C`, `0x414`, `0x418`, `0x41C`): Sly 158, 159, 169, 601, 602; Murray 600 (at
+`0x414`); Bentley 478 (`0x408`), 600 (`0x414`) [D].
 
 These clips have no root translation on transform 1: a jump's motion comes from the launch and gravity [D].
 
@@ -350,10 +405,41 @@ that returns to standing after **2 s**.
 ### 5.3 Crossbow swing (Square) [R] [D for the values]
 
 Square within 0.1 s swings the crossbow. The target is the nearest attackable object near the point 175 ahead
-within **0.15 s**, within an angle of **1.5 rad** of his heading (3.15 rad when standing); its height between
-−50 and 50 blends the low and high swing clips; standing still he turns to face it. The swing has three modes
-(standing, moving, air), each a two-clip blend chosen by the side the weapon is on; a repeat press restarts it.
-Size Destabilizer shrinks the guards it hits (item table).
+within **0.15 s**, within an angle of **1.5 rad** of his heading (3.15 rad when standing); standing still he turns
+to face it. A repeat press restarts the swing. Size Destabilizer shrinks the guards it hits (item table).
+
+**Swing clips** (2026-11-19) [R for the rule, D for the clips]. The swing has three **modes**, set from Bentley's
+state every frame: mode 0 in state 0 (standing); mode 1 in states 1, 2, 3 and 7 (move, air, interaction, walk);
+mode 2 in state 5 (near an object ahead); other states end it. When the swing starts, the **side** is fixed: 1 when
+his weapon part (slot `0x17F4`) is on his left (+Y in his frame), else 0. The blend played is number
+`2 × mode + side` of six two-clip blends, and the target height fixes the weights for the whole swing:
+`u = clamp((z + 50) / 100, 0, 1)`, `z` the height of the target point the search returns (relative to Bentley
+[I]), 0.5 with no target; the first
+clip gets `1 − u` (**low**), the second `u` (**high**). The swing's time runs from its start; a mode change
+mid-swing swaps the blend and keeps the time, the side and the weights; each mode change seeks 0.0667 s ahead.
+
+**How the side is read** (2026-11-19). Slot `0x17F4` is filled by the record of Bentley's lookup table at
+`0x002BC390` with flags `0x300` and key `0x244`: object **580** in his package [D]. On the disc (nightclub hub,
+row 2) object 580 is a class-3 transform marker nested directly in Bentley's body (56-byte body at offset 5,636,301):
+parent reference `0x1034`, that is Bentley's transform 52 (kind 13; the target of his mirror pair 75 → 52, which
+copies transform 75's rotation), identity rotation, offset (26.712, 88.609, 1.574) [D]. When a swing starts (the
+change from "no swing" to a mode, not on later mode changes), the game converts the marker's origin (the zero vector
+at `0x002A2DD0` [D]) from the marker's frame into Bentley's own object frame, using both objects' current world
+matrices, so the current pose counts; side = 1 when the result's **y** is above 0, else 0 [R; the decomp's
+byte-level reading of routine `0x136F48` and the reference agree]. At rest the marker sits at (21.2, 145.5, 91.2) in
+Bentley's frame [D], so the rest-pose side is **1** (left; blends 1, 3 and 5: clips 562/563, 566/567, 570/571).
+
+| Blend | Mode, side | Low clip (weight 1 − u), slot | High clip (weight u), slot |
+|---|---|---|---|
+| 0 | standing, weapon right | 560 (`0x174C`) | 561 (`0x1758`) |
+| 1 | standing, weapon left | 562 (`0x1768`) | 563 (`0x1774`) |
+| 2 | move / air / interaction / walk, right | 564 (`0x1784`) | 565 (`0x1790`) |
+| 3 | move / air / interaction / walk, left | 566 (`0x17A0`) | 567 (`0x17AC`) |
+| 4 | near an object ahead, right | 568 (`0x17BC`) | 569 (`0x17C8`) |
+| 5 | near an object ahead, left | 570 (`0x17D8`) | 571 (`0x17E4`) |
+
+All twelve clips are 0.5 s [D]. "Low" and "high" follow from the weights (the second clip dominates for targets
+above Bentley's origin) [R]; the clips' poses were not compared.
 
 ### 5.4 Darts (R1) [R] [D for the aim distances]
 
@@ -461,7 +547,7 @@ When a character holds a throwable (object, guard, Bentley) and presses the thro
 
 Each character finds its clips through its lookup table ([animation.md](animation.md) 9: Sly `0x002BE990` then
 `0x002BF1B0`; Bentley `0x002BC390`; Murray `0x002C0270`; shared `0x002BC9F0`) [D]. The states above use those
-entries: gaits for walk/run (one clip blend per gait) [R], five punch clips for Murray, a two-clip blend per crossbow swing mode for Bentley, a four-clip blend for
+entries: gaits for walk/run (one clip blend per gait) [R], five punch clips for Murray, a two-clip blend per crossbow swing mode and weapon side for Bentley (5.3), a four-clip blend for
 Sly's hanging and a three-clip blend for his swinging [R].
 
 Clips per move found so far (lookup slot → clip object, nightclub hub) [D for the resolution, R for the move]: the
@@ -496,10 +582,10 @@ seconds [D]. "—" means the clip is not present in that world.
 | `0x1FE8` | 348 | 1.0 | Lightning Spin (sub-state 9) |
 | `0x1D1C` / `0x2050` | 196 / 198 | 1.1667 / 1.3333 | state 16: juggle strike without / with Silent Obliteration |
 | `0x1D34` | 237 | 1.3333 | state 17: forced move |
-| `0x2000` / `0x2004` | 281 / 282 | 0.3333 | Combat Dodge |
-| `0x2018` / `0x2024` / `0x2030` | 259 / 260 / 261 | 1.0 | Stealth Slide blend |
+| `0x2000` / `0x2004` | 281 / 282 | 0.3333 | Combat Dodge: left / right (1.1) |
+| `0x2018` / `0x2024` / `0x2030` | 259 / 260 / 261 | 1.0 | Stealth Slide blend: lean left / straight / lean right (9.1.1) |
 | `0x1F64` / `0x1F70` / `0x1F7C` / `0x1F88` | 307–310 | 1.5 | hanging blend (four clips) |
-| `0x1974` / `0x1980` / `0x198C` | 165 / 166 / 167 | 0.6667 | swinging blend (three clips) |
+| `0x1974` / `0x1980` / `0x198C` | 165 / 166 / 167 | 0.6667 | swinging blend: pumping ahead / pumping back / coasting (9.1.1) |
 | `0x14D4` / `0x14D8` | 150 / — | 0.4167 | pose modes 10 / 11 |
 
 **Murray:**
@@ -522,14 +608,219 @@ seconds [D]. "—" means the clip is not present in that world.
 | Slot | Clip | Length | Move [R] |
 |---|---:|---:|---|
 | `0x14E4` / `0x14E8` | 522 / — | 0.5 | held by Murray: still / being moved |
-| `0x174C` … `0x17E4` (six pairs, 0x1C apart) | 560–571 | 0.5 each | the crossbow swing's six two-clip blends (5.3) |
+| `0x174C` + 0x1C·i (low), `0x1758` + 0x1C·i (high), i = 0…5 | 560 + 2i, 561 + 2i | 0.5 each | the crossbow swing's six two-clip blends (5.3) |
 | `0x1820` | 311 | 0.75 | (a Bentley action clip; use not established) |
 | `0x1874` | 341 | 0.3333 | Size Destabilizer (item 8) |
 | `0x1878` | 588 | 0.1667 | state 14 (Adrenaline Burst; section 1.1) |
 | `0x1444` | 447 | 0.75 | picking up |
 
+#### 9.1.1 Blend weights (2026-11-19) [R, D for the constants and clips]
+
+**Swinging (Sly, state 3; clips 165, 166, 167).** Two values are eased each frame toward targets set by the
+substate: *activity* `a` (smoothing parameters 1.0, 0, 0.1 at `0x002BF570`) and *pump* `p` (4.0, 0, 0.1 at
+`0x002BF580`). Weights: **165 = a·p, 166 = a·(1 − p), 167 = 1 − a**. Substates and targets, from the stick against
+the heading (pushed past 0.3): 0 **pumping ahead** (stick within 1.0472 rad of the heading): `a` → 1, `p` → 1; 2
+**pumping back** (stick beyond 2.0944 rad): `a` → 1, `p` → 0; 1 **coasting** (stick released for 0.25 s, or held
+ahead or back for more than 1.4 s): `a` → 0, `p` → 1 if `p` > 0.5 else 0; 3 hanging still (swing angle under 0.1 rad
+and speed under 80) plays the hang state machine (slot `0x1950`) instead. The blend is **not played at rate 1**: its
+time is steered toward `D × (clamp(θ / 1.7, −1, 1) + 1) / 2`, `θ` the swing angle (the hook direction's pitch from
+straight up in the heading's frame) and `D` the blend's length, at a rate limited to ±3 (`0x002BF58C` = 1.7,
+`0x002BF590` = 3); entering the swing starts it at the middle.
+
+**Stealth Slide (Sly, state 24; clips 259, 260, 261).** Entering: 260 alone (weights 0, 1, 0). Each frame, with
+`ω` the body's yaw rate (rad/s, counter-clockwise positive), `L = 0.5 × clamp(ω / 2.5, −1, 1)` (2.5 = 0.1 × 25, the
+first braking value at `0x002C3CB8`): **259 = max(0, L), 260 = 1 − |L|, 261 = max(0, −L)**. So 259 leans into a
+left turn and 261 into a right turn, each reaching at most 0.5 [I for the names].
+
+**Glide (Sly, state 20; five clips at slots `0x440`, `0x44C`, `0x458`, `0x464`, `0x470`).** The slots resolve to
+**1519, 1520, 1521, 1523, 1522** (note 1523 before 1522) [D]. Entering: 1519 alone. Each frame, with `m` the stick
+magnitude and `s`, `c` its sideways and forward parts against the body's facing (`s = m·sin`, positive left;
+`c = m·cos`, positive forward) and `q = m / (|s| + |c|)`: weight of slot `0x440` (1519, **centre**) `= 1 − m`;
+`0x44C` (1520, **left**) `= s·q` when `s` ≥ 0; `0x458` (1521, **right**) `= −s·q` when `s` < 0; `0x464` (1523,
+**forward**) `= c·q` when `c` > 0; `0x470` (1522, **backward**) `= −c·q` when `c` ≤ 0; the unused side of each pair
+is 0, and the weights sum to 1. The same stick values set the glide speeds and turn rate (gadgets.md) [R]. Disc
+poses [D]: these clips hold the canopy's transform 3 at (0, −0.19, 192.93) for 1519, (0, −16.45, 192.93) for 1520,
+(0, 20.16, 192.93) for 1521, (0, −0.19, 179.98) for 1523 and (0, −0.19, 211.17) for 1522.
+
 The complete slot list (about 500 entries for the three characters) is reproducible from the tables of
 [animation.md](animation.md) 9; moves not in these tables are still unnamed.
+
+### 9.2 Standing still: the idle machines (2026-11-19 findings)
+
+No character has a single looping idle clip. Standing still runs the state machine in lookup slot `0x1028`
+(Sly: state machine 124; Murray and Bentley: state machine 418 of their own package) [D]. The machine plays a chain
+of one-shot clips, one per transition, chosen at random by weight; no clip in it is looped on its own [D for the
+data, R for the run rules]. Run rules (animation.md 8; base rules in ../sly1/scripts.md 9) [R]: next state −1 means
+stay, 0x20 means "pick a random leaving transition allowed by the mask"; weights are relative probabilities; a run
+whose start state is not in the machine starts at the machine's first state. Lengths in seconds [D].
+
+**Mask encoding** (confirmed 2026-11-19) [R, D for the values]. A transition's flags word ([animation.md](animation.md)
+8) carries bit 0 = usable both ways and **mask bits 2 to 15** (`0x4`–`0x8000`); a transition may be taken only when
+its flags AND the current mask is non-zero (route-distance groups use bits 2 to 12). On the disc, "any" is `0xFFFC`
+(and `0xFFFD` with bit 0). Entering the standing state applies the idle machine with the **look mask**, and the
+standing state re-sends it every frame. The look mask is one bit: the side of the look target in the body's frame is
+0 ahead (|angle| < 1.0 rad), 3 behind (> 2.5 rad), 1 left (positive angle), 2 right; then by the look kind: none →
+**8**; kind 1 → `0x10 << side` (**16, 32, 64, 128**); kind 2 → `0x100 << side` (**0x100, 0x200, 0x400, 0x800**);
+kind 3 → **0x1000**; kind 4 → **0x100**. So every idle mask is one of bits 3 to 12, as the engine assumes; bit 2
+(`0x4`) is the mask Murray's and Bentley's other states apply their machines with (Sly's other states use `0xFFFC`),
+so it never selects idle transitions.
+
+**Sly** (machine 124) [D]. The start state depends on what Sly did before [R]: 373 by default; 374 after state 12;
+375 after state 10; 376 after landing from a fall of at most 400 units, 377 after a longer fall; 379 after a pose
+(the pose modes); 380 when a foot is over a drop (teeter).
+
+| From → to | Mask | Clips (weight) | Length |
+|---|---|---|---|
+| 373 → 5532 | 8 | 4576, 4578, 4580 (1 each) | 1.5167 each |
+| 376 → 5532 | any | 5561 | 1.6667 |
+| 377 → 5532 | any | 5560 | 2.9833 |
+| 379 → 5532 | any | 5562 | 3.5 |
+| 5532 → 5533 | 8 | 5539, 5540, 5541 (20 each) | 8.1333, 4.5833, 1.5 |
+| 5533 → 5534 | 8 | 5542 | 1.6667 |
+| 5534 → 5534 (repeats) | 8 | 5543 (50), 5544 (50), 5545 (5), 5546 (5), 5547 (5), 5548 (5), 5549 (20), 5550 (20), 5551 (20), 5552 (20), 5553 (10), 5554 (5), 5555 (20) | 8.3333, 9.3333, 8.3333, 8.3333, 9.3333, 9.3333, 2.1667, 6.55, 4.55, 8.4167, 7.3333, 8.3333, 9.0833 |
+| 5532 → 5532, look ahead | 16 | 4560, 4552 | 1.5167 each |
+| 5532 → 5532, look left | 32 | 4566, 4558 | 1.6667 each |
+| 5532 → 5532, look right | 64 | 4564, 4556 | 1.6667 each |
+| 5532 → 5532, look behind | 128 | 4562, 4554 | 1.6667 each |
+| 5532 → 5532, second kind | 0xF00 | 4572, 4570 | 1.3333 each |
+| 374 → 5532, second kind | 0xF00 | 4574 | 0.5833 |
+| 5532 → 5532, third kind | 0x1000 | 4568 | 1.0 |
+| 5533 → 5532, 5534 → 5533 | 0x1FF0 | none (instant) | — |
+| 374 → 5532 (mask 0xF0), 375 → 5532 (mask 0x1000) | | none (instant) | — |
+| 380 → 5535 (teeter) | any | 5556 | 4.55 |
+| 5535 → 380 | any; 5559 mask 8 | 5557 (34), 5558 (33), 5559 (33) | 4.55 each |
+
+So with nothing to look at, Sly plays one of three settle clips, one of three longer clips, clip 5542, and then a
+random fidget from the thirteen for as long as he stands. With a look target the fidget states drop straight back
+to 5532, which repeats the look clip for that direction. The teeter alternates 5556 and one of 5557–5559 forever.
+
+**Murray** (machine 418) [D]. No start state matches, so he starts at 17776. Every transition allows any mask.
+
+| From → to | Clips (equal weights) | Length |
+|---|---|---|
+| 17776 → 17777 | 7238, 7240, 7242, 17779 | 3.6667, 6.6667, 5.0, 3.6667 |
+| 17778 → 17777 | 7236 | 3.0 |
+| 17777 → 17065 | 17780, 7244 | 3.8333, 3.3333 |
+| 17065 → 17065 (repeats) | 17782, 17783, 17784, 17785, 17786, 17787, 17788 | 6.6667, 5.6667, 5.3333, 6.5, 5.5, 5.8333, 8.3333 |
+
+Which state enters 17778 was not found.
+
+**Bentley** (machine 418 of his package) [D]. Starts at 92; 379 (after a pose) also leads to 17064.
+
+| From → to | Mask | Clips (equal weights) | Length |
+|---|---|---|---|
+| 92 → 17064, 379 → 17064 | any | 7608 | 1.5 |
+| 17064 → 17065 | any | 7610 | 3.3333 |
+| 17065 → 17065 (repeats) | 8 | 7602, 7604, 7606 | 3.0, 3.1667, 3.4167 |
+| 17065 → 17064 | 0xFF0 | none (instant) | — |
+
+With a look target Bentley alternates: back to 17064 at once, then 7610 again. A viewer that wants one "idle"
+loop can use Sly 5543, Murray 17782 and Bentley 7602 [I]; they are among the most likely repeating clips.
+
+### 9.3 Gameplay-state and per-level meshes on the gang (2026-11-19 findings)
+
+**Paraglider and its strings (Sly).** They are meshes of Sly's own body (object 7), not of a separate object [D]:
+
+| Part | Mesh | Bones | Shader |
+|---|---|---|---|
+| canopy | 36 vertices, opaque, at transform 2; bind-pose box (−66, −137, 250)–(66, 140, 320) | Sly transforms 5 and 8 | 14 (blue cloth) |
+| strings | two 6-vertex meshes from the hands (z ≈ 117) to the canopy (z ≈ 258) | transforms 8, 5, 36, 29 | 14 |
+| canopy outline and shadow | 18-vertex ink outline; 19-vertex shadow volume at transform 8 | | |
+
+Transforms [D]: 3 (move, rest offset z 219.5) → 4 (rotate) → 5 (scale) carry the canopy; 6 (move, z 189.2) → 7
+(rotate) → 8 (scale) carry the string tops. Their rest scale is 1, so **the bind pose shows the paraglider open**
+above Sly's head [D]. Only clips 1518–1523 animate them [D]. Clip 1518 (the opening, lookup slot `0x438`, 0.25 s)
+moves transform 3 from (0, 27.3, 24.3) to (0, −0.19, 205.0) and transform 6 from (0, 27.3, 26.8) to (0, −0.19,
+150.4), out of a folded position at Sly's back, and scales transform 5 from (0.019, 0.022, 0.144) to (1.0, 1.093,
+1.0) and transform 8 from (0.565, 0.065, 0.565) to (1.0, 0.847, 1.0) [D]. Clips 1519–1523 (2.0833 s each) are the five
+glide blend poses (slots `0x440`–`0x470`; weights in 9.1.1) and hold the scales near 1 [D].
+
+A second object, 1525 (class 48, nested on Sly transform 2, no meshes, removed at level start), carries state
+machine 1526 (slots `0x1D20`, `0x1D24`) [D]. It is applied at load with no goal, so it starts in state 1528 (closed)
+[R]. Goal 0x5F7 (state 1527, open) plays clip 5517 (0.25 s: object 1525 transform 2 scale 0 → 1); goal 0x5F8 (1528)
+plays clip 5518 (0.25 s, no channels) [D]. Clip 1518 also scales 1525 from 0 to 1 [D].
+
+Rule [R]: entering jump state 19 (R1 in the air, gadgets.md 27) plays clip 1518 and sets the machine's goal to open;
+state 19 becomes the glide (20) when the clip ends; leaving 19 or 20 for any state other than 19–20 sets the goal to
+closed and drops the glider camera zone (slot `0x47C`, object 1524). So: shown from the jump into state 19 until
+the glide ends; hidden otherwise.
+
+*Not established*: what keeps the canopy folded outside the glide. No other clip of Sly's drives transforms 3–8, and
+the closing clip 5518 has no channels; object 1525's scale does not reach the canopy's bones in the data read so
+far. A renderer should hold transforms 3, 5, 6 and 8 at clip 1518's first frame whenever Sly is not in states
+19–20 [I].
+
+**The green shape on Sly's head: a per-level costume, not a gadget or prompt.** Sly's body has meshes that are
+loaded only in some level-table rows (geometry.md 2.2) [D]:
+
+| Level row | World | Sly meshes | Reading |
+|---|---|---|---|
+| 32 | `c_sawmill_ext` | an 85-vertex head mesh at transform 73 (shaders 7 and 28: green, teal and orange) and its 59-vertex outline; box (−25, −26, 143)–(66, 25, 200), with a brim to the front | a cap [I] |
+| 11 | `i_palace_ballroom` | an alternative 790-vertex body (shader 41: purple cloth) with hands (transforms 29, 36), cuffs (63, 39), head piece (73) and outlines | the ballroom outfit [I] |
+| 17 | `p_castle_ext` | two 46-vertex radial discs over the eyes (transforms 82 and 88), vertex colours (19, 0, 29) to (168, 2, 255) | glowing eye lenses [I] |
+
+The green shape is most likely the row-32 cap, drawn because the renderer kept conditional meshes of every row
+[I]. In the nightclub hub (row 2) none of these meshes is loaded [D]. Row 32 also gives Murray (transform 84) and
+Bentley (transform 57) an 85-vertex head mesh [D], so all three wear headgear in that hub [I]. Murray's other
+per-level meshes: row 33 (`c_sawmill_mulch`) a 323-vertex head mesh and parts at transforms 72 and 84; row 30
+(`c_train_b`) four meshes at transforms 3 and 6; rows 12 and 15 one mesh at transform 119; row 32 one more at 119
+[D]. Bentley's: rows 8, 29 and 30 a mesh at transform 52; row 17 a translucent 12-vertex mesh at transform 36 [D].
+
+**Other parts nested in the three bodies** [D]. Each body holds nested objects with option 26 (removed at level
+start): Sly 28, Murray 22, Bentley 8 (at any depth), the paraglider holder 1525 among them. Their meshes include translucent rings
+and bursts (Sly 3839, 3841, 3843: 4-vertex cards), spark strips (4185, 4212–4224) and gadget models (for example
+Sly 3689, 3697, 3718, 3725, 3738, which also carry option 13). Being removed at start, they are not drawn on the
+standing character [R]; they belong to gadgets and effects (gadgets.md) [I]. Object 586 (class 105, a translucent
+61-vertex flat shape on the floor behind the character, options 1305 and 1307) and empty object 685 stay in all three
+[D]; section 9.3.1 shows that both are taken out of the world by the character's lookup table at load.
+
+#### 9.3.1 Cane parts, throw marker and target ring (2026-11-20 findings)
+
+These objects carry no option 26 and so look "always in the world" from the stream alone. The characters' lookup
+tables (12-byte records: flags, object ID, slot) decide otherwise: **flag 0x200 removes the object from the world
+when the table is bound at load** [D for the flags, R for the meaning] (0x300 = 0x200 plus 0x100).
+
+| Object | Owner, package | Lookup record [D] | Meshes [D] | Parent [D] | Drawn when |
+|---|---|---|---|---|---|
+| 316 | Sly (`jt`), class 48 | `0x002BF1B0` record 0: flags 0, slot `0x19A0` | cane shaft: rigid 9 vertices, shader 18 (ID 4751, kind 1, white, textured), box (−39, −3, −2)–(54, 3, 2); an ink outline and a skinned outline | Sly transform 36 (the hand; `0x1024`), offset (−22.1, −12.9, −5.0) | in the world from load; see the cane rule |
+| 317 | nested in 316 | record 1: flags 0, slot `0x19A4` | cane hook: rigid 87 vertices, shader 18, box (−56, −7, −3)–(15, 22, 3); outlines | 316's transform 1 (`0x1001`), offset (74.7, 0.2, 0) | with 316 (it is 316's child) |
+| 318 | Sly, class 48 | record 2: **flags 0x200**, slot `0x19A8` | a second whole cane: shaft (15 vertices) and hook (98), shader 18, outlines | Sly transform 73 (`0x1049`); bind-pose world (21.2, 38.1, 150.8) | **removed at load**; see the cane rule |
+| 586 | each character, class 105 | Sly and Bentley: shared table `0x002BC9F0` record 44, slot `0x12DC`; Murray `0x002C0270` record 54, slot `0x1A3C`; **flags 0x300** | 61-vertex flat arrow, shader 27 (ID 4841, kind 1, colour (234, 121, 30), gold-orange), render pass 10: a band about 100 wide from x −456 to about 0, then an arrowhead (±92) ending at x 48, all at z = 0; vertex alphas rise from 76 at the tail to 204 at the head | the character's transform 2 (`0x1002`; Murray `0x1003`), offset (−158, 0, −75): on the floor | **removed at load**; shown only while a carried object is being aimed |
+| 685 | each character, class 48 | shared table record 46, **flags 0x300**, slot `0x11A4` | none | the character's transform 61 (`0x103D`) | never (no meshes) |
+| 3765, 6964, 7355 | top-level objects of the packages `goal_object_jt`, `goal_object_murray`, `goal_object_bentley` | placed into the characters by class-6 placements 1569 (Sly, kind 1, parent `0x1002`), 1571 (Murray, `0x1003`) and 1570 (Bentley, `0x1002`); those placements are in the tables at slot `0x9C4` with **flags 0x300** | a translucent ring in the vertical plane (box (0, −41, −25)–(0, 39, 27)), three meshes, pass 10, draw distances 1000/1100/1200; Sly's shaders white, white at alpha 63, (0, 136, 255, 217) and (0, 68, 127, 115), so blue; Murray's and Bentley's in their own colours | transform chain from the package root | **never where stored**; copies appear on targets (below) |
+
+**The cane rule [R].** Exactly one cane is in the world at a time. At load 316 (with 317) is in, 318 is out. When
+Sly's movement mode changes between "mode 2 or 11" and any other mode, the cane for the new side is added, moved to
+the pose of the one in use, and the other is removed: 318 while the mode is 2 or 11 (mode 11 is the climb), 316/317
+otherwise. While Sly is in a hiding spot his cane 316 is taken out of the world and put back when he leaves it. Sly's
+hide routine hides and shows 316, 317 and 318 together. When Sly is the current player, 316 and 317 take Sly's own
+fade value each frame, so they fade with him. 317 is also the cane tip for reach tests and for the jump-to-target
+aim. Both canes hang on animated bones (36 and 73) and must be drawn with those bones' world matrices; drawn with
+only their local offsets, they land near the character's origin, at floor level [I].
+
+**The throw marker (586) [R].** Class 105 is a history-trail object: its vertices are redrawn every frame from a
+ring of recent world matrices of its parent transform, each vertex using an older matrix the farther it lies along
+the trail's axis; each vertex's alpha is its authored alpha times the trail's gain times an age fade over the
+history span (0.5 s when not authored). As the throw marker it is added to the world when the throw controller
+enters its **aim** state; each frame its history is then filled from the predicted flight path (from the predicted
+landing point back toward the launch point, each point facing along the path, gain 1 where a point exists and 0
+beyond), so the gold arrow lies along the arc the thrown object will follow. It is removed when the throw ends or is
+cancelled. Outside aiming it must not be drawn. **The gold rod on the floor near Sly in the port is most likely
+this marker drawn in its authored rest shape** (flat, gold, at floor height, reaching from 614 behind the character
+to about 110 behind it) because the load-time removal of flag 0x300 was not applied [I]. The second cane 318 is the
+other candidate, but its rest position is at head height [D]; a cane drawn without its bone matrix is a third [I].
+
+**The target ring (3765, 6964, 7355) [R].** The ring package is a prefab: the stored object is not drawn
+(classes/placement.md 2), and the character's placement of it (slot `0x9C4`) is removed at load. While the player
+moves, up to four nearby interaction targets (ledges, poles, points a move can reach) are tracked by distance. When
+a target is the nearest one with a prompt, a copy of the ring is made from the player's placement, taken out of any
+parent, placed unrotated at the target's point and faded in over 0.25 s; it then follows the target point along
+its curve; when the target is dropped, its ring fades out over 0.5 s. So the ring is drawn only on the prompted
+target, never on the character.
+
+So, for the port: draw 316/317 attached to bone 36; never draw 318 except in modes 2 and 11; never draw 586 except
+while aiming a throw; never draw 685; never draw the stored ring objects nor the characters' ring placements, only
+the per-target copies [R].
 
 ## 10. Test vectors [D]
 
@@ -553,3 +844,14 @@ The complete slot list (about 500 entries for the three characters) is reproduci
 - Which clip each remaining move uses (section 9).
 - The exact effect of each gadget (radius, duration) and of the twelve unsold Sly moves.
 - How switching is offered in hubs (only at the safe house or also elsewhere).
+- What keeps Sly's paraglider folded outside states 19 and 20 (9.3), and which state enters Murray's idle state
+  17778 (9.2).
+
+## 12. Stick input [X]
+
+Sly 2 reads the analog sticks with **the same routine as Sly 1**: the converter at `0x00187768`, with its pad set-up
+at `0x001875B8`. It has the same constants: the wake-up window 96 … 160, the ±0.75 starting ranges, the four
+calibration directions at `0x002BE950`, the 0.35 dead zone with full deflection at 0.85, and the output normalised
+and scaled by u (zero below a length of 0.0001). The full rule is in Sly 1
+[player-moves.md](../sly1/player-moves.md) 1.2. Sly 3 changes only the output step
+([../sly3/characters.md](../sly3/characters.md) 11).

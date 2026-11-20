@@ -14,7 +14,7 @@ sources:
     what: SafeHouse @ c70803ce (2026-11-12), Sly3-Release/game/gen (class and option correspondence tables)
     used_for: the Sly 2 option numbers given in section 2 where the other specs cite them; marked [R]
 reviewed_by: pending
-date: 2026-11-18
+date: 2026-11-19
 ---
 
 # Sly 3 options by class
@@ -47,8 +47,7 @@ Gathered from the other Sly 3 specs; each keeps its source's tag. Options not li
 | 13 | most solids, emitters | activation radius (values such as 3,000, 4,000, 6,000, 10,000) | Sly 2 clock-and-loop |
 | 27 | almost all | removed when the level starts (Sly 2's 26) [R] | object-stream.md |
 | 32 to 35, 61, 62 | solids | physics settings; 35 = gravity vector | vehicles-and-minigames.md 5 |
-| 202 | 7 volume | volume priority (Sly 2's 175) [R] | Sly 2 camera.md |
-| 203 to 245 | 14 zone | **camera zones**: Sly 2's camera-zone options 176 to 212 (205 = 178 … 241 = 208) [R]; 228 to 239 new | Sly 2 camera.md |
+| 202 to 245 | 7 volume, 14 camera zone | volume priority; camera-zone settings (section 2.1) | 2.1 |
 | 159 to 166 | 4 light | kind, colour (HSV), strength, cone, fall-off, light selection, bake, shadow weight | rendering.md 2.1 |
 | 249 to 252 | 17 | (open; on the characters' parts) | — |
 | 267 to 271, 309, 310, 937 | 58 guards | animations; near and far pursuit ranges; **937 maximum hit points** (also on 49 to 67, 73 to 84) | guards.md |
@@ -80,6 +79,49 @@ Gathered from the other Sly 3 specs; each keeps its source's tag. Options not li
 | 1657 to 1683 | 148 combo definition | buttons, window (0.35 s default), clips, speed factors, abilities | characters.md 5 |
 | 1894 | 125 compass | needle object | pickpocket-and-pickups.md 6 |
 | 1901 to 1906, 1911 | 153 treasure map, 127 | trail points, clues, pace length, steps screen, script; marker factory | pickpocket-and-pickups.md 7 |
+
+### 2.1 Camera zones (class 14) and volumes (class 7)
+
+Sly 3's camera zone is class 14 (Sly 2's class 15; behaviour: Sly 2 [camera.md](../sly2/camera.md) 3) [R].
+Correspondence: the reference's table where it scores 80 or more [R]. Otherwise it is matched here by value type and
+field, read from both executables' option tables [X]: Sly 2's at `0x002AC880` in SCUS_973.16 (SHA-256
+a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73), Sly 3's at `0x0032CA80`. The 18 options 205 to
+221 write the same fields of the same sub-block (+0x4 to +0x88) as Sly 2's 178 to 194, one for one.
+
+| Sly 3 | Kind [X] | Sly 2 | Meaning (Sly 2 camera.md) | On the disc [D] |
+|---:|---|---:|---|---|
+| 202 | int at +0xD4 (class 7) | 175 | **volume priority** (the highest wins among the volumes the player is in) | 5 volumes: 5, 1, 0, 10 |
+| 203, 204 | | 176, 177 | focus class; (method) | 1 each |
+| 205 | float, block +0x4 | 178 | distance behind the focus | 614 |
+| 206 / 208 / 210 | vector, block +0x10 / +0x20 / +0x30 | 179 / 181 / 183 | **the zone's curves**: x, y and z offset as quadratics (c0, c1, c2) of the distance | 47 / 64 / 523 |
+| 207 / 209 / 211 | float pair, block +0x40 / +0x48 / +0x50 | 180 / 182 / 184 | limits of those three quadratics [I from the pairing] | 0 / 0 / 0 |
+| 212, 213 | float | 185, 186 | screen offset x, y | 34, 607 |
+| 214 | float | 187 | focus point between base (0) and adjusted (1) | 376 |
+| 215, 216 | float | 188, 189 | passive-turn gain; turn rate toward the samples | 222, 11 |
+| 217, 218 | | 190, 191 | focus-point coefficient scale | 7, 36 |
+| 219, 220 | float | 192, 193 | spring / damping scales | 145, 146 |
+| 221 | float pair | 194 | tilt limits | 372 |
+| 222 | float at +0x128 | 195 | cylindrical angle change limit | 2 |
+| 223 | bool at +0x11C | 196 | coefficients are cylindrical | 9 |
+| 224 | value type `0x100E` at +0x12C | 197 | allowed behaviour bits | 589 |
+| **225** | int at +0x124 | **200** | **view-stack priority base** (the zone's priority) | 513 |
+| 226 | bool at +0x120 | 198 [R] | return toward the sample after the player stops | 204 |
+| 227 | value type `0x100A` at +0x134 | 202 [R] | (Sly 2's 202, undocumented there) | never |
+| 228 to 239 | sub-block +0x0 to +0x2C: four triples (bool, float, float) | 198 / 199, 203 to 206 [R, medium] | **return-toward-sample settings**: Sly 2 had two (flag, time, strength) returns, Sly 3 four. 228 / 231 are the first two triples' flags (1 ×121; 1 ×54, 0 ×4), 229 / 230 and 232 / 233 their time and strength (Sly 2's 203 / 204 and 205 / 206) | 121, 50, 72, 58, 29, 20; 236, 237, 239 once each |
+| 240 to 245 | +0x138 to +0x160 | 207 to 212 | cut on switch; field of view; no obstruction avoidance; look-toward object; lead quadratic and its limits | 15, 480, 43, 38, 49, 2 |
+
+- **Switching mode: no option.** Sly 2's 214 (value type `0x100F`, field +0x13C, values −1 follow / 0 off / 1 on) has
+  no Sly 3 counterpart: no Sly 3 option has value type `0x100F`, and the reference finds none [X] [R]. Every Sly 3
+  zone therefore starts in Sly 2's default mode, following the player's position. On and off is world membership:
+  a zone in the world is on; scripts (`0x38` / `0x39`), task switches (1416), option 27 and option sets add or
+  remove it ([camera.md](camera.md) 3) [X].
+- **Winding and plane sense** [D] [X for the rule's origin]: as in Sly 1 and Sly 2, a surface's normal is
+  normalise((p1 − p0) × (p2 − p0)) from its three corners in stored order, and it points **out of the volume**.
+  Check: the signed volume Σ p0 · (p1 × p2) / 6 is **positive for every zone and volume tested**: all 160 class-14
+  bodies and 8 class-7 bodies of v_ext, h_ext, c_ext and m_ext. The tree's positive child is on the normal's side;
+  a point is inside when the walk from node 0 ends at a missing negative child (Sly 1 [collision.md](../sly1/collision.md)
+  2 and 5) [R for Sly 3].
+- **The zone's attached object**: when a zone holds a nested object, it is the camera's path curve, as in Sly 2 [R].
 
 ## 3. Which options each class uses on the disc [D]
 

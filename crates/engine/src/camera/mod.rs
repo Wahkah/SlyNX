@@ -15,7 +15,9 @@ pub mod consts;
 pub mod fade;
 pub mod follow;
 pub mod framing;
+pub mod sly2;
 pub mod system;
+pub mod views;
 pub mod zone;
 
 #[cfg(test)]
@@ -25,5 +27,5 @@ pub use consts::{CameraConstants, CameraTunables};
 pub use fade::{FadeSource, FadedMesh};
 pub use follow::{CameraFrame, CameraInput, CameraScene, FollowCamera, Lens, Mode, PanelSubject, PanelView, Subject};
 pub use framing::{Frame, Framing, OffsetFn, ZoneFrame};
-pub use system::CameraSystem;
+pub use system::{CameraSystem, Mount};
 pub use zone::CameraZone;

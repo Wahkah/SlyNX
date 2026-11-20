@@ -223,9 +223,10 @@ Behaviour [R]:
     | | The Unseen Foe | 667 |
     | | Duel by the Dragon | 231 |
 
-    (Found by scanning each world for option 1046 with its 4-byte value: every vault world shows the template's 1
-    and exactly one other value. The other values that appear in the scan (255, 63, 188, 64) do not come with a
-    template's 1 and are byte patterns elsewhere in the data, not option lists [I].)
+    (Checked by walking every decompressed world's records: in each vault world the vault (class 23) and the
+    placement that places it (class 83) share one OID, for example 1397 in Paris and 1389 in A Stealthy Approach.
+    The vault's own list holds 1046 = 1 and the placement's list holds the combination. No other record carries
+    1046.)
   - **Checking the dials** [X: the vault update at `0x0019A6A8`, loop at `0x0019AA78`]: the combination is read from
     vault field +0x640. Dial i is right when its current state minus 912 equals ⌊combination × 10^i / 100⌋ mod 10:
     dial 0 the hundreds, dial 1 the tens, dial 2 the units.

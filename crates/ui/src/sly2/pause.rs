@@ -15,7 +15,7 @@ use crate::nav::{Dir, MenuInput, Repeat};
 /// The pause menu's screen object.
 pub const PAUSE_SCREEN: i32 = 880;
 /// Text size [working choice].
-pub const ENTRY_SIZE: f32 = 24.0;
+pub const ENTRY_SIZE: f32 = 18.0;
 
 /// An entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +24,10 @@ pub enum Entry {
     SaveGame,
     JobHelp,
     AbandonJob,
+    /// The options page (44).
+    Options,
+    /// The safe-house shop (SlyNX's way into it while the safe house itself is not played) [working choice].
+    Shop,
     ExitToEpisodeMenu,
     QuitGame,
 }
@@ -36,6 +40,8 @@ impl Entry {
             Entry::SaveGame => 62,
             Entry::JobHelp => 106,
             Entry::AbandonJob => 107,
+            Entry::Options => 44,
+            Entry::Shop => 3145,
             Entry::ExitToEpisodeMenu => 66,
             Entry::QuitGame => 70,
         }
@@ -48,6 +54,8 @@ impl Entry {
             Entry::SaveGame => "Save Game...",
             Entry::JobHelp => "Job Help",
             Entry::AbandonJob => "Abandon Job",
+            Entry::Options => "Options",
+            Entry::Shop => "Buy Gadgets",
             Entry::ExitToEpisodeMenu => "Exit to Episode Menu",
             Entry::QuitGame => "Quit Game",
         }
@@ -65,6 +73,12 @@ pub struct Context {
     pub job_running: bool,
     /// Saving is possible (a slot and a file system).
     pub can_save: bool,
+    /// Exit to Episode Menu applies (Sly 2 inside an episode).
+    pub can_exit: bool,
+    /// The options page is offered.
+    pub has_options: bool,
+    /// The shop is offered (in a hub).
+    pub can_shop: bool,
 }
 
 /// The entries that apply, in the game's order.
@@ -79,7 +93,13 @@ pub fn entries(c: Context) -> Vec<Entry> {
     if c.job_running {
         v.push(Entry::AbandonJob);
     }
-    if c.in_episode {
+    if c.can_shop {
+        v.push(Entry::Shop);
+    }
+    if c.has_options {
+        v.push(Entry::Options);
+    }
+    if c.can_exit {
         v.push(Entry::ExitToEpisodeMenu);
     }
     v.push(Entry::QuitGame);
@@ -162,9 +182,13 @@ impl PauseMenu {
         }
         let a = self.screen.coverage();
         let (cw, ch) = (list.canvas.width, list.canvas.height);
-        let row = 34.0;
+        let row = font.map_or(30.0, |f| f.line_height(ENTRY_SIZE) + 8.0);
         let h = row * self.entries.len() as f32 + 40.0;
-        let panel = Rect::new(cw * 0.3, (ch - h) / 2.0, cw * 0.4, h);
+        // As wide as the widest entry, at least 40 % of the canvas.
+        let widest =
+            font.map_or(0.0, |f| self.entries.iter().map(|&e| f.measure(&label(e), ENTRY_SIZE)).fold(0.0, f32::max));
+        let w = (widest + 60.0).max(cw * 0.4).min(cw - 20.0);
+        let panel = Rect::new((cw - w) / 2.0, (ch - h) / 2.0, w, h);
         list.rect(Rect::new(0.0, 0.0, cw, ch), [0.0, 0.0, 0.0, 0.35 * a]);
         list.rect(panel, [0.05, 0.08, 0.2, 0.9 * a]);
         list.frame(panel, 3.0, [0.9, 0.75, 0.25, a]);
@@ -189,14 +213,22 @@ mod tests {
     #[test]
     fn entries_follow_the_context() {
         assert_eq!(entries(Context::default()), alloc::vec![Entry::KeepPlaying, Entry::QuitGame]);
-        let all = Context { in_episode: true, has_job_help: true, job_running: true, can_save: true };
-        assert_eq!(entries(all).len(), 6);
+        let all = Context {
+            in_episode: true,
+            has_job_help: true,
+            job_running: true,
+            can_save: true,
+            can_exit: true,
+            has_options: true,
+            can_shop: true,
+        };
+        assert_eq!(entries(all).len(), 8);
     }
 
     #[test]
     fn choose_and_back() {
         let mut m = PauseMenu::default();
-        m.open(Context { in_episode: true, has_job_help: true, job_running: false, can_save: true });
+        m.open(Context { in_episode: true, has_job_help: true, can_save: true, can_exit: true, ..Context::default() });
         let down = MenuInput { dpad: [false, true, false, false], ..MenuInput::default() };
         m.update(0.016, &MenuInput::default());
         m.update(0.016, &down);

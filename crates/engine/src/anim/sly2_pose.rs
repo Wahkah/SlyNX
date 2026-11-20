@@ -11,6 +11,21 @@
 //! list. Every fired event is kept in [`Sly2Poser::fired`] for one frame, with its type, for the systems that act on
 //! them (type 4 and the others; type 5's jump is the playback's, `anim::sly2::jump_of`).
 //!
+//! **Driven playbacks** ([`Sly2Poser::driven`]): systems outside the scripts (the gang's clip driver,
+//! [`super::sly2_gang`]) hand in, each frame before the step, a blend of clips per target ([`Driven`]). They are
+//! evaluated first, as weighted sums of the members' channels at their own times (`XformRig::blend_channels`), so a
+//! script's playback on the same object writes over them. Driven playbacks fire no events, and can hold transform
+//! 1's horizontal translation at its loaded value (root motion moves the object instead, characters.md 1.1).
+//!
+//! **Poses** are written relative to transform 0's loaded matrix, as the loader keeps them (`Sly2Level::pose`):
+//! `pose_i = B_0⁻¹ · W_i`, with `B_0` transform 0's loaded local matrix and `W_i` the posed one (transform 0 hangs
+//! from the rig's root frame).
+//!
+//! **Lens** (camera.md 2.1): a clip's extra-curve records of kind 0 whose object is a camera object (class 44) carry
+//! its focal length: it is evaluated at the playback's time and kept per camera ([`Sly2Poser::fov_of`] gives the
+//! field of view `2·atan(17.996 / f)`), the last value staying when the clip stops. On the disc all 151 extra-curve
+//! records that name a camera are of kind 0, with values from 15 to 220 [D].
+//!
 //! [`Sly2Anim::playing`]: crate::game::sly2_anim::Sly2Anim::playing
 
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -20,8 +35,10 @@ use formats::geometry::Affine;
 use formats_sly2::anim::Clip;
 use formats_sly2::stream::Body;
 
+use super::curve::eval_scalar;
 use super::sly2::Fired;
 use super::xform::XformRig;
+use crate::math::affine_inverse;
 use crate::object::Handle;
 use crate::world::World;
 
@@ -38,6 +55,23 @@ pub struct PoseEvent {
     pub kind: i8,
 }
 
+/// A blend of clips driven on one target this frame (module notes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Driven {
+    /// The target object.
+    pub target: Handle,
+    /// Members: (clip object, local time in seconds, weight).
+    pub clips: Vec<(Handle, f32, f32)>,
+    /// Hold transform 1's horizontal translation at its loaded value.
+    pub lock_root: bool,
+}
+
+/// The field of view a lens curve may give (camera.md 2.1).
+pub const FOV_RANGE: (f32, f32) = (0.01, 3.0);
+
+/// The camera objects' class (camera.md 7.2).
+pub const CAMERA_CLASS: i16 = 44;
+
 /// The clips' evaluation state.
 #[derive(Clone, Debug, Default)]
 pub struct Sly2Poser {
@@ -53,6 +87,13 @@ pub struct Sly2Poser {
     pub posed: Vec<u32>,
     /// How many times each object's pose has changed (for caches of what is drawn).
     pub version: BTreeMap<u32, u32>,
+    /// Driven playbacks for the next step (consumed by it).
+    pub driven: Vec<Driven>,
+    /// Focal lengths of camera objects by slot, from their clips' lens curves.
+    pub lens: BTreeMap<u32, f32>,
+    /// Character slots whose paraglider is out (characters.md 9.3: shown only in the glide), set by the gang's
+    /// clip driver; the skinning hides the glider meshes of the others.
+    pub gliding: BTreeSet<u32>,
 }
 
 impl Sly2Poser {
@@ -77,6 +118,23 @@ impl Sly2Poser {
         rigs.get_mut(&slot)
     }
 
+    /// Sly 2 hook (sequence starts): the clip event a fired event names, from the clips already read.
+    pub fn event_of(&self, world: &World, e: &PoseEvent) -> Option<&formats::anim::Event> {
+        let c = self.clips.get(&world.slot(e.clip)?)?.as_ref()?;
+        e.fired.get(c)
+    }
+
+    /// The length of clip object `clip` in seconds (`None`: not a readable clip), read once.
+    pub fn clip_length(&mut self, world: &World, clip: Handle) -> Option<f32> {
+        Sly2Poser::clip(&mut self.clips, world, clip).map(|c| c.duration)
+    }
+
+    /// The field of view a clip last gave camera object `slot` (camera.md 2.1), if any.
+    pub fn fov_of(&self, slot: u32) -> Option<f32> {
+        let f = *self.lens.get(&slot)?;
+        (f > 0.0).then(|| crate::camera::views::fov_of_focal_length(f).clamp(FOV_RANGE.0, FOV_RANGE.1))
+    }
+
     /// The pose version of object `slot` (0 until it is first animated).
     pub fn version_of(&self, slot: u32) -> u32 {
         self.version.get(&slot).copied().unwrap_or(0)
@@ -94,6 +152,24 @@ fn crossed(clip: &Clip, from: f32, to: f32, out: &mut Vec<(Fired, i8)>) {
         let at = f32::from(f) / 60.0;
         if at > lo && at <= hi {
             out.push((Fired::Timed(i as u16), e.kind));
+        }
+    }
+}
+
+/// A clip already read.
+fn parsed<'a>(clips: &'a BTreeMap<u32, Option<Clip>>, world: &World, h: Handle) -> Option<&'a Clip> {
+    clips.get(&world.slot(h)?)?.as_ref()
+}
+
+/// Records the focal length a clip's lens curves give the camera objects they name, at time `t`.
+fn lens_of(world: &World, target: Handle, clip: &Clip, t: f32, lens: &mut BTreeMap<u32, f32>) {
+    for e in clip.extra.iter().filter(|e| e.a == 0) {
+        let Some(cam) = world.find_sly2_id(e.b, Some(target)) else { continue };
+        if world.class(cam) != Some(CAMERA_CLASS) {
+            continue;
+        }
+        if let (Some(slot), Some(f)) = (world.slot(cam), eval_scalar(&e.curve, t)) {
+            lens.insert(slot, f);
         }
     }
 }
@@ -133,11 +209,54 @@ pub fn step(world: &mut World) {
         }
     }
     p.last = now;
-    // Poses: every object a playing clip's channels name, reset once, then each clip applied in order.
+    // Poses: every object a driven blend's or a playing clip's channels name, reset once; the driven blends first,
+    // then each script clip in order.
     let mut reset: BTreeSet<u32> = BTreeSet::new();
-    let Sly2Poser { rigs, clips, .. } = &mut p;
+    let driven = core::mem::take(&mut p.driven);
+    for d in &driven {
+        for &(clip, _, _) in &d.clips {
+            Sly2Poser::clip(&mut p.clips, world, clip);
+        }
+    }
+    let Sly2Poser { rigs, clips, lens, .. } = &mut p;
+    for d in &driven {
+        let mut ids: Vec<i32> = Vec::new();
+        for &(clip, _, _) in &d.clips {
+            if let Some(c) = parsed(clips, world, clip) {
+                ids.extend(c.channels.iter().map(|ch| ch.target));
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let own = world.sly2_id(d.target);
+        for id in ids {
+            let object = if own == Some(id) { Some(d.target) } else { world.find_sly2_id(id, Some(d.target)) };
+            let Some(object) = object else { continue };
+            let Some(slot) = world.slot(object) else { continue };
+            let Some(rig) = Sly2Poser::rig(rigs, world, object) else { continue };
+            if reset.insert(slot) {
+                rig.reset();
+            }
+            let members = d
+                .clips
+                .iter()
+                .filter_map(|&(clip, t, w)| parsed(clips, world, clip).map(|c| (XformRig::clip_channels(c, id), t, w)));
+            rig.blend_channels(members, false);
+            if d.lock_root && object == d.target && rig.nodes.len() > 1 {
+                let b = rig.nodes[1].bind.t;
+                rig.local[1].t[0] = b[0];
+                rig.local[1].t[1] = b[1];
+            }
+        }
+        for &(clip, t, _) in &d.clips {
+            if let Some(c) = parsed(clips, world, clip) {
+                lens_of(world, d.target, c, t, lens);
+            }
+        }
+    }
     for &(target, clip, t) in &playing {
         let Some(c) = Sly2Poser::clip(clips, world, clip) else { continue };
+        lens_of(world, target, c, t, lens);
         let mut ids: Vec<i32> = c.channels.iter().map(|ch| ch.target).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -162,8 +281,17 @@ pub fn step(world: &mut World) {
         if b - a != rig.world.len() || b > level.pose.len() {
             continue;
         }
-        if level.pose[a..b] != rig.world[..] {
-            level.pose[a..b].copy_from_slice(&rig.world);
+        // Relative to transform 0's loaded matrix, as the loader keeps the list.
+        let base = rig.nodes.first().and_then(|n| affine_inverse(&n.bind)).unwrap_or(Affine::IDENTITY);
+        let mut changed = false;
+        for (dst, w) in level.pose[a..b].iter_mut().zip(&rig.world) {
+            let m = base.mul(w);
+            if *dst != m {
+                *dst = m;
+                changed = true;
+            }
+        }
+        if changed {
             *p.version.entry(slot).or_default() += 1;
         }
         p.posed.push(slot);

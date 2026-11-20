@@ -447,7 +447,7 @@ impl WorldHost<'_> {
     }
 
     /// The playback methods (`game::sly2_anim`): find (73, 74) and apply (106, 368) playbacks, jump a machine to a
-    /// state (379), remove a playback (380, 124). `None` for any other option or class.
+    /// state (379), seek a clip playback (123), remove a playback (380, 124). `None` for any other option or class.
     fn anim_action(&mut self, object: ObjectId, option: u16, args: &[Value]) -> Option<Value> {
         use sly2_anim::opt;
         if ![
@@ -457,6 +457,7 @@ impl WorldHost<'_> {
             opt::APPLY_MACHINE,
             opt::JUMP,
             opt::REMOVE,
+            opt::CLIP_SEEK,
             opt::CLIP_REMOVE,
         ]
         .contains(&option)
@@ -484,7 +485,7 @@ impl WorldHost<'_> {
                 (opt::APPLY_MACHINE, sly2_anim::MACHINE_CLASS) => {
                     let p = a.machine_playback(w, h, target?)?;
                     if let Some(g) = int(1).filter(|&g| g >= 0) {
-                        a.goal(p, g, false);
+                        a.goal(p, g);
                     }
                     Some(p)
                 }
@@ -492,7 +493,11 @@ impl WorldHost<'_> {
                     a.apply_clip(w, h, target?, float(1).unwrap_or(0.0), float(2).unwrap_or(1.0), int(3).unwrap_or(0))
                 }
                 (opt::JUMP, sly2_anim::MACHINE_PLAYBACK_CLASS) => {
-                    a.goal(h, int(0)?, true);
+                    a.jump(w, h, int(0)?);
+                    None
+                }
+                (opt::CLIP_SEEK, sly2_anim::CLIP_PLAYBACK_CLASS) => {
+                    a.seek(h, int(0).unwrap_or(0), float(1).unwrap_or(0.0), float(2));
                     None
                 }
                 (opt::REMOVE, sly2_anim::MACHINE_PLAYBACK_CLASS)
@@ -504,7 +509,7 @@ impl WorldHost<'_> {
             })
         })??;
         Some(match option {
-            opt::JUMP | opt::REMOVE | opt::CLIP_REMOVE => Value::Void,
+            opt::JUMP | opt::REMOVE | opt::CLIP_SEEK | opt::CLIP_REMOVE => Value::Void,
             _ => Value::Object(out.map(Handle::to_script)),
         })
     }
@@ -513,6 +518,9 @@ impl WorldHost<'_> {
     /// count (1267).
     fn job_option(&self, object: ObjectId, option: u16) -> Option<Value> {
         use crate::game::sly2_jobs::opt;
+        // Object-model hook: option 1286 (script ID 342) also reads the task's state (level-flow.md 4.1: the episode
+        // macros' intro handlers test it).
+        let option = if option == TASK_STATE_342 { opt::STATE } else { option };
         if option != opt::STATE && option != opt::PLAYED {
             return None;
         }
@@ -610,6 +618,9 @@ impl WorldHost<'_> {
         }
     }
 }
+
+/// Object-model hook: option 1286 (script ID 342), a task's state as level-flow.md 4.1 reads it.
+const TASK_STATE_342: u16 = 1286;
 
 #[cfg(test)]
 mod tests {

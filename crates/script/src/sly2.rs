@@ -350,12 +350,28 @@ pub(crate) fn run(
             Value::Int(i) => it.global_lookup(i as u32).unwrap_or(Value::Builtin(134)),
             _ => return Err(c.bad(0)),
         },
-        _ if HOST_OPERATIONS.contains(&op) => match host.game_operation(op, args) {
-            Value::Error(e) => return Err(e),
-            v => v,
-        },
+        _ if HOST_OPERATIONS.contains(&op) => {
+            match charge_host_args(it, args).map(|_| host.game_operation(op, args))? {
+                Value::Error(e) => return Err(e),
+                v => v,
+            }
+        }
         _ => return Err(ScriptError::UnknownOperation(op)),
     })
+}
+
+/// Charges a game operation's list arguments to the step budget before the host walks them (114's list of IDs,
+/// 131's path): one step per element, a list longer than the interpreter's limit (or looping) refused.
+pub(crate) fn charge_host_args(it: &mut Interpreter, args: &[Value]) -> Result<(), ScriptError> {
+    let max = it.limits.max_list_len;
+    for a in args.iter().filter(|a| matches!(a, Value::List(_))) {
+        let n = a.iter().take(max + 1).count();
+        if n > max {
+            return Err(ScriptError::TooLarge);
+        }
+        it.charge(n)?;
+    }
+    Ok(())
 }
 
 /// Arc cosine, clamped to the domain.

@@ -13,6 +13,9 @@ use crate::headers::{
 use crate::slice::{MbStats, PicCtx, Refs, Target, decode_slice};
 use crate::vlc::Tables;
 
+/// Largest frame width and height decoded (the movies are 640 x 448; sizes up to 16,383 are codable).
+pub const MAX_FRAME_SIDE: usize = 2048;
+
 /// Counters since the decoder was made.
 #[derive(Clone, Debug, Default)]
 pub struct DecoderStats {
@@ -180,6 +183,9 @@ impl Decoder {
     fn step(&mut self) -> Result<Step, Error> {
         loop {
             let Some(start) = find_start_code(&self.input, self.pos) else {
+                // Nothing before the last two bytes can start a code: skip it, so data without start codes is
+                // scanned once, not again on every push.
+                self.pos = self.pos.max(self.input.len().saturating_sub(2));
                 return self.out_of_data();
             };
             self.pos = start;
@@ -301,6 +307,10 @@ impl Decoder {
 
     fn picture(&mut self, data: &[u8]) -> Result<Option<usize>, Error> {
         let seq = self.seq.clone().ok_or(Error::Bitstream("picture before a sequence header"))?;
+        // Frames are allocated at the coded size: refuse sizes no movie has.
+        if seq.width as usize > MAX_FRAME_SIDE || seq.height as usize > MAX_FRAME_SIDE {
+            return Err(Error::Unsupported("frame larger than 2048 x 2048"));
+        }
         if !seq.mpeg2 {
             return Err(Error::Unsupported("MPEG-1 video"));
         }
@@ -601,6 +611,41 @@ fn decode_bands(
         errors.0 += b.errors;
         if errors.1.is_none() {
             errors.1 = b.first_error;
+        }
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    /// A sequence header of `w` x `h`, 30 fps, no matrices, then a picture start code and the sequence end.
+    fn stream(w: u32, h: u32) -> Vec<u8> {
+        let mut d = alloc::vec![0, 0, 1, 0xB3];
+        let bits: u64 = ((w as u64) << 52) | ((h as u64) << 40) | (1 << 36) | (5 << 32) | (0x3FFFF << 14) | (1 << 13);
+        d.extend_from_slice(&bits.to_be_bytes());
+        d.extend_from_slice(&[0, 0, 1, 0x00, 0, 0x0F, 0xFF, 0xF8]);
+        d.extend_from_slice(&[0, 0, 1, 0xB7]);
+        d
+    }
+
+    #[test]
+    fn huge_frames_are_refused() {
+        let mut dec = Decoder::new();
+        dec.push(&stream(4095, 4095));
+        dec.finish();
+        assert!(matches!(dec.decode(), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn data_without_start_codes_is_scanned_once() {
+        let mut dec = Decoder::new();
+        let junk = alloc::vec![0xFFu8; 4096];
+        for _ in 0..64 {
+            dec.push(&junk);
+            assert!(matches!(dec.decode(), Ok(Decoded::NeedData)));
+            // Everything but the last two bytes is behind the read position.
+            assert!(dec.buffered() <= 2);
         }
     }
 }

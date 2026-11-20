@@ -41,13 +41,19 @@ pub enum LoadError {
     Format(String),
     /// More objects than a script object ID can name.
     TooManyObjects,
+    /// Objects nested deeper than [`MAX_NESTING`]: a proxy whose sources lead back to itself.
+    TooDeep,
 }
+
+/// Deepest nesting of records and proxy sources the loader follows (no world on the discs comes near it).
+pub const MAX_NESTING: u32 = 64;
 
 impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::Format(e) => write!(f, "world file: {e}"),
             LoadError::TooManyObjects => f.write_str("too many objects"),
+            LoadError::TooDeep => f.write_str("objects nested too deeply (a proxy chain that loops)"),
         }
     }
 }
@@ -113,6 +119,21 @@ impl World {
 
     /// Creates record `rec` (and its subtree) under `parent` with local transform `local`.
     fn instantiate(&mut self, rec: u32, parent: u32, local: Affine, serial: u32) -> Result<u32, LoadError> {
+        self.instantiate_at(rec, parent, local, serial, 0)
+    }
+
+    /// [`World::instantiate`] at nesting `depth` (children and proxy sources one deeper).
+    fn instantiate_at(
+        &mut self,
+        rec: u32,
+        parent: u32,
+        local: Affine,
+        serial: u32,
+        depth: u32,
+    ) -> Result<u32, LoadError> {
+        if depth > MAX_NESTING {
+            return Err(LoadError::TooDeep);
+        }
         if self.class.len() as u32 >= crate::object::MAX_OBJECTS {
             return Err(LoadError::TooManyObjects);
         }
@@ -135,13 +156,13 @@ impl World {
             self.add_drawable(slot);
         }
         match layout_of(r.class) {
-            Some(Layout::Proxy) => self.instantiate_proxy(rec, slot, parent, serial)?,
+            Some(Layout::Proxy) => self.instantiate_proxy(rec, slot, parent, serial, depth)?,
             _ => {
                 for c in self.direct_children(rec) {
                     let cr = self.level.record(c);
                     if cr.context == Context::Child && cr.in_world && !cr.template {
                         let l = record_local(cr);
-                        self.instantiate(c, slot, l, serial)?;
+                        self.instantiate_at(c, slot, l, serial, depth + 1)?;
                     }
                 }
             }
@@ -164,7 +185,14 @@ impl World {
         out
     }
 
-    fn instantiate_proxy(&mut self, rec: u32, proxy: u32, parent: u32, serial: u32) -> Result<(), LoadError> {
+    fn instantiate_proxy(
+        &mut self,
+        rec: u32,
+        proxy: u32,
+        parent: u32,
+        serial: u32,
+        depth: u32,
+    ) -> Result<(), LoadError> {
         let entries =
             self.level.stream.proxies.iter().find(|p| p.record == rec).map(|p| p.entries.clone()).unwrap_or_default();
         let proxy_local = self.local[proxy as usize];
@@ -179,7 +207,7 @@ impl World {
                 }
             };
             let sl = record_local(self.level.record(src));
-            let slot = self.instantiate(src, parent, proxy_local.mul(&sl), clone_serial)?;
+            let slot = self.instantiate_at(src, parent, proxy_local.mul(&sl), clone_serial, depth + 1)?;
             placed.push(slot);
             source_locals.push(sl);
         }
@@ -204,7 +232,7 @@ impl World {
                 let cr = self.level.record(c);
                 if cr.context == Context::ProxyChild && cr.in_world && !cr.template {
                     let l = inv.mul(&record_local(cr));
-                    self.instantiate(c, host, l, serial)?;
+                    self.instantiate_at(c, host, l, serial, depth + 1)?;
                 }
             }
         }

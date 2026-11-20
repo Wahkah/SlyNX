@@ -182,6 +182,7 @@ impl PreparedLevel {
             draws: &self.draws,
             weights: &self.weights,
             static_groups: &self.extras.static_groups,
+            draw_zones: &[],
         }
     }
 }

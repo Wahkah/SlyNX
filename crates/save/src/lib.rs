@@ -20,6 +20,7 @@ pub mod completion;
 pub mod model;
 pub mod settings;
 pub mod slotfile;
+pub mod sly1_card; // The original Sly 1 card record's frame: header, check word, refusals (save-format.md 6).
 pub mod sly2; // Sly 2 hook: Sly 2 saving (sly2/).
 pub mod sly3; // Sly 3 hook: Sly 3 saving, on the Sly 2 code (sly3/).
 pub mod store;

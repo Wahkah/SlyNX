@@ -35,7 +35,7 @@ pub type Saver = Box<dyn FnMut(&Progress) -> Result<u64, String>>;
 pub const JOB_HELP_SCREEN: i32 = 1248;
 
 /// The menu input of a frame (Cross is B, Circle A, Triangle X, Start +, as the gang's buttons).
-fn menu_input(i: &FrameInput) -> (MenuInput, bool) {
+pub(super) fn menu_input(i: &FrameInput) -> (MenuInput, bool) {
     let held = |b: Buttons| i.buttons & b.0 != 0;
     let pressed = |b: Buttons| i.pressed & b.0 != 0;
     let m = MenuInput {
@@ -69,9 +69,12 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             }
         }
         self.update_hud(dt);
+        self.refresh_gang_view();
         let help_open = self.screens.help.is_some();
         let other = help_open || self.screens.complete.is_some();
-        if self.pause.is_open() {
+        if !other && self.update_menus(input, &menu, circle, dt) {
+            // The gadget grid, the shop or the options page has the input.
+        } else if self.pause.is_open() {
             match self.pause.update(dt, &menu) {
                 Action::Chosen(e) => self.pause_choice(e),
                 Action::Closed | Action::None => {}
@@ -86,7 +89,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 self.screens.show_goals(goals);
             }
         }
-        let pause = self.screens.pauses() || self.pause.is_open();
+        let pause = self.screens.pauses() || self.pause.is_open() || self.menus.open();
         if let Some(g) = self.game.as_mut() {
             if pause {
                 g.clock.rate = 0.0;
@@ -117,6 +120,12 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
     }
 
     /// What applies in the pause menu now.
+    /// Whether the current world is an episode's hub (the level table's hub flag).
+    fn is_hub(&self) -> bool {
+        let (Some(g), Some(c)) = (self.game.as_ref(), self.current.as_ref()) else { return false };
+        g.world.sly2.as_deref().and_then(|l| l.header.level_rows.get(c.row)).is_some_and(|r| r.hub)
+    }
+
     fn pause_context(&self) -> Context {
         let in_episode =
             self.jobs_ref().is_some_and(|j| j.episode != 0) && self.current.as_ref().is_some_and(|c| c.row != 1);
@@ -131,6 +140,9 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             has_job_help,
             job_running: self.jobs_ref().is_some_and(|j| j.job.is_some()),
             can_save: self.saver.is_some(),
+            can_exit: in_episode,
+            has_options: true,
+            can_shop: in_episode && self.is_hub(),
         }
     }
 
@@ -173,6 +185,8 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 }
             }
             Entry::QuitGame => self.quit = true,
+            Entry::Options => self.open_options(),
+            Entry::Shop => self.open_shop(),
         }
     }
 

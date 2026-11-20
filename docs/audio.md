@@ -452,7 +452,7 @@ Written from `specs/sly3/audio.md`, `movies.md`, `disc.md` and `world-file.md`. 
   - `formats_sly3::stream::command_script` gives a script's commands with their argument bytes.
   - **Which line plays** (1.1): `LineOrder`, one per command, kept while the world is loaded. A single line always
     plays. Otherwise each run rotates the list by one (so a fresh command plays its second entry first) until a full
-    round, then shuffles it (each position from the second on swapped with a random earlier one), resets the count,
+    round, then shuffles it (positions in order, position i swapped with a random one in 0 to n − 1 − i), resets the count,
     and swaps the line that played last to the end if the shuffle put it first. The same line never plays twice
     in a row.
   - **Subtitle** (1.2): the string whose ID is the line number, none for a quiet line. `talk::subtitle` gives
@@ -509,8 +509,6 @@ Written from `specs/sly3/audio.md`, `movies.md`, `disc.md` and `world-file.md`. 
 4. **Still open from the spec:** the flag value 1, the voice-entry byte (headset in Sly 2), and the speaker
    classes 56 and 62 to 67.
 5. **Dialogue** (dialogue-and-voice.md):
-   - 1.1 says each position is swapped "with a random earlier one". That is read as strictly earlier, so a two-line
-     list always alternates. Should a position be able to stay where it is?
    - 1.3 does not say what a source with a fall-off end of 0 or less does. It is played unpositioned here.
 
 ## Spec questions and observations

@@ -107,6 +107,97 @@ impl CollisionMesh {
     pub fn is_empty(&self) -> bool {
         self.triangles.is_empty()
     }
+
+    /// For each surface, the position indices of the edges that name it: stored under it, and stored under another
+    /// surface with it as the other side (specs/sly1/collision.md 1.2: surface 1275's edges are stored under 1275,
+    /// 1277 and 1278).
+    pub fn edge_ends(&self) -> Vec<Vec<u16>> {
+        let mut out = alloc::vec![Vec::new(); self.triangles.len()];
+        for (t, tri) in self.triangles.iter().enumerate() {
+            let s = tri.first_edge as usize;
+            for e in self.edges.get(s..s + tri.edge_count as usize).unwrap_or(&[]) {
+                out[t].extend(e.ends);
+                if let Some(o) = out.get_mut(e.other as usize) {
+                    o.extend(e.ends);
+                }
+            }
+        }
+        out
+    }
+
+    /// The polygon surface `t` covers: the convex hull, in the plane of its three corners, of the corners and every
+    /// end of the edges naming it, as position indices around it (collinear points dropped). Only convex shared
+    /// sides are stored and corners may lie inside, so the hull of all of them is the safe outline (collision.md
+    /// 1.2). `ends` is [`CollisionMesh::edge_ends`].
+    pub fn surface_polygon(&self, t: usize, ends: &[Vec<u16>]) -> Vec<u16> {
+        let Some(tri) = self.triangles.get(t) else { return Vec::new() };
+        let mut pts: Vec<u16> = tri.corners.to_vec();
+        for &v in ends.get(t).map_or(&[][..], |e| &e[..]) {
+            if !pts.contains(&v) && (v as usize) < self.positions.len() {
+                pts.push(v);
+            }
+        }
+        if pts.len() <= 3 {
+            return tri.corners.to_vec();
+        }
+        let sub = |x: Vec3, y: Vec3| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+        let cross =
+            |x: Vec3, y: Vec3| [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        let dot = |x: Vec3, y: Vec3| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        let [a, b, c] = self.corners(t);
+        let n = cross(sub(b, a), sub(c, a));
+        if dot(n, n) == 0.0 {
+            return tri.corners.to_vec();
+        }
+        let (u, w) = (sub(b, a), cross(n, sub(b, a)));
+        let mut q: Vec<(f32, f32, u16)> = pts
+            .iter()
+            .map(|&v| {
+                let d = sub(self.positions[v as usize], a);
+                (dot(d, u), dot(d, w), v)
+            })
+            .collect();
+        q.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.total_cmp(&y.1)));
+        let turn = |o: (f32, f32, u16), p: (f32, f32, u16), r: (f32, f32, u16)| {
+            (p.0 - o.0) * (r.1 - o.1) - (p.1 - o.1) * (r.0 - o.0)
+        };
+        let mut hull: Vec<(f32, f32, u16)> = Vec::with_capacity(q.len() * 2);
+        for pass in 0..2 {
+            let start = hull.len();
+            let order: Vec<_> = if pass == 0 { q.clone() } else { q.iter().rev().copied().collect() };
+            for p in order {
+                while hull.len() >= start + 2 && turn(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+                    hull.pop();
+                }
+                hull.push(p);
+            }
+            hull.pop();
+        }
+        hull.into_iter().map(|h| h.2).collect()
+    }
+
+    /// The mesh with each surface covered by its polygon ([`CollisionMesh::surface_polygon`]) as a fan: the stored
+    /// surfaces first at their indices (the tree names surfaces by index), then the extra fan triangles, without
+    /// edges. A fan triangle over the three stored corners is not added again.
+    pub fn with_polygons(&self) -> CollisionMesh {
+        let ends = self.edge_ends();
+        let mut out = self.clone();
+        for t in 0..self.triangles.len() {
+            let tri = self.triangles[t];
+            let ring = self.surface_polygon(t, &ends);
+            if ring.len() <= 3 {
+                continue;
+            }
+            for i in 1..ring.len() - 1 {
+                let corners = [ring[0], ring[i], ring[i + 1]];
+                if corners.iter().all(|v| tri.corners.contains(v)) {
+                    continue;
+                }
+                out.triangles.push(CollisionTriangle { corners, edge_count: 0, first_edge: 0, ..tri });
+            }
+        }
+        out
+    }
 }
 
 /// "No child" in a collision tree.

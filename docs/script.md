@@ -336,6 +336,16 @@ scripts.set_sly3_tables(Some(table), &disc.options);
   `configure_interpreter` calls `set_sly3_tables`. The Sly 3 loader records each object's program-wide module, and
   the game crate runs Sly 3 worlds with scripts and the executable's option map. The host
   (`engine::game::script_host::sly3`) follows scripts.md 4.3 and takes the Sly 3 numbers above.
+- **Task methods** (missions.md 3.2). On class-169 tasks the host answers script IDs 1309 (request a state; −1 or
+  4 makes the task current), 1310 (the same, forced), 1311 (raises script event 23 on the task with its integer),
+  1314 to 1317 (force state 0 to 3) and 1318 (make current); the class option map turns them into stream options
+  1409, 1410, 1413 and 1418 to 1422. The Sly 3 session's job system lives outside the world, so the requests go to
+  `World::shared.task_calls` (`TaskCall`), which `game::sly3::jobs::step` applies each frame. Script IDs 1280 and
+  1281 on Sly 3 tasks are stored fields (stream 1411, 1412), not methods. The job methods (class 168, script IDs
+  1259 to 1263) are not run: their meanings are only inferred.
+  - In v_ext the start of `m1_recon` comes from waypoint 35785's own enter handler (event 5 of its module), which
+    asks task option 1364's task for state 4 through 1309 after testing the game object's options 1000 and 984.
+    The two class-147 listeners' event-20 handlers react only to codes 98, 99 (2058) and 37, 38 (2228), not to 29.
 
 ## Tests
 

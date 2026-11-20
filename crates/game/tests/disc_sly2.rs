@@ -34,6 +34,94 @@ fn the_hub_loads_draws_and_runs_deterministically() {
 }
 
 #[test]
+fn an_unloaded_session_renders_and_loads_again() {
+    let Some(path) = require_disc(Game::Sly2, "an_unloaded_session_renders_and_loads_again") else { return };
+    let mut s = session(&path);
+    let row = s.find_world(HUB_WORLD_ID).expect("hub row");
+    s.load_row(row).unwrap();
+    s.update(&FrameInput::default(), 1.0 / 60.0);
+    s.render().unwrap();
+    // The reset a failed upload makes: no world, and frames still update and render.
+    s.unload();
+    assert!(s.current().is_none());
+    s.update(&FrameInput::default(), 1.0 / 60.0);
+    s.render().unwrap();
+    s.load_row(row).unwrap();
+    s.update(&FrameInput::default(), 1.0 / 60.0);
+    s.render().unwrap();
+    assert!(s.current().unwrap().objects > 0);
+}
+
+#[test]
+fn the_safe_house_chooses_and_acts() {
+    let Some(path) = require_disc(Game::Sly2, "the_safe_house_chooses_and_acts") else { return };
+    let mut s = session(&path);
+    let row = s.find_world(HUB_WORLD_ID).expect("hub row");
+    s.load_row(row).unwrap();
+    // safehouse-and-shop.md 1: selectable states (8, 10, 7, 9) on the disc.
+    assert_eq!(s.safe_house.as_ref().expect("the hub's safe house").states, vec![8, 10, 7, 9]);
+    assert!(s.enter_safe_house());
+    let press = |b: platform_api::Buttons| FrameInput { pressed: b.0, buttons: b.0, ..Default::default() };
+    // To the computer: Cross opens the shop (object 888).
+    while s.safe_house.as_ref().unwrap().state() != Some(10) {
+        s.update(&press(platform_api::Buttons::RIGHT), 1.0 / 60.0);
+    }
+    s.update(&press(platform_api::Buttons::B), 1.0 / 60.0);
+    assert!(s.menus_open().1.is_some(), "the shop opened");
+    // A character's state takes that character out.
+    s.update(&press(platform_api::Buttons::A), 1.0 / 60.0);
+    let mut s = session(&path);
+    s.load_row(row).unwrap();
+    assert!(s.enter_safe_house());
+    while s.safe_house.as_ref().unwrap().state() != Some(7) {
+        s.update(&press(platform_api::Buttons::RIGHT), 1.0 / 60.0);
+    }
+    s.update(&press(platform_api::Buttons::B), 1.0 / 60.0);
+    assert!(!s.in_safe_house, "Sly was taken out");
+}
+
+#[test]
+fn the_vault_waits_for_every_bottle() {
+    let Some(path) = require_disc(Game::Sly2, "the_vault_waits_for_every_bottle") else { return };
+    let mut s = session(&path);
+    s.load_row(13).unwrap();
+    let w = &s.game.as_ref().unwrap().world;
+    let vaults =
+        w.handles().filter(|&h| matches!(w.behavior(h), Some(engine::behavior::Behavior::Sly2Vault(_)))).count();
+    assert_eq!(vaults, 1, "row 13 has the episode's vault");
+    for _ in 0..30 {
+        s.update(&FrameInput::default(), 1.0 / 60.0);
+    }
+    let g = s.game.as_mut().unwrap();
+    assert_eq!(engine::behavior::sly2_vault::clue_bits(&mut g.world), 0, "no bottles in a new game");
+}
+
+#[test]
+fn bison_fights_on_the_guards_engine() {
+    let Some(path) = require_disc(Game::Sly2, "bison_fights_on_the_guards_engine") else { return };
+    let mut s = session(&path);
+    // vehicles-and-minigames.md 7.5: the fight is row 37; Bison has 900,000 hit points and a block of 500.
+    s.load_row(37).unwrap();
+    let w = &s.game.as_ref().unwrap().world;
+    let bison = w
+        .handles()
+        .filter(|&h| w.class(h) == Some(62))
+        .find_map(|h| match w.behavior(h) {
+            Some(engine::behavior::Behavior::Sly2Guard(g)) => Some(&**g),
+            _ => None,
+        })
+        .expect("Bison on the guards' engine");
+    eprintln!("bison: hp {} block {} parts {:?}", bison.hit_points, bison.block, bison.parts);
+    for a in &bison.attacks {
+        eprintln!("  action {} length {} windows {:?}", a.action, a.length, &a.strike[..a.windows as usize]);
+    }
+    assert_eq!((bison.hit_points, bison.block, bison.boss), (900_000.0, 500.0, true));
+    assert!(bison.parts.iter().any(|p| p.kind == 0x400 && p.amount == 20.0), "the crush part");
+    let first = bison.attacks.iter().find(|a| a.action == 19643).expect("attack 19643");
+    assert!((first.length - 2.0).abs() < 1e-3 && first.windows == 2);
+}
+
+#[test]
 fn every_world_loads_on_the_renderer() {
     let Some(path) = require_disc(Game::Sly2, "every_world_loads_on_the_renderer") else { return };
     let mut s = session(&path);
@@ -110,6 +198,21 @@ fn guards_are_placed_with_pockets_in_their_worlds() {
     assert!(boars >= 4 && swarmers >= 8, "{boars} guards, {swarmers} swarmers");
     assert!(guards.iter().filter(|g| !g.swarmer).all(|g| g.hit_points == 40.0));
     assert!(guards.iter().any(|g| !g.pocket.entries.is_empty()), "pockets filled from the executable's tables");
+    // guards.md 6.3: every guard strikes with part 13056, knock-back, value -10, in its attack clips' windows.
+    for g in guards.iter().filter(|g| !g.swarmer) {
+        let p = g.parts.iter().find(|p| p.tag == 13056).expect("the guard's striking part");
+        assert_eq!((p.kind, p.amount), (0x200, 10.0));
+    }
+    let windows: Vec<engine::behavior::sly2::Window> = guards
+        .iter()
+        .filter(|g| !g.swarmer)
+        .flat_map(|g| g.attacks.iter().flat_map(|a| a.strike[..a.windows as usize].to_vec()))
+        .collect();
+    eprintln!("guard strike windows: {windows:?}");
+    assert!(windows.iter().any(|w| w.2 == 13056), "attack clips switch the striking part");
+    let rats: Vec<_> = guards.iter().filter(|g| g.swarmer).flat_map(|g| g.parts.iter().copied()).collect();
+    eprintln!("swarmer parts: {rats:?}");
+    assert!(rats.iter().any(|p| p.amount == 3.0), "rats bite for 3");
     for _ in 0..120 {
         s.update(&FrameInput::default(), 1.0 / 60.0);
     }

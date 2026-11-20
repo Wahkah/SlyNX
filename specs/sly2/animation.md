@@ -34,8 +34,16 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 src/asega/PloRootOrAseg_file.cpp (time wrap, byte-matched); SafeHouse @ c70803ce Sly2-Release asega.cpp
     used_for: the playback-flags paragraph in section 7 (2026-11-19)
+  - kind: disc
+    what: >-
+      SCUS-97316, whole-disc walk 2026-11-19 of every clip's extra-curve records (43 worlds); the gang's idle state
+      machines in the nightclub hub (row 2)
+    used_for: the extra-curve record and the transition flag values (sections 2 and 8) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/asega.cpp (extra-curve linking), cmworld.cpp, smrun.cpp (transition masks), sly.cpp (look mask)
+    used_for: the extra-curve use and the mask rule (sections 2 and 8) [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-19
 ---
 
 # Sly 2 animation
@@ -71,7 +79,7 @@ layout will be listed with the other classes in [classes/](classes/); this secti
 | channel count | `s16` | |
 | channels | count × channel | below |
 | extra-curve count | `u8` | |
-| extra curves | count × (`u8`, `s32`, `s8` scalar kind, scalar curve) | 3 in Sly's clips, none in Bentley's or Murray's; purpose unknown |
+| extra curves | count × (`u8` parameter kind, `s32` target object ID, `s8` scalar kind, scalar curve) | parameter curves (below); 151 on the whole disc, all on camera objects |
 | apply events | event list | fired when the clip is applied |
 | timed events | event list | each event carries an `s16` frame right after its type byte |
 | retract events | event list | fired when the playback is removed |
@@ -81,6 +89,15 @@ layout will be listed with the other classes in [classes/](classes/); this secti
 curve, `s8` scalar-curve kind (−1 = none) followed by that curve, `u8` flag. On the disc a channel has exactly one
 of the two curves [D]. The flag is set on 84 of Sly's 14,306 channels (75 on translation transforms, 9 on rotation
 transforms); its meaning is not established [D].
+
+**Extra-curve record** (parameter curve; 2026-11-19) [D for the layout and counts, R for the use]. It links a scalar
+curve to a numeric parameter of another object instead of a transform. When the clip is applied, the target object
+is looked up (among the playing object's nested objects, else the nearest object with that ID) and asked for its
+parameter of the given kind; an object that has none ignores the record. While the playback lives, the parameter
+follows the curve at the playback's time and counts as in use; removing the playback releases it [R]. On the disc
+every record has kind 0 and targets a camera object (class 44), whose parameter is its focal length
+([camera.md](camera.md) 2.1) [D]. Sly's package holds three such records (clips 4324, 642, 4351 on camera object
+4332); Bentley's and Murray's hold none [D].
 
 **Event list**: `u8` count, then events. Each event: `s8` type, [`s16` frame in the timed list], then a payload whose
 size depends on the type [D]:
@@ -252,6 +269,15 @@ A state machine's body is: a nested object list (where most clips sit), a `u8` c
 object ID each), a `u8` count of transitions (`s32`, `s32`, `s32`, `s32`, `f32`, `s32` each) and an option list
 [D]. No clip carries a name; clips are identified by object ID [D].
 
+**Transition flags and the mask** (2026-11-19) [D for the values, R for the rules]. The third `s32` of a transition
+is its flags word. Bit 0 (`0x1`) makes it usable in both directions, as in Sly 1. Bits 2 to 15 (`0x4` to `0x8000`) are
+**mask bits**: a transition may be taken only when its flags AND the machine's current mask is non-zero; the
+route-distance groups are built from bits 2 to 12 (`0x4` to `0x1000`) only. Bit 1 is not a mask bit. The mask is
+set by gameplay when the machine is applied and may be changed while it runs; the gang's idle masks are in
+[characters.md](characters.md) 9.2. Values seen in the idle machines: `0xFFFC` (any mask), `0xFFFD` (any mask, two
+ways), `0x8`, `0x10`–`0x80`, `0xF0`, `0xF00`, `0xFF0`, `0x1000`, `0x1FF0` [D]. The fourth `s32` is 0 in those
+machines, the `f32` is the probability weight and the last `s32` the transition's clip (−1 none) [D].
+
 ## 9. How the game finds a character's clips
 
 As in Sly 1, gameplay code looks up objects **by object ID** below the character at load time, using fixed tables
@@ -297,8 +323,8 @@ to name by observation.
 ## 10. Skinning
 
 Skin binding and bind poses are in [geometry.md](geometry.md) and [transforms.md](transforms.md) 4. Clips carry no
-pose-weight curves like Sly 1 section 4's; whether the three extra-curve records of Sly's clips play that role is
-open [D for the layout].
+pose-weight curves like Sly 1 section 4's; the extra-curve records are parameter curves for camera lenses (section
+2), not pose weights [D].
 
 ## 11. Test vectors (nightclub hub world: level-table row 2, `f_nightclub_exterior`, file `00_0x041` in the world list)
 
@@ -338,7 +364,7 @@ Sly's chains: (upper 55, lower 56, end 56, handle 15), (57, 58, 58, 21), (68, 69
 
 ## 12. Open questions
 
-1. The channel flag byte, the extra-curve records, and the meanings of most event types.
+1. The channel flag byte and the meanings of most event types (the extra-curve records are resolved: section 2).
 2. Flag bits `0x100`, `0x1`, `0x2`, `0x400` of the lookup records, and the part/mesh lookups (`0x20`, `0x40`).
 3. Which moves the looked-up clips belong to (observation, per-move specs).
 4. Whether lookups that fail in the hub world resolve in other worlds (only the hub was checked entry by entry).

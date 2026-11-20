@@ -20,6 +20,12 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 (2026-11-12), GPL-3.0, read for facts only
     used_for: confirmation of table addresses
+  - kind: disc
+    what: SCUS-97316, the scripts of the 8 hub worlds (arrival point 393, safe house 17239), read 2026-11-19
+    used_for: which script call makes the safe house the current player (section 2.1)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/po.cpp (enabling a player object; the safe house's override)
+    used_for: what option 884 does on the safe house; marked [R]
 reviewed_by: pending
 date: 2026-11-14
 ---
@@ -56,7 +62,7 @@ save-variable section ([world-file.md](world-file.md) 3.3) [D].
 ## 2. Being in the safe house [R]
 
 - Entering: the player walks in through the hub's door; a script makes the safe house the current "player"
-  object. While it is, no character takes damage ([characters.md](characters.md) 2) [R].
+  object (2.1). While it is, no character takes damage ([characters.md](characters.md) 2) [R].
 - On entering: a running job that is not marked "keep" ends; every character puts back any carried loot bag and has
   health and gadget power refilled; objects made by gadgets (class 79 and its related gadget classes) are removed;
   the state machine is set to the saved current character (`oidPoCurrent`), else its first state; script event 5 is
@@ -68,6 +74,17 @@ save-variable section ([world-file.md](world-file.md) 3.3) [D].
 - **Acting.** In the shown state, the button named by a matching action (option 1338) either opens the shop (target
   888) or starts the target script [R]. Leaving raises script event 6 and the job system's event 27 [R].
 - Character switching happens only here in hubs ([characters.md](characters.md) 8) [R] [O].
+
+### 2.1 How the game enters the safe house (added 2026-11-19)
+
+- The hub's arrival point 393 (class 42) raises its event 5 when the player arrives at it
+  ([level-flow.md](level-flow.md)) [D for the object; R for the event].
+- In each of the 8 hubs, a handler for that event in the hub's `_ext_rig` script module sets stream option 884
+  (script ID 806, "enable as current player") to 1 on the safe house, object 17239 [D].
+- Option 884 set to 1 makes the object the current player; the safe house overrides this to show itself and enter
+  its "in use" state (the "On entering" list above) [R].
+- Other callers [D]: the castle and train hubs also do it from a sequence (object 55956) module, and the nightclub
+  hub from one more module; 11 such calls on the disc in all.
 
 ## 3. The shop (the computer) [R]
 

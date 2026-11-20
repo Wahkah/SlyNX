@@ -155,13 +155,16 @@ impl VarTree {
         self.names.get(&id).map(String::as_str)
     }
 
-    /// The children of record `r`, in order.
+    /// The children of record `r`, in order. A sibling chain that loops back (a damaged file) ends after as many
+    /// steps as there are records.
     pub fn children(&self, r: usize) -> impl Iterator<Item = usize> + '_ {
         let mut c = self.records.get(r).map_or(0, |x| x.child as usize);
+        let mut left = self.records.len();
         core::iter::from_fn(move || {
-            if c == 0 || c >= self.records.len() {
+            if c == 0 || c >= self.records.len() || left == 0 {
                 return None;
             }
+            left -= 1;
             let here = c;
             c = self.records[c].next as usize;
             Some(here)
@@ -268,5 +271,17 @@ pub(crate) mod tests {
         assert!(t.var_named(&["lang"], None).is_none());
         assert_eq!(t.var_named(&["t1", "state"], None).unwrap().kind, Kind::Int);
         assert_eq!(t.children(0).count(), 5);
+    }
+
+    #[test]
+    fn a_looping_sibling_chain_ends() {
+        let (mut t, _) = VarTree::parse(&sample()).unwrap();
+        // The last top-level record's next points back at the first: the walk stops instead of looping.
+        let tops: Vec<usize> = t.children(0).collect();
+        let (first, last) = (tops[0], *tops.last().unwrap());
+        t.records[last].next = first as u16;
+        assert!(t.children(0).count() <= t.records().len());
+        assert!(t.var_named(&["missing"], None).is_none(), "a name lookup through the loop ends");
+        assert_eq!(t.var_named(&["ccoin"], None).unwrap().offset, 0);
     }
 }

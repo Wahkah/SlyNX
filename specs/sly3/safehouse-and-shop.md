@@ -104,7 +104,8 @@ safe house once the episode's first jobs are done ([characters.md](characters.md
 ## 4. Gadget assignment
 
 Slots and buttons: [gadgets.md](gadgets.md) 2 (L1, L2, R2; table `0x349040`) [X]. The assignment screen's grids are
-not located in the Sly 3 executable yet (Sly 2 had three 32-byte-cell tables); open.
+three 32-byte-cell tables at `0x348BE0` (Sly, screen 1062), `0x348DC0` (Bentley, 1063) and `0x348F20` (Murray, 1064):
+[gadgets.md](gadgets.md) 2 [X].
 
 ## 5. Test vectors [D]
 
@@ -119,5 +120,5 @@ not located in the Sly 3 executable yet (Sly 2 had three 32-byte-cell tables); o
 1. The state machine 44674's states (it lies inside the safe-house body), to confirm 24 to 27.
 2. Option 8's three entries.
 3. Whether scripts narrow the selectable list per story stage.
-4. Field +24; the assignment-screen grids.
+4. Field +24.
 5. All [R] statements need checking in play.

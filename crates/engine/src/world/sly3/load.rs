@@ -116,7 +116,7 @@ impl World {
     pub fn load_sly3(bytes: Vec<u8>, table: &OptionTable, opts: Sly3Options) -> Result<World, LoadError> {
         let parsed = formats_sly3::World::parse_with(&bytes, table, opts.multipliers)?;
         let context = opts.context.clone().unwrap_or_else(|| parsed.fresh_context(opts.slot));
-        let copy_counts = parsed.copy_counts(0);
+        let copy_counts = parsed.copy_counts(opts.set);
         let formats_sly3::World {
             keys, groups, sections, strings, options, option_sets, partitions, bodies, tail, ..
         } = parsed;
@@ -155,6 +155,7 @@ impl World {
                 pose: Vec::new(),
                 game_objects: BTreeMap::new(),                   // Sly 3 host hook
                 pickpocket: alloc::collections::BTreeSet::new(), // Sly 3 host hook
+                poser: Default::default(),                       // Sly 3 pose hook
                 objects: Vec::new(),
                 ids: Default::default(),
                 records: Vec::new(),

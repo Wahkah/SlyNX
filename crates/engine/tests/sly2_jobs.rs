@@ -34,7 +34,7 @@ fn disc(test: &str) -> Option<&'static DiscData> {
     let path = require_disc(Title::Sly2, test)?;
     Some(DATA.get_or_init(|| {
         let mut d = Disc::open_path(&path).expect("open disc");
-        let worlds = [0usize, 2, 3]
+        let worlds = [0usize, 1, 2, 3]
             .into_iter()
             .map(|row| (row, (d.rows[row].world_id(), d.read_world(row).expect("read world"))))
             .collect();
@@ -109,6 +109,25 @@ impl FileSystem for MemFs {
     fn remove_user(&self, path: &str) -> Result<(), FsError> {
         self.0.lock().unwrap().remove(path);
         Ok(())
+    }
+}
+
+#[test]
+fn exits_name_their_destination_and_movies() {
+    let Some(d) = disc("exits_name_their_destination_and_movies") else { return };
+    // The end of the intro (level-flow.md 3): exit 150652 to the menu world (row 1, identity 0x39) with movie 0x806;
+    // the menu world's exit 1329 to episode 1's hub (row 2) with its opening movie 0x7D9 (level-flow.md 4).
+    let g = game(d, 0);
+    let e = flow::exits(&g.world).into_iter().find(|e| e.id == 150652).expect("exit 150652");
+    assert_eq!(flow::exit_records(&g.world, e.handle).map(|r| r.0), Some(0x39));
+    assert_eq!((e.row, e.movies.clone()), (Some(1), vec![0x806]));
+    let g = game(d, 1);
+    let exits = flow::exits(&g.world);
+    let e = exits.iter().find(|e| e.id == 1329).expect("exit 1329");
+    assert_eq!((e.row, e.movies.clone()), (Some(2), vec![0x7D9]));
+    // Every exit of both worlds names a destination row.
+    for e in flow::exits(&game(d, 0).world).iter().chain(&exits) {
+        assert!(e.row.is_some(), "exit {} names a row", e.id);
     }
 }
 

@@ -11,11 +11,16 @@
 //!
 //! The Sly 1 session ([`crate::session`]) is unchanged; the two share the renderer helpers of [`crate::level`].
 
+pub mod attached; // Sly 2 hook: gadgets, effects and held items on the characters.
 pub mod cues; // Sly 2 hook: voice lines drive their speaker's state machines and eyes.
+pub mod front; // Sly 2 hook: the title, the save slots, the episode menu and the movies.
 pub mod gang;
 pub mod layer; // Sly 2 hook: the 2D layer (fonts, HUD, menus, job screens).
 pub mod level;
+pub mod menus; // Sly 2 hook: gadget assignment, shop and options screens.
+pub mod movie; // Sly 2 hook: stills of the screens' sprites (the grids' icons).
 pub mod progress; // Sly 2 hook: progress, saving and world changes through the job system.
+pub mod safehouse;
 pub mod screens; // Sly 2 hook: the job screens (job complete, saving, job help).
 pub mod skin;
 pub mod talk;
@@ -41,6 +46,30 @@ use level::StaticLevel;
 
 /// The world the session starts in when none is named: the nightclub hub (`f_nightclub_exterior`).
 pub const HUB_WORLD_ID: u32 = 0x41;
+
+/// The camera's current state (position, Euler angles from its forward axis, field of view).
+fn current_cam(v: &engine::game::render_scene::CameraView) -> engine::camera::views::CamState {
+    let f = engine::math::normalize(engine::math::sub(v.target, v.eye));
+    let yaw = engine::math::atan2(f[1], f[0]);
+    let pitch = engine::math::atan2(-f[2], engine::math::sqrt(f[0] * f[0] + f[1] * f[1]));
+    engine::camera::views::CamState { position: v.eye, angles: [0.0, pitch, yaw], fov: v.fov_y }
+}
+
+/// A camera block's state with its "current value" parts (every component below 1e-4, or a field of view of 0)
+/// filled from `now` (camera.md 2.1.1).
+fn resolve_cam(a: talk::CamArgs, now: engine::camera::views::CamState) -> engine::camera::views::CamState {
+    let tiny = |v: [f32; 3]| v.iter().all(|x| x.abs() < 1e-4);
+    engine::camera::views::CamState {
+        position: if tiny(a.position) { now.position } else { a.position },
+        angles: if tiny(a.angles) { now.angles } else { a.angles },
+        fov: if a.fov == 0.0 { now.fov } else { a.fov },
+    }
+}
+
+/// Script event raised on a sequence when it starts (dialogue-and-voice.md 2; scripts.md 6: event 5 on class 114).
+pub const SEQUENCE_STARTED: u32 = 5;
+/// Script event raised on a sequence when it ends.
+pub const SEQUENCE_ENDED: u32 = 6;
 
 /// The current Sly 2 world.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,12 +98,24 @@ pub struct Sly2Session<B: Backend, R: ReadAt> {
     pub gang_constants: Option<GangConstants>,
     /// The follow camera on the played character (off: the free camera).
     pub follow: bool,
+    /// The hub's safe house, if the world has one.
+    pub safe_house: Option<safehouse::SafeHouse>,
+    /// The safe house is the current player.
+    pub in_safe_house: bool,
+    /// The vault changes since the last frame (sequences, lines, the dial's screen).
+    pub vault_events: Vec<engine::behavior::sly2_vault::VaultEvent>,
+    /// A character to switch to next frame (taken out of the safe house).
+    switch_to: Option<engine::gang::Who>,
+    /// The sequences started and not yet ended (for their events 5 and 6).
+    pub running: Vec<engine::object::Handle>,
     items: Option<ItemTable>,
     pockets: Option<engine::gang::PocketTable>,
     disc: Option<Disc<R>>,
     option_map: Option<OptionMap>,
     builtins: Option<BuiltinTable>,
     gpu: StaticLevel,
+    /// Seconds of play since the last rendered frame (for the texture animations).
+    unrendered: f32,
     current: Option<Sly2Current>,
     seed: u64,
     pending: progress::Pending,
@@ -83,9 +124,13 @@ pub struct Sly2Session<B: Backend, R: ReadAt> {
     saver: Option<screens::Saver>,
     font: Option<ui::sly2::font::FontSheet>,
     ui_layer: Option<crate::ui_layer::UiLayer>,
+    /// Vehicles hook: the projectiles' streaks (`crate::shot_marks`).
+    shot_marks: Option<crate::shot_marks::ShotMarks>,
     hud: ui::sly2::hud::Hud,
     pause: ui::sly2::pause::PauseMenu,
     quit: bool,
+    menus: menus::Menus,
+    front: front::Front,
 }
 
 impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
@@ -96,6 +141,13 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             Err(e) => (None, Some(e)),
         };
         let exe = disc.as_ref().map(|d| &d.executable);
+        // Sly 2 hook (menus): the gadget grids and the loot table, from the executable.
+        let menus = menus::Menus {
+            grids: [engine::gang::Who::Sly, engine::gang::Who::Bentley, engine::gang::Who::Murray]
+                .map(|w| exe.and_then(|e| engine::gang::gadgets::grid_from_executable(e, w).ok()).unwrap_or_default()),
+            loot: exe.and_then(|e| engine::gang::LootTable::from_executable(e).ok()),
+            ..menus::Menus::default()
+        };
         Sly2Session {
             renderer: Renderer::new(backend),
             game: None,
@@ -111,6 +163,12 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             builtins: exe.and_then(|e| BuiltinTable::from_executable(e).ok()),
             disc,
             gpu: StaticLevel::default(),
+            unrendered: 0.0,
+            safe_house: None,
+            in_safe_house: false,
+            vault_events: Vec::new(),
+            switch_to: None,
+            running: Vec::new(),
             current: None,
             seed,
             pending: progress::Pending::default(),
@@ -119,9 +177,12 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             saver: None,
             font: None,
             ui_layer: None,
+            shot_marks: None,
             hud: ui::sly2::hud::Hud::default(),
             pause: ui::sly2::pause::PauseMenu::default(),
             quit: false,
+            menus,
+            front: front::Front::default(),
         }
     }
 
@@ -151,6 +212,16 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         self.gpu.characters.len()
     }
 
+    /// Vehicles hook: makes the task named `name` current, forced (testing and the smoke run start a job's machine
+    /// this way). Returns whether the task exists.
+    pub fn start_task(&mut self, name: &str) -> bool {
+        let Some(g) = self.game.as_mut() else { return false };
+        let Some(j) = g.world.sly2.as_deref_mut().and_then(|l| l.jobs.as_deref_mut()) else { return false };
+        let Some(t) = j.graph.tasks.iter().position(|t| t.name == name) else { return false };
+        j.request_current(t, true);
+        true
+    }
+
     /// Vehicles hook: the player drives the first object of `class` in the running world (`behavior::vehicles`);
     /// `None` hands control back to the characters. Returns whether a machine was found.
     pub fn drive(&mut self, class: Option<i16>) -> bool {
@@ -161,6 +232,8 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         let all: Vec<_> = class.map_or_else(Vec::new, |c| w.handles().filter(|&h| w.class(h) == Some(c)).collect());
         let machine = all.iter().copied().find(|&h| w.is_active(h)).or_else(|| all.first().copied());
         g.world.shared.driving = machine;
+        // The camera follows the driven machine (`camera::sly2`'s follow target), the characters again without one.
+        g.world.shared.camera_follow = machine;
         machine.is_some() || class.is_none()
     }
 
@@ -182,8 +255,28 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         let (build, characters, lighting, glyphs) = {
             let fw = formats_sly2::World::parse(&bytes, &disc.options).map_err(|e| format!("row {row}: {e}"))?;
             // Sly 2 hook (2D layer): the fonts, read once.
-            let glyphs = if self.font.is_none() { layer::font_glyphs(&fw) } else { None };
-            let opts = formats_sly2::scene::SceneOptions { row: Some(row as i16), ..Default::default() };
+            let mut glyphs = if self.font.is_none() { layer::font_glyphs(&fw) } else { None };
+            // Sly 2 hook (menus): the gadget grids' icons go into the sheet as a third font.
+            if let Some(g) = glyphs.as_mut() {
+                let mut icons = Vec::new();
+                for (id, screen) in layer::screens(&fw, disc, &menus::GRID_SCREENS) {
+                    let Some(k) = menus::GRID_SCREENS.iter().position(|&s| s == id) else { continue };
+                    let (shapes, art) = layer::grid_art(&screen, k, &self.menus.grids[k], 3151);
+                    icons.extend(shapes);
+                    self.menus.art[k] = Some(art);
+                }
+                g.truncate(2);
+                g.push(icons);
+            }
+            // The default passes plus the shadow hulls (7) and projected volumes (11, 13), rendering.md 5.
+            let defaults = formats_sly2::scene::SceneOptions::default();
+            let opts = formats_sly2::scene::SceneOptions {
+                row: Some(row as i16),
+                passes: defaults.passes | (1 << 7) | (1 << 11) | (1 << 13),
+                // The characters' textures too: their meshes are drawn skinned (`skin`), not from the scene.
+                texture_classes: (skin::CHARACTERS[0], skin::CHARACTERS[2]),
+                ..defaults
+            };
             // The characters' records (byte ranges), so their meshes are not collision.
             let mut characters = Vec::new();
             for b in &fw.bodies {
@@ -245,15 +338,34 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         // The characters' skinned meshes are not in the scene build: they are added here and posed every frame.
         let skinned = skin::character_draws(&game.world, &build.material_base);
         let skip: &[(u32, u32)] = if skinned.is_empty() { &[] } else { &ranges };
-        let input = stage::prep::SceneInput { skip, ..stage::prep::SceneInput::sly2(&build, Some(&lighting)) };
+        // The objects attached under the characters follow them and show while in use (`attached`).
+        let dynamic: Vec<(u32, u32)> = attached::attached_objects(&game.world).into_iter().map(|o| o.1).collect();
+        let input = stage::prep::SceneInput {
+            skip,
+            dynamic: &dynamic,
+            ..stage::prep::SceneInput::sly2(&build, Some(&lighting))
+        };
         let sheet = self.font.as_ref().map(|f| (f.width, f.height, f.pixels.clone()));
         let mut ui_layer = None;
-        self.gpu = level::upload_stage(&mut self.renderer, input, Some(&game.world), &skinned, |r| {
+        let mut marks = None;
+        let mut video = None;
+        let uploaded = level::upload_stage(&mut self.renderer, input, Some(&game.world), &skinned, |r| {
             ui_layer = Some(crate::ui_layer::UiLayer::new(r, sheet)?); // Sly 2 hook: the 2D layer.
+            video = Some(render::video::VideoLayer::new(r)?); // Sly 2 hook: the movies' picture.
+            marks = Some(crate::shot_marks::ShotMarks::upload(r)?); // Vehicles hook: the projectiles' streaks.
             Ok(())
-        })
-        .map_err(|e| format!("row {row}: {e}"))?;
+        });
+        self.shot_marks = marks;
+        self.gpu = match uploaded {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                // The renderer holds an empty level now: nothing may keep handles into the old one.
+                self.unload();
+                return Err(format!("row {row}: {e}"));
+            }
+        };
         self.ui_layer = ui_layer;
+        self.front.movies.set_layer(video);
         if game.world.player.is_none() || !self.follow {
             let (c, r) = self.gpu.bounds;
             game.systems.camera.cut([c[0], c[1] - r, c[2] + r * 0.6], c);
@@ -265,31 +377,185 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         self.game = Some(game);
         self.message = None;
         self.attach_progress(); // Sly 2 hook: the job system and the arrival point.
+        self.safe_house = self.game.as_ref().and_then(|g| safehouse::SafeHouse::from_world(&g.world));
+        self.in_safe_house = false;
+        self.switch_to = None;
+        self.running.clear();
+        self.front_world_loaded(row); // Sly 2 hook: the menu world shows the episode menu.
         Ok(())
+    }
+
+    /// Drops the current world (after a failed upload, for example): an empty, committed level, and nothing left
+    /// holding handles into the old one, so the next frames render (nothing) instead of failing.
+    pub fn unload(&mut self) {
+        level::empty_level(&mut self.renderer);
+        self.gpu = level::StaticLevel::default();
+        self.ui_layer = None;
+        self.shot_marks = None;
+        self.front.movies.set_layer(None);
+        self.game = None;
+        self.current = None;
+    }
+
+    /// Enters the hub's safe house (false when the world has none; safehouse-and-shop.md 2): it becomes the current
+    /// player, shows the current character's state, and raises script event 5 and task event 26.
+    pub fn enter_safe_house(&mut self) -> bool {
+        let (Some(h), Some(g)) = (self.safe_house.as_mut(), self.game.as_mut()) else { return false };
+        let current = g
+            .world
+            .player
+            .and_then(|p| g.world.class(p))
+            .and_then(|c| gang::CHARACTER_CLASSES.iter().find(|k| k.1 == c).map(|k| safehouse::state_of(k.0)));
+        h.show(current.unwrap_or(-1));
+        let house = h.handle;
+        self.in_safe_house = true;
+        g.world.shared.safe_house = true;
+        g.world.raise(house, safehouse::EVENT_ENTER, Vec::new());
+        engine::game::sly2_jobs::with(&mut g.world, |j, _| j.task_event(safehouse::TASK_ENTER, Some(house)));
+        true
+    }
+
+    /// Leaves the safe house: script event 6 and task event 27.
+    pub fn leave_safe_house(&mut self) {
+        let (Some(h), Some(g)) = (self.safe_house.as_ref(), self.game.as_mut()) else { return };
+        if !self.in_safe_house {
+            return;
+        }
+        let house = h.handle;
+        self.in_safe_house = false;
+        g.world.shared.safe_house = false;
+        g.world.set_option(house, safehouse::opt::ENABLE, engine::object::OptionValue::Int(0));
+        g.world.raise(house, safehouse::EVENT_LEAVE, Vec::new());
+        engine::game::sly2_jobs::with(&mut g.world, |j, _| j.task_event(safehouse::TASK_LEAVE, Some(house)));
+    }
+
+    /// The safe house's input (left and right step, Cross acts) and what the game gets: the d-pad and Cross are the
+    /// safe house's while in it; a character taken out is switched to the next frame (d-pad: left Sly, up Murray,
+    /// right Bentley).
+    fn safe_house_input(&mut self, input: &FrameInput) -> FrameInput {
+        use platform_api::Buttons;
+        let mut out = *input;
+        if let Some(who) = self.switch_to.take() {
+            let b = match who {
+                engine::gang::Who::Sly => Buttons::LEFT.0,
+                engine::gang::Who::Murray => Buttons::UP.0,
+                engine::gang::Who::Bentley => Buttons::RIGHT.0,
+            };
+            out.pressed |= b;
+            out.buttons |= b;
+        }
+        if !self.in_safe_house || self.menus.open() {
+            return out;
+        }
+        let pressed = input.pressed;
+        let (Some(h), Some(g)) = (self.safe_house.as_mut(), self.game.as_mut()) else { return out };
+        if pressed & Buttons::LEFT.0 != 0 {
+            h.step(-1);
+        }
+        if pressed & Buttons::RIGHT.0 != 0 {
+            h.step(1);
+        }
+        if pressed & Buttons::B.0 != 0 {
+            let character = h.state().and_then(safehouse::who_of_state).and_then(|who| {
+                let class = gang::CHARACTER_CLASSES.iter().find(|k| k.0 == who)?.1;
+                g.world.handles().find(|&x| g.world.class(x) == Some(class))
+            });
+            match h.press(&mut g.world, character) {
+                Some(safehouse::Pressed::OpenShop) => self.open_shop(),
+                Some(safehouse::Pressed::TakeOut(who)) => {
+                    self.leave_safe_house();
+                    self.switch_to = Some(who);
+                }
+                _ => {}
+            }
+        }
+        let mask = Buttons::LEFT.0 | Buttons::RIGHT.0 | Buttons::UP.0 | Buttons::DOWN.0 | Buttons::B.0;
+        out.pressed &= !mask;
+        out.buttons &= !mask;
+        out
     }
 
     /// Runs one frame for a measured interval (seconds). Returns false when the session should end.
     pub fn update(&mut self, input: &FrameInput, measured: f32) -> bool {
+        // Sly 2 hook (front end): a movie holds everything; the title and the episode menu take the input.
+        let front = self.front_open();
+        let Some(input) = self.update_front(input, measured).or_else(|| (!self.movie_playing()).then_some(*input))
+        else {
+            return !self.quit;
+        };
+        let input = &self.safe_house_input(&input);
         if let Some(g) = self.game.as_mut() {
             g.frame(input, measured);
+            self.vault_events.clear();
+            self.vault_events.append(&mut g.world.shared.vault_events);
+            self.unrendered += engine::game::clock::frame_step(measured);
+        }
+        // A script enabling the safe house as the current player (option 884 = 1, safehouse-and-shop.md 2.1) enters it.
+        let enable = self
+            .safe_house
+            .as_ref()
+            .zip(self.game.as_ref())
+            .is_some_and(|(h, g)| g.world.options(h.handle).and_then(|o| o.i32(safehouse::opt::ENABLE)) == Some(1));
+        if enable && !self.in_safe_house {
+            self.enter_safe_house();
         }
         // Sly 2 hook: a load the job system asked for (an exit, a restart at a checkpoint).
         if let Err(e) = self.follow_load_request() {
             self.message = Some(e);
         }
-        // Sequence starts and stops from scripts, volumes, spots and command lists (dialogue-and-voice.md 2.1).
+        // Sequences that ended (their commands run out; at once without a sound engine) raise script event 6, which
+        // their modules answer (often by asking the current task for its next state; vehicles-and-minigames.md 10.3).
+        if let Some(g) = self.game.as_mut() {
+            let sound = self.sound.as_ref();
+            let ended: Vec<engine::object::Handle> = self
+                .running
+                .iter()
+                .copied()
+                .filter(|h| sound.is_none_or(|s| !s.sequences().iter().any(|q| q.object == *h)))
+                .collect();
+            self.running.retain(|h| !ended.contains(h));
+            for h in ended {
+                // Without a sound engine the commands are not played: their task requests and sub-sequence starts
+                // apply as it ends, in order.
+                if sound.is_none() {
+                    for c in talk::sequence_commands(&g.world, h) {
+                        match c {
+                            talk::SeqCommand::Task { task, state } => g.world.shared.task_requests.push((task, state)),
+                            talk::SeqCommand::Start { sequence, .. } => g.world.shared.sequence_requests.push(
+                                engine::behavior::sly2_commands::SequenceRequest::Start { sequence, starter: None },
+                            ),
+                            _ => {}
+                        }
+                    }
+                }
+                g.world.raise(h, SEQUENCE_ENDED, Vec::new());
+            }
+        }
+        // Sequence starts and stops from scripts, volumes, spots and command lists (dialogue-and-voice.md 2.1); a
+        // start raises script event 5 on the sequence.
         if let Some(g) = self.game.as_mut() {
             let requests = core::mem::take(&mut g.world.shared.sequence_requests);
             for r in requests {
                 use engine::behavior::sly2_commands::SequenceRequest as Q;
-                match (r, self.sound.as_mut()) {
-                    (Q::Start { sequence, .. } | Q::StartWithPlayer(sequence), Some(s)) => {
-                        s.start_sequence(&g.world, sequence);
+                match r {
+                    Q::Start { sequence, .. } | Q::StartWithPlayer(sequence) => {
+                        if let Some(s) = self.sound.as_mut() {
+                            s.start_sequence(&g.world, sequence);
+                        }
+                        if !self.running.contains(&sequence) {
+                            self.running.push(sequence);
+                        }
+                        g.world.raise(sequence, SEQUENCE_STARTED, Vec::new());
+                        self.sequences_started += 1;
                     }
-                    (Q::Stop(sequence), Some(s)) => s.stop_sequence(sequence),
-                    _ => {}
+                    Q::Stop(sequence) => {
+                        if let Some(s) = self.sound.as_mut() {
+                            s.stop_sequence(sequence);
+                        }
+                        self.running.retain(|&h| h != sequence);
+                    }
+                    Q::Alarm(..) => {}
                 }
-                self.sequences_started += matches!(r, Q::Start { .. } | Q::StartWithPlayer(_)) as u32;
             }
         }
         if let Some(s) = self.sound.as_mut() {
@@ -301,16 +567,41 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                     s.queue_music(n);
                 }
             }
+            // Task states the running sequences asked for (option 642), and their camera blocks (camera.md 2.1.1).
+            if let Some(g) = self.game.as_mut() {
+                g.world.shared.task_requests.extend(s.take_task_requests());
+                for c in s.take_camera_cues() {
+                    g.world.shared.camera_move = match c {
+                        talk::CameraCue::Move { from, to, duration, curve } => {
+                            let now = current_cam(&g.render.camera);
+                            Some(engine::camera::views::TimedMove {
+                                from: resolve_cam(from, now),
+                                to: resolve_cam(to, now),
+                                duration,
+                                curve: curve.clamp(0, 3) as usize,
+                                time: 0.0,
+                            })
+                        }
+                        talk::CameraCue::End { .. } => None,
+                    };
+                }
+            }
             // Sub-sequences the running ones started (option 636).
-            if let Some(g) = self.game.as_ref() {
+            if let Some(g) = self.game.as_mut() {
                 for h in s.take_sub_starts() {
                     s.start_sequence(&g.world, h);
+                    if !self.running.contains(&h) {
+                        self.running.push(h);
+                    }
+                    g.world.raise(h, SEQUENCE_STARTED, Vec::new());
                     self.sequences_started += 1;
                 }
             }
         }
         self.apply_voice_cues(); // Sly 2 hook: lip sync and eyes.
-        self.update_screens(input, engine::game::clock::frame_step(measured)); // Sly 2 hook: the job screens.
+        if !front && !self.front_open() {
+            self.update_screens(input, engine::game::clock::frame_step(measured)); // Sly 2 hook: the job screens.
+        }
         !self.quit
     }
 
@@ -318,10 +609,19 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
     pub fn render(&mut self) -> Result<FrameStats, RenderError> {
         let Some(g) = self.game.as_ref() else { return Ok(FrameStats::default()) };
         self.gpu.characters.update(&mut self.renderer, &g.world)?;
+        // Gadgets, effects and held items on the characters, where the engine has them (`attached`).
+        self.gpu.attached.update(&mut self.renderer, &g.world)?;
+        // Draws outside the camera's visibility volumes' zones are hidden (camera.md 0).
+        self.gpu.show_zones(&mut self.renderer, g.world.shared.visibility_mask)?;
+        // Texture animations (rendering.md 4) by the time played since the last frame.
+        self.gpu.animate(&mut self.renderer, core::mem::take(&mut self.unrendered))?;
         let c = g.render.camera;
         let v = |a: [f32; 3]| Vec3::new(a[0], a[1], a[2]);
         let camera =
             Camera { eye: v(c.eye), target: v(c.target), up: v(c.up), fov_y: c.fov_y, near: c.near, far: c.far };
+        if let Some(m) = self.shot_marks.as_mut() {
+            m.draw(&mut self.renderer, &g.world)?; // Vehicles hook: the projectiles' streaks.
+        }
         self.draw_ui()?; // Sly 2 hook: the 2D layer.
         self.renderer.render(&camera, self.gpu.clear)
     }

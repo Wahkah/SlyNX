@@ -221,8 +221,9 @@ fn run_speeds() {
     let v = crate::math::length([p.velocity[0], p.velocity[1], 0.0]);
     assert!((v - 638.4).abs() < 0.5, "{v}");
     assert_eq!(p.state, State::Ground);
-    // Camera-relative: stick up with the camera looking along +y moves along +y.
-    assert!(p.velocity[1] > 600.0 && p.velocity[0].abs() < 1.0);
+    // Camera-relative: stick up with the camera looking along +y moves along +y (the resting x byte, 128, reads as
+    // x = 0.0039, a hair off centre, as on the PlayStation).
+    assert!(p.velocity[1] > 600.0 && p.velocity[0].abs() < 5.0, "{:?}", p.velocity);
     // Letting go decelerates to a stop.
     sim.run(&mut p, &idle(), 1.0 / 60.0, 60);
     assert!(crate::math::length(p.velocity) < 1e-3);

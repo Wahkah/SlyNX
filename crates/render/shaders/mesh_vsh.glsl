@@ -212,9 +212,47 @@ void main()
     if ((flags & 16u) != 0u) {
         // Weights computed by the caller: the colour carries the mid-tone weights and the alpha.
         // Placed meshes keep their placements in data2.x and their weights base in data.z.
-        uvec2 w = vweights[((flags & 8192u) != 0u ? i.data.z : i.data2.x) + inLocal];
-        vec4 a = unpackUnorm4x8(w.x);
-        vec4 b = unpackUnorm4x8(w.y);
+        vec4 a, b;
+        if ((i.data2.y & 0x2000000u) != 0u) {
+            // Two colours lit here, per frame (Sly 2 rendering.md 2.4, moving objects: four lights, cap 2, twice
+            // the scale), from the light block at bone row data.z * 3; outputs on the same byte scale as weights.
+            uint R = i.data.z * 3u;
+            vec4 W = boneRows[R];
+            vec4 mc = boneRows[R + 1u];
+            bool onePass = boneRows[R + 2u].x > 0.5;
+            vec3 nw = vec3(dot(m0.xyz, nrm), dot(m1.xyz, nrm), dot(m2.xyz, nrm));
+            nw = dot(nw, nw) > 1e-12 ? normalize(nw) : nw;
+            vec4 v = inColor * 255.0;
+            vec3 base = floor((v.rgb * mc.rgb + 255.0) / 512.0);
+            float ba = floor((v.a * mc.a + 255.0) / 510.0);
+            vec4 L = vec4(0.0, 0.0, 0.0, W.w);
+            for (uint k = 0u; k < 4u; k++) {
+                vec4 P = boneRows[R + 3u + 3u * k];
+                vec4 C = boneRows[R + 4u + 3u * k];
+                vec4 Q = boneRows[R + 5u + 3u * k];
+                if (Q.w < 0.5)
+                    continue;
+                vec3 dl = world - P.xyz;
+                vec3 l = P.w > 0.5 ? (dot(dl, dl) > 1e-12 ? normalize(dl) : vec3(0.0)) : P.xyz;
+                float d = dot(nw, l);
+                L += C * (2.0 * max((Q.x + (d + d * d * d) * Q.y) * Q.z, 0.0));
+            }
+            float M = max(L.r, max(L.g, L.b));
+            float r = max(2.0 - M, 0.0);
+            vec3 Lc = clamp(L.rgb, 0.0, 2.0);
+            float mu = clamp(L.w, 0.0, r);
+            float sh = r - mu;
+            float beta = (2.0 + 2.0 / 127.0 - sh) * 63.5;
+            float I = floor(max(base.r, max(base.g, base.b)) / 255.0 * 127.0);
+            vec3 A = clamp(floor((Lc + W.rgb * sh) * I), 0.0, 255.0);
+            vec3 B = onePass ? vec3(0.0) : clamp(floor(base * mu * (ba / max(beta, 1e-6))), 0.0, 255.0);
+            a = vec4(clamp(ba, 0.0, 255.0), A) / 255.0;
+            b = vec4(B, clamp(floor(beta), 0.0, 255.0)) / 255.0;
+        } else {
+            uvec2 w = vweights[((flags & 8192u) != 0u ? i.data.z : i.data2.x) + inLocal];
+            a = unpackUnorm4x8(w.x);
+            b = unpackUnorm4x8(w.y);
+        }
         vColor = vec4(a.yzw, b.w * tint.a);
         vShadowHigh = vec4(a.x, b.xyz);
     } else {

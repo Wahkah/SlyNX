@@ -49,6 +49,10 @@ Triangle record:
 
 The triangle's plane is not stored; it follows from the three corners (normal = normalise((p1 − p0) × (p2 − p0))).
 
+Note on meaning: despite the name used here, a record is a **surface**, a convex polygon in the plane of its three
+corners, not just the triangle they form. The edge ends can lie outside that triangle (25 % of surfaces in worlds 1,
+2 and 12), and the radius and centre enclose the whole polygon. See [../collision.md](../collision.md) 1.2.
+
 ## Collision tree
 
 Follows each collision mesh in the solid layout.

@@ -87,30 +87,28 @@ pub struct Exit {
     pub state: ExitState,
 }
 
-/// The body's destination and extra file records: the last bytes of the body are a 64-byte destination record,
-/// a `u8` count n and n records (classes/paths-and-volumes.md 6). Returns the destination identity and the extras'.
+/// The body's destination and extra file records (classes/paths-and-volumes.md 6): after the options, the volume's
+/// collision mesh and tree, then a 64-byte destination record, a `u8` count n and n records. Read in that order, not
+/// from the body's end: a trailing record can end in a byte equal to a smaller count, which would misplace the
+/// destination by a byte (exit 150652's movie record read that way gave identity `0x80642` for `0x39`). Returns the
+/// destination identity and the extras'.
 pub fn exit_records(world: &World, h: Handle) -> Option<(u32, Vec<u32>)> {
     let r = world.sly2_record(h)?;
     let end = (r.body_offset + r.body_size) as usize;
     let start = r.options()?.end;
-    let data = world.level.bytes.get(start..end)?;
-    for n in 0..=4usize {
-        let tail = 64 * n;
-        let Some(count_at) = data.len().checked_sub(tail + 1) else { break };
-        if data[count_at] as usize != n || count_at < 64 {
-            continue;
-        }
-        let dest = FileRecord::decode(&data[count_at - 64..count_at]);
-        let extras = (0..n)
-            .map(|i| FileRecord::decode(&data[count_at + 1 + 64 * i..count_at + 65 + 64 * i]))
-            .filter(|f| !f.is_empty())
-            .map(|f| f.identity)
-            .collect();
-        if !dest.is_empty() {
-            return Some((dest.identity, extras));
+    let data = world.level.bytes.get(..end)?;
+    let mut rd = formats::reader::Reader::at(data, start);
+    formats_sly2::collision::read_mesh_and_tree(&mut rd).ok()?;
+    let dest = FileRecord::decode(rd.bytes(FileRecord::SIZE).ok()?);
+    let n = rd.u8().ok()? as usize;
+    let mut extras = Vec::with_capacity(n);
+    for _ in 0..n {
+        let f = FileRecord::decode(rd.bytes(FileRecord::SIZE).ok()?);
+        if !f.is_empty() {
+            extras.push(f.identity);
         }
     }
-    None
+    (!dest.is_empty()).then_some((dest.identity, extras))
 }
 
 /// The level row of a world identity, from the world's level table.

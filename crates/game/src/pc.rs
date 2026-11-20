@@ -225,5 +225,12 @@ pub fn registry() -> harness::apps::AppRegistry {
     r.register(GameApp::<NullBackend>::NAME, GameApp::<NullBackend>::DESCRIPTION, |c| {
         Ok(Box::new(GameApp::<NullBackend>::new(c)?))
     });
+    // The Sly 2 and Sly 3 sessions (`crate::pc_sly`).
+    r.register(crate::pc_sly::Sly2App::NAME, crate::pc_sly::Sly2App::DESCRIPTION, |c| {
+        Ok(Box::new(crate::pc_sly::Sly2App::new(c)?))
+    });
+    r.register(crate::pc_sly::Sly3App::NAME, crate::pc_sly::Sly3App::DESCRIPTION, |c| {
+        Ok(Box::new(crate::pc_sly::Sly3App::new(c)?))
+    });
     r
 }

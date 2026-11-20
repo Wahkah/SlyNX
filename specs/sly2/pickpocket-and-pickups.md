@@ -27,6 +27,14 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/pickup.cpp (touch test and floor bounce)
     used_for: which constant each rule uses; marked [R]
+  - kind: disc
+    what: >-
+      SCUS-97316, the vault package's scripts in the 8 vault worlds (rows 4, 10, 13, 16, 20, 28, 34, 42) and the
+      executable tables at 0x002C0EC8 (vault parts) and 0x002C0FF0 (dial key directions), read 2026-11-19
+    used_for: the vault combinations, rewards and lines per episode, the dial layout and the state sequences of 6.1
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/vault.cpp (states, dial input, options 1439 to 1443)
+    used_for: what each vault option and state does in 6.1; marked [R]
 reviewed_by: pending
 date: 2026-11-14
 ---
@@ -225,7 +233,63 @@ and moving 23 units out from 100 (back by 275 past 300) (`0x2C0E80` to `0x2C0E94
   With all 30 bottles, Sly opens it with a three-digit dial (the stick picks one of nine keys, Cross enters, Triangle
   gives up); the right combination gives the episode's reward, one of the twelve moves that are not sold
   ([characters.md](characters.md) 6), and sets the episode's vault flag [R]. The combination and reward are not
-  options of the vault body on the disc; they come from scripts [D for their absence, I for the source].
+  options of the vault body on the disc; the vault package's script sets them at load (6.1) [D].
+
+### 6.1 The vault in detail (added 2026-11-19)
+
+**Options** (class 78; its script map sends script IDs 1225, 1226, 1227, 1228, 1229 and 235 to stream options 1439,
+1440, 1441, 1442, 1443 and 1444) [D for the map; R for the meanings]:
+
+| Stream option | Meaning | Source on the disc |
+|---|---|---|
+| 1439 | the combination, a three-digit integer (class default 123) | set by script per episode |
+| 1440 | line shown when Sly steps up to the vault (it reads out the combination) | set by script per episode |
+| 1441 | line shown when Sly is missing bottles | vault body option, 3161 on all 8 vaults [D] |
+| 1442 | the reward item record | set by script per episode |
+| 1443 | line shown when the vault opens (the move gained) | set by script per episode |
+| 1444 | "use the vault" (a method: starts the vault from a script) | [R] |
+
+**Where the combination comes from** [D]. The vault package's own script, on load, reads the current episode and
+sets 1439, 1440, 1442 and 1443 on the vault; it also sets a script-local option 1327 to the reward's name string.
+Row 13's logged 1439 = 386 is episode 3's value from this script, not a body option.
+
+| Episode | Combination | Reward item | Start line | Open line | Reward name string |
+|---|---|---|---|---|---|
+| 1 | 231 | 33 Knockout Dive | 3179 | 3180 | 183 |
+| 2 | 857 | 34 Insanity Strike | 3193 | 3194 | 185 |
+| 3 | 386 | 35 Voltage Attack | 3205 | 3206 | 187 |
+| 4 | 248 | 36 Long Toss | 3208 | 3209 | 189 |
+| 5 | 969 | 37 Rage Bomb | 3210 | 3211 | 191 |
+| 6 | 129 | 38 Music Box | 3212 | 3213 | 193 |
+| 7 | 583 | 39 Lightning Spin | 3217 | 1447 | 195 |
+| 8 | 725 | 40 Shadow Power | 3223 | 3224 | 197 |
+
+The start lines spell the code out (for example episode 1's ends "... Dimitri's vault is ... 2-3-1."); the open
+lines read "You've gotten the *move* move." [D].
+
+**Dial** [D for the table; R for the rules]. Nine keys laid out as a phone keypad, 3 by 3, with stick directions at
+`0x2C0FF0` (nine 16-byte vectors): 1 up-left (−0.7, 0.7), 2 up (0, 0.8), 3 up-right (0.7, 0.7), 4 left (−0.8, 0),
+5 centre (0, 0), 6 right (0.8, 0), 7 down-left (−0.7, −0.7), 8 down (0, −0.8), 9 down-right (0.7, −0.7). The left
+stick selects the nearest key, the current key's distance counted at 0.7 times so the selection does not flicker;
+Cross or Square enters the selected digit; Triangle or Circle gives up. After each entry the last three digits are
+compared with option 1439; equal opens the vault [R].
+The vault package's scripts also check each digit as it is entered (custom procedures 1328, reset, and 1329, check,
+called from each key's event 4 with the digits 1 to 9): a correct digit plays effect 298 at a pitch of 0.6 rising
+0.2 per correct digit, a wrong one plays effect 54 and starts over [D for the calls and numbers; I for reading them
+as sounds].
+
+**States and their sequences** [D for the object IDs and classes; R for the binding]. The vault parts table at
+`0x2C0EC8` (24 entries of kind, object ID, field offset) binds the vault's poses 1596 to 1604, the dial pose 1606,
+the nine key animations 1607 to 1615, and five sequences (class 114) inside the vault package, one per state:
+
+| State | Meaning | Sequence started |
+|---|---|---|
+| 0 | idle | none |
+| 1 | stepping up to the dial | 1616 |
+| 2 | dialing | 1617 |
+| 3 | right combination | 1618 |
+| 4 | wrong combination or gave up | 1619 |
+| 5 | open (reward given, vault flag set) | 1620 |
 
 ## 7. Treasure (class 103)
 
@@ -250,6 +314,6 @@ listed by any pocket or treasure definition [D].
 
 - Which characters besides guards carry pockets (the "other givers" table), and the robbable rank's source.
 - The coin's own pick-up and collect radii (not options on the disc; the reference keeps class defaults).
-- The vault combinations and which reward each episode's vault gives.
+- (Resolved 2026-11-19: the vault combinations and rewards, section 6.1.)
 - What the three object references of option 1152 mean beyond identifier and loot record.
 - All [R] behaviour needs checking in play.

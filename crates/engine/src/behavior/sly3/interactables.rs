@@ -48,16 +48,18 @@ pub mod opt {
     pub const USE_1168: u16 = 1168;
     /// Use point: animations, (animation, count) pairs (Sly 2 1076).
     pub const USE_ANIMATIONS: u16 = 1170;
-    /// Treasure map: the search radius (5,000).
-    pub const MAP_RADIUS: u16 = 1901;
+    /// Treasure map: the overhead view's height (5,000; 4,000 in row 31).
+    pub const MAP_VIEW_HEIGHT: u16 = 1901;
     /// Treasure map: its screen.
     pub const MAP_SCREEN: u16 = 1902;
-    /// Treasure map: the pace length (400).
-    pub const MAP_PACE: u16 = 1903;
-    /// Treasure map: one marker per trail point.
+    /// Treasure map: the current marker's arrival radius (400 on the disc; default 500).
+    pub const MAP_ARRIVAL: u16 = 1903;
+    /// Treasure map: the trail markers (class-3 placed markers), in order.
     pub const MAP_MARKER: u16 = 1904;
-    /// Treasure map: the clue and hint strings.
+    /// Treasure map: the clues, (riddle, plain hint) string IDs, −1 none.
     pub const MAP_STRINGS: u16 = 1905;
+    /// Treasure map: its command script.
+    pub const MAP_SCRIPT: u16 = 1906;
     /// Compass: the needle.
     pub const COMPASS_NEEDLE: u16 = 1894;
 }
@@ -215,19 +217,30 @@ impl ClassBehavior for UsePoint {
     }
 }
 
-/// A treasure map (class 153) [D for the values].
+/// One pace of a treasure-map clue, in units (gadgets.md 6.10).
+pub const MAP_PACE: f32 = 200.0;
+/// The arrival radius when option 1903 is not set.
+pub const MAP_ARRIVAL_DEFAULT: f32 = 500.0;
+/// The overhead view's height when option 1901 is not set.
+pub const MAP_VIEW_DEFAULT: f32 = 5000.0;
+/// The overhead view's pan easing (fast, slow, fast time) (gadgets.md 6.10.1).
+pub const MAP_PAN_EASE: [f32; 3] = [1500.0, 700.0, 0.5];
+
+/// A treasure map (class 153; gadgets.md 6.10, 6.10.1) [D for the values].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TreasureMap {
-    /// Search radius (1901; 5,000 on five maps, 4,000 on one).
-    pub radius: f32,
-    /// Its screen (1902).
+    /// The overhead view's height (1901; 5,000, 4,000 in row 31).
+    pub view_height: f32,
+    /// Its screen (1902, a class-158 screen object).
     pub screen: i32,
-    /// Pace length (1903; 400).
-    pub pace: f32,
-    /// One marker per trail point (1904), Sly 3 IDs.
+    /// The current marker's arrival radius (1903; 400 on the disc).
+    pub arrival_radius: f32,
+    /// The trail markers in order (1904), Sly 3 IDs; the last ends the trail.
     pub markers: Vec<i32>,
-    /// Clue and hint strings (1905), one pair per entry (−1 none).
+    /// The clues (1905): (riddle, plain hint) string IDs, −1 none.
     pub strings: Vec<(i32, i32)>,
+    /// Its command script (1906).
+    pub script: i32,
 }
 
 impl TreasureMap {
@@ -235,9 +248,10 @@ impl TreasureMap {
     pub fn new(world: &World, h: Handle) -> TreasureMap {
         let o = world.options(h);
         TreasureMap {
-            radius: o.and_then(|o| o.f32(opt::MAP_RADIUS)).unwrap_or(5000.0),
+            view_height: o.and_then(|o| o.f32(opt::MAP_VIEW_HEIGHT)).unwrap_or(MAP_VIEW_DEFAULT),
             screen: o.and_then(|o| o.i32(opt::MAP_SCREEN)).unwrap_or(-1),
-            pace: o.and_then(|o| o.f32(opt::MAP_PACE)).unwrap_or(400.0),
+            arrival_radius: o.and_then(|o| o.f32(opt::MAP_ARRIVAL)).unwrap_or(MAP_ARRIVAL_DEFAULT),
+            script: o.and_then(|o| o.i32(opt::MAP_SCRIPT)).unwrap_or(-1),
             markers: o.map(|o| o.all(opt::MAP_MARKER).filter_map(|v| v.as_i32()).collect()).unwrap_or_default(),
             strings: lists(world, h, opt::MAP_STRINGS)
                 .map(|a| {
@@ -246,6 +260,31 @@ impl TreasureMap {
                 })
                 .collect(),
         }
+    }
+}
+
+impl TreasureMap {
+    /// Whether the player at `player` has reached the current marker at `marker`: the full 3-D distance is within
+    /// the arrival radius (6.10.1).
+    pub fn reached(&self, marker: [f32; 3], player: [f32; 3]) -> bool {
+        crate::math::length(crate::math::sub(marker, player)) <= self.arrival_radius
+    }
+
+    /// One step of the overhead map view (6.10.1): the pan eases with (1,500, 700, 0.5) toward the stick's
+    /// direction × half its magnitude × the view height; the camera sits the view height above the player plus
+    /// the pan, looking straight down. `stick` is world-relative, magnitude 0 to 1. Returns the eye.
+    pub fn view(&self, pan: &mut [f32; 2], player: [f32; 3], stick: [f32; 2], dt: f32) -> [f32; 3] {
+        let goal = [stick[0] * 0.5 * self.view_height, stick[1] * 0.5 * self.view_height];
+        let [fast, slow, fast_time] = MAP_PAN_EASE;
+        let p = crate::physics::SmoothParams { fast, slow, fast_time, max_speed_change: None };
+        let d = [goal[0] - pan[0], goal[1] - pan[1]];
+        let l = crate::math::sqrt(d[0] * d[0] + d[1] * d[1]);
+        if l > 0.0 {
+            let step = (p.speed_at(l) * dt).min(l);
+            pan[0] += d[0] / l * step;
+            pan[1] += d[1] / l * step;
+        }
+        [player[0] + pan[0], player[1] + pan[1], player[2] + self.view_height]
     }
 }
 
@@ -260,5 +299,27 @@ impl Compass {
     /// From the compass's options.
     pub fn new(world: &World, h: Handle) -> Compass {
         Compass { needle: world.options(h).and_then(|o| o.i32(opt::COMPASS_NEEDLE)).unwrap_or(-1) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn treasure_map_arrival_and_view() {
+        let m = TreasureMap { view_height: 5000.0, arrival_radius: 400.0, ..TreasureMap::default() };
+        // The full 3-D distance counts: 300 across and 300 up is 424, not reached.
+        assert!(m.reached([0.0; 3], [300.0, 0.0, 0.0]));
+        assert!(!m.reached([0.0; 3], [300.0, 0.0, 300.0]));
+        // The view pans toward stick × ½ × 5,000 and sits 5,000 above the player plus the pan.
+        let mut pan = [0.0; 2];
+        let mut eye = [0.0; 3];
+        for _ in 0..600 {
+            eye = m.view(&mut pan, [100.0, 0.0, 50.0], [1.0, 0.0], 1.0 / 60.0);
+        }
+        assert!((pan[0] - 2500.0).abs() < 1.0 && pan[1] == 0.0, "{pan:?}");
+        assert_eq!(eye, [100.0 + pan[0], 0.0, 5050.0]);
+        assert_eq!((MAP_PACE, crate::gang::character::MAP_DIRECTIONS), (200.0, 8));
     }
 }

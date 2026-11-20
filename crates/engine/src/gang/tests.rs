@@ -138,7 +138,8 @@ fn sly_speeds_and_jump_height() {
     sim.run(&mut c, &forward(0), 30);
     assert_eq!(c.state, sly::SNEAK_RUN);
     assert!((c.velocity[0] - 510.0).abs() < 1.0);
-    let half = GangInput { stick: [0.0, 0.5 + 0.5 * 0.15], ..idle() };
+    // A hand-made input's stick length is the deflection (the pad's goes through `Gang::stick`).
+    let half = GangInput { stick: [0.0, 0.5], ..idle() };
     sim.run(&mut c, &half, 10);
     assert!((c.velocity[0] - 320.0).abs() < 1.0, "half stick: {:?}", c.velocity);
     sim.run(&mut c, &idle(), 5);
@@ -731,4 +732,43 @@ fn sly3_combo_definitions_drive_state_23() {
     sim.run(&mut c, &idle(), 60);
     assert!(sim.took().contains(&GangEvent::ComboEnded));
     assert_ne!(c.state, sly::COMBO);
+}
+
+#[test]
+fn popup_hits_add_a_held_second_reaction() {
+    // characters.md 2.2: after the knock-back reaction of a 0x8000 hit, sound 0x6A and a second, held reaction.
+    let mut sim = Sim::new();
+    let mut c = Character::new(Who::Sly, [0.0; 3], 0.0);
+    sim.run(&mut c, &idle(), 5);
+    let hit = Hit {
+        amount: 3.0,
+        kind: 0x8000 | health::kind::KNOCKBACK,
+        source: [-100.0, 0.0, 0.0],
+        source_yaw: 0.0,
+        vector: [0.0; 3],
+        shrunk: false,
+    };
+    let mut out = Vec::new();
+    let world = sim.world();
+    c.hit(&sim.s.consts, &hit, &world, &mut out);
+    assert_eq!((c.state, c.held_reaction), (sly::DAMAGE, 1));
+    let mut held_at = None;
+    for f in 0..300 {
+        sim.step(&mut c, &idle());
+        if held_at.is_none() && sim.took().contains(&GangEvent::HeldReaction) {
+            held_at = Some(f);
+            assert_eq!(c.state, sly::DAMAGE, "still in the reaction");
+        }
+        if c.state != sly::DAMAGE {
+            break;
+        }
+    }
+    assert!(held_at.is_some());
+    assert_eq!((c.state, c.held_reaction), (sly::STAND, 0));
+    // A plain knock-back gets up at once.
+    let mut d = Character::new(Who::Sly, [0.0; 3], 0.0);
+    sim.run(&mut d, &idle(), 5);
+    let world = sim.world();
+    d.hit(&sim.s.consts, &Hit { kind: health::kind::KNOCKBACK, ..hit }, &world, &mut out);
+    assert_eq!(d.held_reaction, 0);
 }

@@ -520,3 +520,27 @@ fn gang_moves_in_the_hub() {
     assert!(events.iter().any(|e| matches!(e, (Who::Murray, GangEvent::FlopLanded { inferno: false, .. }))));
     assert_eq!(gang.current().unwrap().state, murray::STAND);
 }
+
+#[test]
+fn bentley_takes_places_and_returns_a_bomb() {
+    use engine::gang::pool;
+    let Some(_) = disc_path() else {
+        eprintln!("skipped: SLYNX_DISC_SLY2 is not set");
+        return;
+    };
+    let opts = Sly2Options { row: Some(hub().row as i16), ..Sly2Options::default() };
+    let mut w = EngineWorld::load_sly2(hub().data.clone(), &hub().options, opts).unwrap();
+    let bentley = w.handles().find(|&h| w.class(h) == Some(55)).expect("Bentley");
+    let pool_group = pool::pool_group(&w, bentley, pool::BOMB_CLASS).expect("Bentley's pool");
+    // gadgets.md 6: taking the Trigger Bomb moves a copy out of the pool to his hands, in the world, held.
+    let copy = pool::take(&mut w, bentley, 7).expect("a bomb copy");
+    assert_eq!((w.class(copy), w.parent(copy), w.in_world(copy)), (Some(pool::BOMB_CLASS), Some(bentley), true));
+    assert_eq!(pool::copy_of(&w, 7).map(|g| (g.state, g.pool)), Some((0, pool_group)));
+    // Placed: at the world root, landed.
+    pool::release(&mut w, copy, [100.0, 200.0, 0.0], 0.0, true);
+    assert_eq!((w.parent(copy), pool::copy_of(&w, 7).map(|g| g.state)), (None, Some(2)));
+    assert_eq!(w.world_transform(copy).map(|t| t.t), Some([100.0, 200.0, 0.0]));
+    // Returned: back in the pool's group, out of the world.
+    pool::return_copy(&mut w, copy);
+    assert_eq!((w.parent(copy), w.in_world(copy), pool::copy_of(&w, 7)), (Some(pool_group), false, None));
+}

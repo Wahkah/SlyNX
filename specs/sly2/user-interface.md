@@ -21,8 +21,32 @@ sources:
     used_for: >-
       what the game does with the screen objects (states, show / idle / hide labels, the gauge, the prompt, the
       counters, the timer, the menus and their availability rules, the text escapes, the screen units); marked [R]
+  - kind: disc
+    what: >-
+      re-check 2026-11-19: every shape primitive of row 0's inline screen bodies (top level and the fonts nested in
+      object 884) and of the six streamed screen files, decompressed from the disc
+    used_for: >-
+      the order and value ranges of the three primitive setting bytes, per-primitive colour uniformity, the
+      per-vertex byte, the glyph colours of the two fonts in object 884, the text colour words of item kind 3
+      (section 3)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/screenobj.h, screenobj.cpp, hud.cpp, splayer.cpp (re-read 2026-11-19)
+    used_for: meaning of the first setting byte (draw layer), the colour rule and the text tint (section 3); [R]
+  - kind: disc
+    what: >-
+      SCUS-97316, the streamed gadget-grid screens 885, 886, 887 of row 0 (decompressed and parsed to their last byte:
+      45,933, 59,119 and 72,773 bytes), every sprite key of them; checked 2026-11-19
+    used_for: grid labels, cell sprites and cell placements, sprite-key fields (sections 2, 3, 6.3) [D]
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…): grid cell tables at 0x2C2DE8 / 0x2C3028 / 0x2C3148, the grid opening call
+      (label immediate 0x318 at 0x1DB71C), the colour-pair conversion in routine 0x213300 (0x213614 to 0x213714)
+    used_for: cell record fields, the label the grid is shown with, the offset and scale rule (sections 3, 6.3) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/shop.cpp (gadget assignment), screenrt.cpp, splayer.cpp (key crossing)
+    used_for: names of the cell fields, how a key's placements, released slots and colour pairs are applied [R]
 reviewed_by: pending
-date: 2026-11-17
+date: 2026-11-19
 ---
 
 # Sly 2 user interface
@@ -97,6 +121,12 @@ The game loads the file the first time the screen is shown [R].
 - A screen's sprites carry **labels** (sprite-label IDs in the data). Three labels are shared by convention
   [D: they occur on most `swf_ui` screens]: `0x30F` **show** (the screen enters), `0x310` **idle** (on screen),
   `0x311` **hide** (it leaves). A screen without them appears and disappears at once.
+- A screen can also be shown with an explicit label: that label plays as the idle label, with no show label and no
+  hide label (hiding is immediate) [R]. The gadget grids are shown this way, with label **792** (`0x318`, an immediate
+  in the grid code at `0x1DB71C`) [D]. Their root sprite carries no `0x30F`–`0x311` labels; its labels are `790`
+  (0.65 s, 12 keys), `792` (0.25 s), `791` (0.5 s, 9 keys) and the markers 5572, 16732, 16733 between them [D], so
+  790 / 792 / 791 read as show / idle / hide by their order and lengths [I]; with the explicit-label call only 792
+  plays [R].
 - States: not loaded (streamed, before first use), stopped, idle, showing, hiding. Showing plays the show label then
   the idle label; hiding plays the hide label, then the screen is gone.
 - A screen with an idle limit (option 1125) hides itself after that many seconds in idle.
@@ -111,9 +141,60 @@ The game loads the file the first time the screen is shown [R].
 - **Units.** The data's canvas is 640 × 480 [D]; the PS2 frame is 640 × 448 pixels, so the picture is scaled
   vertically by 448/480 [R]. Coordinates in shapes are signed 16-bit 12.4 fixed point (sixteenths of a pixel)
   [R; the `s16` x, y of classes/effects-logic-ui.md 4].
-- **Shapes** (item kind 1) are drawn as triangle fans, triangle strips or line strips, chosen by each primitive's
-  first setting byte (1 fan, 2 strip, 3 line strip); colour per vertex, multiplied by the placement's colour pair
-  (scale and offset), with alpha 0x80 = opaque as everywhere on the PS2 [R].
+- **Shapes** (item kind 1). Each primitive's five header bytes are: vertex count, then three setting bytes, then
+  the per-vertex-byte flag (classes/effects-logic-ui.md 4). The three setting bytes, in stored order:
+
+  | Byte | Meaning | Values on the disc (row 0 and the six streamed files) |
+  |---:|---|---|
+  | 1st | **draw layer**: a primitive's depth is 100 × this value + the depth of the placement that draws it, which orders the primitives within one shape [R] | 0 to 22 in screen shapes; 0 to 4 in the font glyphs [D] |
+  | 2nd | **topology**: 1 triangle fan, 2 triangle strip, 3 line strip [D for the values, R for the meaning] | 1, 2, 3 only. Every 2-vertex primitive has 3; strips have at least 4 vertices [D] |
+  | 3rd | unused [R] | always 1 [D] |
+
+  An earlier version of this section named the first byte as the topology; that was wrong.
+  - Every primitive has **one colour**: all its vertices carry the same RGBA word [D] (5,391 primitives checked).
+  - The per-vertex byte is used only when the primitive's flag byte is 1, and the flag is 1 only on strips [D]. A
+    vertex byte of 255 marks a **no-draw vertex** (the GS "no kick" bit): the triangle that would end at that vertex
+    is not drawn, and the strip otherwise carries on through it with its normal winding; two such vertices in a row
+    would start a new strip, as in the mesh strips of geometry.md [R for the meaning; implementation rendering of
+    both fonts confirms it]. On the disc every 255 is a single vertex, never two in a row: 4,807 in the 967 flagged
+    strips (1,457 in the font glyphs, 3,350 in screens), one of them on the first or second vertex of its strip (where it has no effect); the other per-vertex bytes
+    are all 0 [D]. An earlier version said a 255 "starts a new strip"; that reading tears the text font when drawn.
+  - **Colour rule** [R]: the drawn colour is clamp(vertex colour × scale + offset, 0..255) per channel, where scale
+    and offset are the colour pair of the placement (sprite key) that draws it; alpha 0x80 = opaque as everywhere on
+    the PS2.
+- **Text colour.** The text font's glyphs are stored **black**: in object 884, the first font (224 characters, the
+  text font) has every glyph vertex at `0x80000000` (R = G = B = 0, alpha 0x80) or `0x00000000` [D]. They are
+  tinted when drawn [R]:
+  - the text item (kind 3) carries a colour word, its second `u32` (over all worlds, among text items of kinds 0 and 1: `0x7F666666`,
+    grey, in 787; `0x26000000` in 721) [D];
+  - the drawing offset becomes min(placement offset + the colour word's R, G, B, 255) per channel, and the alpha
+    scale becomes clamp(placement scale alpha × the word's alpha / 127, 0, 1). With black glyphs and scale 1 the
+    text comes out in the item's colour, its alpha scaled by the word's alpha on a 0..127 scale [R];
+  - the subtitle string (0x2EF) uses the speaker's colour instead (dialogue-and-voice.md) [R];
+  - the second font in object 884 is the **button-icon** font: its glyphs carry their own colours (for example
+    `0x8010283D`, `0x7F333333`) [D] and are drawn after `&x` with the placement offset only, not the text colour,
+    so the icons keep their own colours [R].
+- **Sprite keys** (layout: classes/effects-logic-ui.md 4). A key changes the sprite's **slots** (each slot holds one
+  dictionary item at a time):
+  - a **placement** (50 bytes) is: `u16` item number (0 = keep the item the slot already holds), `u16` slot, `u16`
+    link (0 on every grid placement), `s16` colour-pair index (−1 = none), `u8` interpolate (1 = ease the slot's
+    matrix and colours toward its next placement in a later key), `u8` (0), `s32` (−1 on the grids), then the 3 × 3
+    matrix, read as a 2-D affine transform: rows 1 and 2 are the axes, row 3 the translation in canvas units. It is
+    the slot's transform, relative to the sprite that holds the slot [D layout and grid values; R meanings];
+  - its **colour pairs** are (offset word, scale word) in that stored order. Per channel, offset = byte − 127 (so
+    0x7F is no offset; one unit per step on the channel's own scale, where alpha's full scale is 0x80) and scale =
+    clamp((byte − 127) / 127, −1, 1) (so 0xFF is 1 and 0x7F is 0); the executable converts them exactly so
+    (routine `0x213300`, using 127.0 and 1/127) [D]. A slot with no pair uses offset 0x7F7F7F7F and scale 0xFFFFFFFF
+    [R]. Nested sprites combine with their parent: scale = parent scale × own scale; offset = parent scale × own
+    offset + parent offset [R];
+  - its **16-bit values** are slots the key empties (releases) before its placements apply; on the grids every
+    such value is below the sprite's slot count [D];
+  - an item of kind 4 is a **reference**: its `u16` value n names sprite n of the same screen, which then plays
+    inside the slot (in grid 885 the kind-4 items hold 1 to 28, the screen's 29 sprites being 0 to 28) [D for the
+    values; R for the meaning].
+  - The grid data shows the colour pairs varying only in the lowest byte of the offset word (01 … FF) with the
+    lowest byte of the scale word at 0x7F; which channel that byte drives (it behaves as a fade if it is alpha) is
+    not settled [I].
 - **Textured quads** (kinds 6 and 7) show a texture by ID; kind 6 is blended through the screen's alpha [R].
 - **Wide screens.** The game is 4:3. A port showing wider pictures should keep each screen's 4:3 canvas centred
   and extend only full-screen backgrounds [I].
@@ -228,7 +309,20 @@ The three save-slot pages (new, load, save) use tables at `0x2BFDA8`, `0x2BFE08`
 
 - Shop: object 888; see [safehouse-and-shop.md](safehouse-and-shop.md).
 - Gadget grids: objects 885 (Sly), 886 (Bentley), 887 (Murray) [I from order; D strings]; opened with **Select**
-  during play [R] (safehouse-and-shop.md).
+  during play [R] (safehouse-and-shop.md). Shown with label 792 (section 2).
+  - **Cells.** Each cell of the executable's grid tables (safehouse-and-shop.md 6; 32 bytes: item, three label IDs,
+    −1, `f32` x, `f32` y, flags) names three labels of one per-cell sprite in the screen [D]. In table order they
+    are the **open** (item on sale, not owned), **owned** and **selected** looks [R for the roles]: Sly's first cell
+    holds 978, 977, 979, and the screen's sprite 25 carries the labels 977 (0.3167 s), 978 (0.3333 s), 979
+    (0.3333 s) with the markers between them [D]. The grid plays one of the three on each cell: selected for the
+    selected item, otherwise owned, otherwise open, otherwise none [R].
+  - **Where cells are drawn.** The root's label 792 places each cell sprite with a matrix of scale 0.8; Sly's grid
+    rows sit at y 141, 221, 301 and columns at x 183 to 583 in steps of 80; Bentley's and Murray's at x 213, 323,
+    433, 543 [D]. The executable's cell positions are the same layout shifted by (−38, +14): Sly's first cell is
+    (145, 155) in the table and (183, 141) on screen; this holds for every cell except Bentley's ninth (Long Toss,
+    labels 1042–1044), which the table puts at (175, 315) and the screen at (373, 301) [D]. The table positions
+    are used only to choose the next cell with the stick, which depends on the cells' relative positions [R], so
+    the shift has no effect; draw the cells where the screen places them [I].
 - Job help: object 1248, from the pause menu [R].
 
 ### 6.4 Title

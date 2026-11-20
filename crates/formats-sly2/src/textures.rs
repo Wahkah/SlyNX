@@ -205,7 +205,9 @@ pub fn item_bytes<'a>(data: Data, len: usize, world: &'a [u8], texture_data: &'a
         Data::Inline(o) => (world, o as usize),
         Data::TextureData(o) => (texture_data, o as usize),
     };
-    src.get(off..off + len).ok_or(Error::Corrupt { offset: off, what: "texture item outside its data" })
+    off.checked_add(len)
+        .and_then(|end| src.get(off..end))
+        .ok_or(Error::Corrupt { offset: off, what: "texture item outside its data" })
 }
 
 /// Decodes a bitmap with a palette to RGBA8, rows in storage order (textures.md 3).
@@ -216,7 +218,8 @@ pub fn decode(bitmap: &Bitmap, palette: &Palette, world: &[u8], texture_data: &[
         FORMAT_8BIT => 8,
         _ => return Err(Error::Corrupt { offset: 0, what: "unknown pixel format" }),
     };
-    let texels = item_bytes(bitmap.data, w * h * bits / 8, world, texture_data)?;
+    // Rounded up: a 4-bit image of odd size ends in half a byte.
+    let texels = item_bytes(bitmap.data, (w * h * bits).div_ceil(8), world, texture_data)?;
     let colors = item_bytes(palette.data, palette.colors as usize * 4, world, texture_data)?;
     let mut pixels = Vec::with_capacity(w * h * 4);
     for i in 0..w * h {
@@ -292,5 +295,29 @@ mod tests {
         let bmp8 = Bitmap { format: FORMAT_8BIT, size: 2, ..bmp };
         let td8 = [&td[..8], &[1, 0][..]].concat();
         assert_eq!(decode(&bmp8, &pal, &[], &td8).unwrap().pixels, [40, 50, 60, 128, 10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn odd_4_bit_images_end_in_half_a_byte() {
+        // 3 x 1 at 4 bits is a byte and a half: the last texel is the low half of the second byte, and nothing is
+        // read past it.
+        let pal = Palette { id: 0, storage: 1, conditions: alloc::vec![], colors: 2, data: Data::TextureData(0) };
+        let td = [10, 20, 30, 0x80, 40, 50, 60, 0x40, 0x10, 0x01];
+        let bmp = Bitmap {
+            id: 0,
+            storage: 1,
+            conditions: alloc::vec![],
+            width: 3,
+            height: 1,
+            format: FORMAT_4BIT,
+            size: 2,
+            data: Data::TextureData(8),
+        };
+        let img = decode(&bmp, &pal, &[], &td).unwrap();
+        assert_eq!(&img.pixels[8..12], &[40, 50, 60, 128]);
+        // Cut short (the half byte missing): refused, not a panic.
+        assert!(decode(&bmp, &pal, &[], &td[..9]).is_err());
+        // An offset near the top of the address space does not overflow.
+        assert!(item_bytes(Data::TextureData(u32::MAX), usize::MAX, &[], &td).is_err());
     }
 }

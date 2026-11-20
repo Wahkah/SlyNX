@@ -192,8 +192,13 @@ Written from `specs/sly3/saving.md`, on the Sly 2 code (nothing is copied):
 
 ## Importing original memory-card saves
 
-Not implemented. The spec marks the original's byte layout and check word as unconfirmed (save-format.md 6, 7); an
-importer waits for a spec taken from a card written by the game.
+`sly1_card` holds the original record's frame from save-format.md 6. The header is version 18 and size 6,656. The
+check word is the unsigned byte sum from offset 12 to the end, in 32 bits. Loading refuses a wrong file size
+(error 8), a wrong version or size (error 28), and a mismatched check word (error 27). A new record has the
+starting values: 5 lives at 6,624, −1 "no power-up" at 6,652, and 3 at 6,620. Its tests cover each rule.
+
+A full importer is not implemented: the spec still marks the field layout past the header as unconfirmed
+(save-format.md 6, 7), so an importer waits for a spec taken from a card written by the game.
 
 ## Spec notes
 

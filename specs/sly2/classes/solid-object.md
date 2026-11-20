@@ -9,6 +9,12 @@ sources:
     used_for: >-
       the layout below parses every solid body on the disc to its declared size: 11,250 bodies (4,368 top-level records, 6,879 nested and 3 in the extra list of a nested copy placement;
       worlds.md 2); collision-surface field check on three worlds (38,166 surfaces); counts below
+  - kind: disc
+    what: SCUS-97316, rows 0, 3 and the castle hub (00_0x073); every collision surface of every top-level solid body (69,709), re-checked 2026-11-19
+    used_for: section 2.1, surfaces as convex polygons (edge ends against the plane, the triangle and the convex hull; sphere containment; convexity of stored edges; perimeter coverage)
+  - kind: reference-project
+    what: ProjectCane @ f77825d6, Sly1-Release geom.cpp and so.cpp (the engine keeps one corner per surface for its plane and no triangle)
+    used_for: "only the plane is kept for contact tests" [R]
   - kind: reference-project
     what: Games/Sly2-RE-notes.md and tools/sly2_geom.py (earlier research); sly2-decomp @ 33e2bab9, src/sm-so
     used_for: field order; meanings marked [R]
@@ -74,6 +80,34 @@ Like Sly 1's collision mesh ([../../sly1/classes/shared-structures.md](../../sly
 The four floats of a surface are its bounding sphere (radius first, then centre), as in Sly 1: for flat surfaces
 the centre lies in the plane of the three corners [D]. The plane is not stored; it follows from the corners
 (Sly 1 rule) [D].
+
+**A surface is a convex polygon, not the triangle of its three corners.** The three corners only fix the
+surface's plane; the surface itself is a convex polygon in that plane that contains them [D]. Measured on three
+worlds (nightclub cellar, intro hub, castle hub; 69,709 surfaces of top-level solid bodies):
+
+- Every edge record lies in the planes of both surfaces it joins: 69,703 of 69,709 surfaces have all edge ends in
+  their own plane (the other 6 are within rounding of large surfaces) [D].
+- **21,609 surfaces (31 %) are larger than their triangle**: at least one edge end lies in the plane but outside
+  the triangle of the three corners [D]. Of these, about 19,965 are four-sided; the largest have 12 or more sides [D].
+- The polygon is convex: in 65,912 of the 67,125 surfaces with edges (98.2 %) every edge end lies on the boundary
+  of the convex hull of the corners and edge ends; 99 have an end inside it by less than 1 % of the surface's size,
+  and 1,114 (1.7 %) by more [D]. The
+  corners are usually polygon vertices, but 884 of the larger surfaces have one to three corners inside the polygon
+  [D].
+- The bounding sphere (the four floats) encloses the whole polygon, not just the triangle, on every one of the 67,125
+  surfaces with edges [D].
+- **The edge list is not the whole outline.** Each stored edge is a side shared with one other surface, stored once
+  under one of the two (see the other-surface field). As in Sly 1 (../../sly1/collision.md 1), only **convex** shared
+  sides are stored: of 80,745 stored edges, 77,671 are convex, 664 concave and 2,410 between surfaces in the same
+  plane [D]. The stored edges' total length equals the outline's perimeter in only 18,664 of 67,125 surfaces; 2,584
+  surfaces store no edge at all [D]. The rest of the outline (concave sides, open borders) is not in the data.
+- So a port must not clip a surface to its triangle. The game keeps only the surface's plane for contact tests
+  [R]; a surface's extent comes from the collision tree (2.2), whose cells are bounded by other surfaces' planes [I].
+
+Test vector [D]: nightclub cellar (row 3), solid object 136751, collision surface 0, corners 13, 9, 7: a 7-sided
+polygon in the plane x ≈ 128 whose seven stored edges, all owned by surface 0, form its closed outline: 7–10,
+10–2, 2–1, 1–0, 0–13, 13–9, 9–7. Position 0 is (129.67, 103.0, 164.68), position 7 is (126.56, −165.83, −171.14).
+Sly 3 shows the same on its identical layout (../../sly3/classes/solid-object.md 2.1).
 
 ### 2.2 Collision tree
 

@@ -989,3 +989,16 @@ fn render_overview() {
 }
 
 mod anim;
+
+#[test]
+fn scene_record_budget() {
+    need_disc!();
+    use formats_sly2::scene::{SceneOptions, build};
+    let w = parse(INTRO);
+    let opts = SceneOptions { row: Some(INTRO as i16), decode_textures: false, ..SceneOptions::default() };
+    let full = build(&w, opts);
+    assert_eq!(full.over_budget, 0, "the intro hub fits the default budget");
+    // A small budget stops the walk: fewer instances, the rest counted.
+    let small = build(&w, SceneOptions { record_budget: 50, ..opts });
+    assert!(small.over_budget > 0 && small.scene.instances.len() < full.scene.instances.len());
+}

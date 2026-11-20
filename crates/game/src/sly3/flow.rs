@@ -146,6 +146,23 @@ pub fn episode_start(first: &[i32; 9], episode: usize, p: &EpisodeProgress) -> O
     Some(EpisodeStart { slot, point: DEFAULT_POINT, task })
 }
 
+// ---- Option sets (conditions.md) --------------------------------------------------------------------------------
+
+/// The option set a world loads with (conditions.md 3, interpretation): the condition of the last table-B entry
+/// whose task is reached, when the world has a set with that ID; else the first set (also with no progress: a fresh
+/// load). "Reached" is read as done (saved `state` 2 or 3): a new game makes many tasks available (state 1) and
+/// still loads every world's first set. Table A is not read (open question 1).
+pub fn choose_option_set(sets: &formats_sly3::world::OptionSets, progress: Option<&save::sly2::Progress>) -> usize {
+    let Some(p) = progress else { return 0 };
+    let reached = |path: &[u16]| p.get(path, None).is_some_and(|v| v.as_i32() >= 2);
+    sets.table_b
+        .iter()
+        .rev()
+        .find(|(path, _, _)| reached(path))
+        .and_then(|&(_, _, condition)| sets.ids.iter().position(|&id| id == condition as i32))
+        .unwrap_or(0)
+}
+
 // ---- Typed-argument helpers -------------------------------------------------------------------------------------
 
 fn arg_i32(a: &Arg) -> Option<i32> {
@@ -358,8 +375,9 @@ impl WipeOrder {
     /// The next (out, in) pair.
     pub fn next(&mut self, rng: &mut Rng) -> (i32, i32) {
         if self.next >= 3 {
-            for i in 1..3 {
-                let j = rng.range_i32(0, i as i32 - 1) as usize;
+            // The dialogue lists' shuffle (dialogue-and-voice.md 1.1): position i swaps with one in 0 to 2 − i.
+            for i in 0..3 {
+                let j = rng.range_i32(0, 2 - i as i32) as usize;
                 self.order.swap(i, j);
             }
             if Some(self.order[0]) == self.last {

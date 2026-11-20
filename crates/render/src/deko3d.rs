@@ -57,6 +57,7 @@ struct RawStats {
     cmd_bytes_used: u32,
     reserved: u32,
     wait_ns: u64,
+    gpu_ns: u64,
 }
 
 /// Command memory of the last frame: what it used (to 16 KiB chunks) and the per-slot budget. `used` above
@@ -256,7 +257,9 @@ impl Backend for Deko3dBackend {
         if rc != 0 {
             return Err(err("frame", rc));
         }
-        Ok(SubmitInfo { api_draw_calls: stats.api_draw_calls, gpu_ns: None, wait_ns: stats.wait_ns })
+        // GPU time from the timestamp reports, a few frames behind (0 until the first slot comes round).
+        let gpu_ns = (stats.gpu_ns > 0).then_some(stats.gpu_ns);
+        Ok(SubmitInfo { api_draw_calls: stats.api_draw_calls, gpu_ns, wait_ns: stats.wait_ns })
     }
 }
 

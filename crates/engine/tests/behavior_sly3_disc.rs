@@ -137,6 +137,8 @@ fn behaviours_attach_with_their_options() {
                 Some(Behavior::Sly2Prop(_)) => "prop",
                 Some(Behavior::Sly2Volume(_)) => "volume",
                 Some(Behavior::Sly2Pickup(_)) => "pickup",
+                Some(Behavior::Sly2Emitter(_)) => "emitter",
+                Some(Behavior::Sly2Explosion(_)) => "explosion",
                 _ => continue,
             };
             *attached.entry(name).or_default() += 1;
@@ -148,8 +150,22 @@ fn behaviours_attach_with_their_options() {
         }
     }
     eprintln!("attached: {attached:?}; guard hit points (option 937 as 254): {hit_points:?}");
-    for k in ["guard", "laser", "pad", "prop", "volume", "pickup"] {
+    for k in ["guard", "laser", "pad", "prop", "volume", "pickup", "emitter", "explosion"] {
         assert!(attached.get(k).copied().unwrap_or(0) > 0, "{k}");
+    }
+    // physics.md: the core three fall at −1,750 × 1.3 = −2,275 (options 35 and 254), Dimitri at −4,000.
+    for i in 0..d.worlds.len() {
+        let w = load(i);
+        for h in w.handles().collect::<Vec<_>>() {
+            let (Some(c), Some(o)) = (w.class(h), w.options(h)) else { continue };
+            let g = engine::gang::sly3::gravity_from_options(o);
+            if (52..=54).contains(&c) && o.has(254) {
+                assert!((g + 2275.0).abs() < 0.5, "class {c}: {g}");
+            }
+            if c == 59 && o.has(35) {
+                assert_eq!(g, -4000.0);
+            }
+        }
     }
     // Option 937 (hit points) reached the guards: 40, 70 and 100 occur.
     assert!(hit_points.contains_key(&40) && hit_points.contains_key(&100), "{hit_points:?}");
@@ -251,6 +267,9 @@ fn combo_definitions_and_interactables() {
     assert!(custom.get(&80).copied().unwrap_or(0) == 6 && custom.get(&94).copied().unwrap_or(0) > 10);
     // The answers: six maps, pace 400, radius 5,000 (one 4,000), a marker per trail point, clue and hint strings.
     assert_eq!(maps.len(), 6);
-    assert!(maps.iter().all(|m| m.pace == 400.0 && (m.radius == 5000.0 || m.radius == 4000.0)));
-    assert!(maps.iter().all(|m| !m.markers.is_empty() && !m.strings.is_empty()));
+    // gadgets.md 6.10: arrival radius 400, view height 5,000 (one 4,000), eight markers and eight clues.
+    assert!(maps.iter().all(|m| m.arrival_radius == 400.0 && (m.view_height == 5000.0 || m.view_height == 4000.0)));
+    // The five hubs' maps have the full trail (the sixth record lies outside a hub).
+    let full = maps.iter().filter(|m| m.markers.len() == 8 && m.strings.len() == 8).count();
+    assert!(full >= 5, "{maps:?}");
 }

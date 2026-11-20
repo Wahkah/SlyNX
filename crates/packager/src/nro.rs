@@ -33,14 +33,18 @@ fn align(v: u64, a: u64) -> u64 {
     v.div_ceil(a) * a
 }
 
+/// `n` bytes at `o`, or "truncated" (also when `o + n` overflows).
+fn bytes_at(b: &[u8], o: usize, n: usize) -> io::Result<&[u8]> {
+    o.checked_add(n).and_then(|e| b.get(o..e)).ok_or_else(|| bad("truncated"))
+}
 fn u16_at(b: &[u8], o: usize) -> io::Result<u16> {
-    Ok(u16::from_le_bytes(b.get(o..o + 2).ok_or_else(|| bad("truncated"))?.try_into().unwrap()))
+    Ok(u16::from_le_bytes(bytes_at(b, o, 2)?.try_into().unwrap()))
 }
 fn u32_at(b: &[u8], o: usize) -> io::Result<u32> {
-    Ok(u32::from_le_bytes(b.get(o..o + 4).ok_or_else(|| bad("truncated"))?.try_into().unwrap()))
+    Ok(u32::from_le_bytes(bytes_at(b, o, 4)?.try_into().unwrap()))
 }
 fn u64_at(b: &[u8], o: usize) -> io::Result<u64> {
-    Ok(u64::from_le_bytes(b.get(o..o + 8).ok_or_else(|| bad("truncated"))?.try_into().unwrap()))
+    Ok(u64::from_le_bytes(bytes_at(b, o, 8)?.try_into().unwrap()))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -79,7 +83,7 @@ impl NroImage {
         if elf.get(0..4) != Some(b"\x7fELF") {
             return Err(bad("not an ELF file"));
         }
-        if elf[4] != 2 || elf[5] != 1 {
+        if elf.get(4..6) != Some(&[2, 1]) {
             return Err(bad("not a 64-bit little-endian ELF"));
         }
         if u16_at(elf, 0x12)? != 183 {
@@ -88,7 +92,7 @@ impl NroImage {
         let (phoff, phentsize, phnum) = (u64_at(elf, 0x20)? as usize, u16_at(elf, 0x36)? as usize, u16_at(elf, 0x38)?);
         let mut loads = Vec::new();
         for i in 0..phnum as usize {
-            let o = phoff + i * phentsize;
+            let o = i.checked_mul(phentsize).and_then(|x| x.checked_add(phoff)).ok_or_else(|| bad("truncated"))?;
             let p = Phdr {
                 kind: u32_at(elf, o)?,
                 flags: u32_at(elf, o + 4)?,
@@ -132,7 +136,9 @@ impl NroImage {
             let src = &elf[p.offset as usize..(p.offset + p.filesz) as usize];
             img[p.vaddr as usize..(p.vaddr + p.filesz) as usize].copy_from_slice(src);
         }
-        let bss = align(data.vaddr + data.memsz.max(data.filesz), PAGE) - size;
+        let bss_end = data.vaddr.checked_add(data.memsz.max(data.filesz)).filter(|&e| e <= u32::MAX as u64);
+        let Some(bss_end) = bss_end else { return Err(bad("data segment's memory size runs past 4 GiB")) };
+        let bss = align(bss_end, PAGE) - size;
         let seg = |p: Phdr| (p.vaddr as u32, align(p.filesz, PAGE) as u32);
         let header = NroHeader {
             size: size as u32,
@@ -212,7 +218,7 @@ pub fn parse_header(nro: &[u8]) -> io::Result<NroHeader> {
         return Err(bad("segments do not add up to the image size"));
     }
     let mut build_id = [0u8; 0x20];
-    build_id.copy_from_slice(&nro[0x40..0x60]);
+    build_id.copy_from_slice(bytes_at(nro, 0x40, 0x20)?);
     let mod0_offset = u32_at(nro, 4)?;
     Ok(NroHeader { size, segments, bss: u32_at(nro, 0x38)?, build_id, mod0_offset })
 }
@@ -223,11 +229,12 @@ fn build_id(elf: &[u8]) -> Option<[u8; 0x20]> {
     let shentsize = u16_at(elf, 0x3A).ok()? as usize;
     let shnum = u16_at(elf, 0x3C).ok()? as usize;
     for i in 0..shnum {
-        let o = shoff + i * shentsize;
-        if u32_at(elf, o + 4).ok()? != SHT_NOTE {
+        let o = i.checked_mul(shentsize)?.checked_add(shoff)?;
+        let sh = bytes_at(elf, o, 0x28).ok()?;
+        if u32_at(sh, 4).ok()? != SHT_NOTE {
             continue;
         }
-        let (off, size) = (u64_at(elf, o + 0x18).ok()? as usize, u64_at(elf, o + 0x20).ok()? as usize);
+        let (off, size) = (u64_at(sh, 0x18).ok()? as usize, u64_at(sh, 0x20).ok()? as usize);
         let notes = elf.get(off..off.checked_add(size)?)?;
         let mut p = 0;
         while p + 12 <= notes.len() {
@@ -235,10 +242,10 @@ fn build_id(elf: &[u8]) -> Option<[u8; 0x20]> {
             let descsz = u32_at(notes, p + 4).ok()? as usize;
             let kind = u32_at(notes, p + 8).ok()?;
             let name_at = p + 12;
-            let desc_at = name_at + namesz.div_ceil(4) * 4;
-            let next = desc_at + descsz.div_ceil(4) * 4;
-            if kind == NT_GNU_BUILD_ID && notes.get(name_at..name_at + namesz)? == b"GNU\0" {
-                let desc = notes.get(desc_at..desc_at + descsz)?;
+            let desc_at = name_at.checked_add(namesz.div_ceil(4).checked_mul(4)?)?;
+            let next = desc_at.checked_add(descsz.div_ceil(4).checked_mul(4)?)?;
+            if kind == NT_GNU_BUILD_ID && bytes_at(notes, name_at, namesz).ok()? == b"GNU\0" {
+                let desc = bytes_at(notes, desc_at, descsz).ok()?;
                 let mut id = [0u8; 0x20];
                 let n = desc.len().min(0x20);
                 id[..n].copy_from_slice(&desc[..n]);
@@ -268,7 +275,7 @@ impl AssetLayout {
 
     /// Bytes from the asset header to the end of the file.
     pub fn len(&self) -> u64 {
-        self.romfs.0 + self.romfs.1
+        self.romfs.0.saturating_add(self.romfs.1)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -292,7 +299,13 @@ impl AssetLayout {
         if u32_at(h, 4)? != 0 {
             return Err(bad("unknown asset header version"));
         }
-        let part = |i: usize| -> io::Result<(u64, u64)> { Ok((u64_at(h, 8 + i * 16)?, u64_at(h, 16 + i * 16)?)) };
+        let part = |i: usize| -> io::Result<(u64, u64)> {
+            let p = (u64_at(h, 8 + i * 16)?, u64_at(h, 16 + i * 16)?);
+            if p.0.checked_add(p.1).is_none() {
+                return Err(bad("asset part runs past the largest file size"));
+            }
+            Ok(p)
+        };
         Ok(AssetLayout { icon: part(0)?, nacp: part(1)?, romfs: part(2)? })
     }
 }
@@ -412,6 +425,35 @@ pub(crate) mod tests {
         elf[0x40 + 0x38 + 4] = 6; // rodata writable
         assert!(NroImage::from_elf(&elf).is_err());
         assert!(NroImage::from_elf(b"not an elf").is_err());
+    }
+
+    #[test]
+    fn damaged_programs_are_refused_without_panicking() {
+        // Every truncation of a good ELF, and of its image as an .nro.
+        let elf = synthetic_elf();
+        let img = NroImage::from_elf(&elf).unwrap().bytes;
+        for n in (0..elf.len()).step_by(97).chain([4, 5, 6]) {
+            let _ = NroImage::from_elf(&elf[..n]);
+        }
+        for n in (0..img.len()).step_by(61).chain([0x14, 0x20, 0x41]) {
+            let _ = NroImage::from_nro(&img[..n]);
+        }
+        // A program-header offset and count that overflow, a data memory size past 4 GiB, a section-header
+        // offset that overflows: refused (or, for the build ID, ignored).
+        let mut e = synthetic_elf();
+        e[0x20..0x28].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(NroImage::from_elf(&e).is_err());
+        let mut e = synthetic_elf();
+        let data_memsz = 0x40 + 2 * 0x38 + 0x28;
+        e[data_memsz..data_memsz + 8].copy_from_slice(&(u64::MAX - 0x100).to_le_bytes());
+        assert!(NroImage::from_elf(&e).is_err());
+        let mut e = synthetic_elf();
+        e[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(NroImage::from_elf(&e).unwrap().header().unwrap().build_id, [0; 0x20]);
+        // An asset header whose part overflows.
+        let mut h = AssetLayout::new(1, 2, 3).header_bytes();
+        h[16 + 2 * 16..24 + 2 * 16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(AssetLayout::parse(&h).is_err());
     }
 
     #[test]

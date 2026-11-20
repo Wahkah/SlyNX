@@ -41,8 +41,20 @@ sources:
       SafeHouse @ c70803ce, Sly2-Release/target.cpp (the actors' target choice and its score), sly.cpp (dodge side and
       motion, juggle-strike and charged-strike clips), gang.cpp (the slam's clip choice), jump.cpp (the glide's turn)
     used_for: the rules of sections 5.1, 5.3 and 5.4; marked [R]
+  - kind: disc
+    what: >-
+      2026-11-20, nightclub hub (row 2): the bomb package `bentley_mine` (object 3931, class 101; its meshes, mesh
+      group IDs, load-hidden flags, shaders and transforms; its state machine 532 (class 111) with states 5313, 5315,
+      5317, 5319, 5320, nodes and edges; its six script modules)
+    used_for: the blast-volume display rules of section 7.1.1 [D]
+  - kind: reference-project
+    what: >-
+      SafeHouse @ c70803ce, Sly2-Release/launcher.cpp (the show/hide-by-group-ID methods, script IDs 110 and 111),
+      alo.cpp and glob.cpp (the load-hidden flag and run-time group visibility), render.cpp, sm.cpp (state machine
+      record layout)
+    used_for: what script IDs 110 and 111 do and how a load-hidden group is drawn (7.1.1); marked [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-20
 ---
 
 # Sly 2 gadgets and special moves
@@ -348,6 +360,72 @@ what the Snooze, Reduction and Rage codes do to guards belongs to guards.md [R].
     1000. Bodies that cannot move are not pushed.
 - Finally, a fixed noise is made at the blast that guards hear (guards.md).
 
+### 7.1.1 Blast-volume display (2026-11-20 findings)
+
+The bomb package `bentley_mine` (object 3931, class 101) holds four translucent spheres, one per bomb kind, that
+show the blast reach on the placed bomb. Each sphere shares a **mesh group ID** with four small light cards on the
+bomb body, so the five meshes show and hide together [D]:
+
+| Group ID | Bomb kind (option 1104) | Sphere | Sphere shaders (ID: colour RGBA) | Light cards (transforms) |
+|---:|---|---|---|---|
+| 3968 | 5 or 7 (Trigger Bomb) | 64 vertices, radius 325 (horizontal extent ±281) | 4965: (255, 0, 2, 33); 4964: (255, 0, 2, 76) — red | 15–18 |
+| 3965 | 9 (Snooze Bomb) | 64 vertices, radius 325 | 4967, 4966: (4, 220, 1, 76) — green | 11–14 |
+| 3962 | 13 (Reduction Bomb) | 42 vertices, radius 620 (horizontal ±537) | 4967, 4966 — green | 7–10 |
+| 3947 | 37 (Rage Bomb) | 42 vertices, radius 620 | 4968: (179, 0, 220, 76); 4969: (143, 0, 207, 33) — purple | 3–6 |
+
+- All four spheres sit on bomb transform 2 (the body, 25 above the bomb origin through transform 1), are rigid,
+  use render pass 11 and shader kind 3 with flag 1 [D]. Each sphere is a low-polygon ball whose poles are at ±r on
+  the vertical axis [D]. The sphere radii (325, 620) are just above the blast radii of section 7.1 (300, 600) [D].
+- The light cards are 4-vertex cards (20 × 20) with shader 4961 (kind 0, flag 2, white, pass 10) on transforms
+  3–18, three around the body at radius about 12.9 (z −7.3) and one on top (z 15) per group [D].
+- **All 20 meshes carry the load-hidden flag** (the last byte of the mesh header = 1) [D]. A load-hidden mesh is
+  not drawn until a script shows its group by ID; showing or hiding a group sets every mesh with that ID [R]. So
+  a bomb shows nothing extra until its state machine shows its group; only **one** group is ever shown on a bomb,
+  the one for its kind [D]. The red/green pair at 325 and the purple/green pair at 620 are therefore never drawn
+  together.
+
+**Which group a bomb uses.** The package's first script module defines a lookup from bomb kind to group ID (the
+table above) and registers five methods on the bomb (script IDs 1238 to 1242) [D]:
+
+| Method | Effect [D] |
+|---:|---|
+| 1238 | show the kind's group (show-by-ID, script ID 110) |
+| 1239 | hide the kind's group (hide-by-ID, script ID 111) |
+| 1240 | detonate: start the kind's effect object (3995, 3978, 3977 or 3970; script method 244), hide the kind's group, set filter and state code, call the blast with 300 or 600 (section 7.1); the Trigger Bomb also plays sound 149 and calls method 233 on a global object with 0 |
+| 1241 | for kind 9 start object 3935, for kind 13 start object 3943 (both class 6 placements nested in the bomb; script method 39); other kinds: nothing |
+| 1242 | stop that same object (script method 40) |
+
+The script IDs 110 and 111 are the general "show / hide the mesh groups with this ID" methods (option-table entries
+44 and 45) [R].
+
+**When.** The bomb's state machine (object 532, class 111, script module 1) has nine states, 92, 106, 108, 109,
+110, 111, 112, 113 and 5312, and five state objects that run script modules on its edges [D]:
+
+| Edge | State object (module) | What it does |
+|---|---|---|
+| 92 → 109 | 5313 (module 2) | hide the group; start the kind's object (method 1241) |
+| 109 → 110 | — | |
+| 110 → 111 | 5315 (module 3) | **show the group** (method 1238) |
+| 111 → 106 | 5317 (module 4) | **blink**: a timed list of 11 events over 1.8667 s that alternately hide and show the group (see below) |
+| 106 → 112, 111 → 112 | — | |
+| 112 → 108 | 5319 (no module) | |
+| 108 → 5312 | 5320 (module 5) | detonate (method 1240; the group is hidden); at its end stop the kind's object (method 1242) |
+| 92, 109, 110, 111, 112, 106 → 113 | — | |
+
+The machine's message module (module 1) does three things on entering a state [D]:
+- entering 110 while the bomb's script flag 501 is true asks for state 111 (armed: group shown);
+- entering 111 while the bomb's script flag 961 is true asks for state 106 (the blink);
+- entering 113 (cancelled) hides the group, stops the kind's object (1242) and calls method 40 on the bomb.
+
+What the flags 501 and 961 are (landed, triggered) is not resolved [I]. The blink's events toggle between two IDs:
+hide at times 20, 50, 68, 84, 98 and 108, show at 30, 59, 75, 90 and 103 [D]; read as 1/60 s, that is hide at
+0.33, 0.83, 1.13, 1.40, 1.63, 1.80 s and show at 0.50, 0.98, 1.25, 1.50, 1.72 s, a quickening flash before the
+blast [I]. One more record after the list names the "show" ID once more; whether it runs at the end of the
+state is not established [I].
+
+Rule for a renderer: draw a bomb's sphere and lights only when its kind's group has been shown and not hidden
+since; never draw the other three groups [R].
+
 ### 7.2 Health Extractor (item 11, class 102)
 
 When started, the extractor looks for the nearest guard within 400 of its source point that can be captured, and
@@ -391,6 +469,7 @@ returns to state 2.
 
 - What the Snooze, Reduction and Rage bombs' state codes (−60, −5) do to guards (guards.md). The radii are resolved
   (section 7.1).
+- What the bomb's script flags 501 and 961 are (section 7.1.1), and the time unit of the blink events.
 - Tornado Strike (32): not traced.
 - What the internal records 4, 5 and 6 are for.
 - Whether option 1305 = 30 is the starting power, and what options 1304 and 1307 mean.

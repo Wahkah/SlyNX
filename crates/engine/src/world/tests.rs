@@ -529,3 +529,17 @@ fn owned_records_are_not_objects() {
     let w = f.world(WorldInfo::default());
     assert_eq!(w.len(), 1);
 }
+
+#[test]
+fn a_proxy_chain_that_loops_fails_to_load() {
+    // Proxy 1's source is itself a proxy (class 83) whose only entry back-references that source: each copy places
+    // another copy of itself.
+    let mut f = Fixture::new();
+    let p = f.proxy(None, 1, at(0.0, 0.0, 0.0));
+    let s = f.source(p, 83, 2, at(0.0, 0.0, 0.0));
+    f.proxies.push(formats::stream::Proxy { record: s, entries: alloc::vec::Vec::new(), overrides: 0 });
+    f.backref(s, 0);
+    f.end_proxy(p, &[]);
+    let r = World::from_parts(f.level(), WorldInfo::default());
+    assert!(matches!(r, Err(crate::world::LoadError::TooDeep)), "{:?}", r.err());
+}

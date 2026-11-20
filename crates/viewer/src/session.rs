@@ -13,7 +13,7 @@ use render::{Backend, FrameStats, InstanceId, RenderError, Renderer};
 use crate::anim::PlayerAnim;
 use crate::camera::{Controls, FreeCamera, Spawn};
 use crate::hud::{HudData, HudView, UI_QUADS};
-use crate::level::{LevelStats, upload, upload_with_ui};
+use crate::level::{LevelStats, PreparedLevel, upload, upload_with_ui};
 use crate::live::LevelMotion;
 use crate::loader::{GameDisc, Host, Loader};
 
@@ -172,31 +172,7 @@ impl<B: Backend, R: ReadAt + Send + 'static> Session<B, R> {
         let Some((index, result)) = loader.poll(host) else { return Ok(false) };
         let mut changed = false;
         match result {
-            Ok(mut level) => {
-                let sheet = level.hud.as_ref().and_then(HudData::sheet);
-                let quads = if sheet.is_some() { UI_QUADS } else { 0 };
-                let mut up = upload_with_ui(&mut self.renderer, Some(&level), OVERLAY_CHARS, sheet, quads)?;
-                self.hud = match (level.hud.take(), up.ui.take()) {
-                    (Some(data), Some(layer)) => Some((HudView::new(data), layer)),
-                    _ => None,
-                };
-                self.motion = LevelMotion::new(&level, &up);
-                self.clear = level.look.clear;
-                self.overlay = Some(up.overlay);
-                self.instances = up.instances;
-                self.player = level.player.take();
-                self.camera.place(level.spawn);
-                self.current = Some(Current {
-                    index,
-                    name: level.name.clone(),
-                    stats: level.stats,
-                    spawn: level.spawn,
-                    pools: up.pools,
-                    materials: up.materials.len() as u32,
-                });
-                self.message = None;
-                changed = true;
-            }
+            Ok(level) => changed = self.install(index, level)?,
             Err(e) => self.message = Some(format!("world {index} failed to load: {e}")),
         }
         if let Some(next) = self.queued.take()
@@ -205,6 +181,49 @@ impl<B: Backend, R: ReadAt + Send + 'static> Session<B, R> {
             self.request_world(host, next);
         }
         Ok(changed)
+    }
+
+    /// Puts a prepared world on the renderer. If the upload fails, the renderer is left with an empty level (the
+    /// overlay only) and everything that pointed into the old one is dropped, so the next frame draws the message
+    /// instead of using stale handles; returns false then.
+    pub fn install(&mut self, index: usize, mut level: PreparedLevel) -> Result<bool, RenderError> {
+        let sheet = level.hud.as_ref().and_then(HudData::sheet);
+        let quads = if sheet.is_some() { UI_QUADS } else { 0 };
+        let mut up = match upload_with_ui(&mut self.renderer, Some(&level), OVERLAY_CHARS, sheet, quads) {
+            Ok(up) => up,
+            Err(e) => {
+                self.hud = None;
+                self.motion = LevelMotion::default();
+                self.instances = Vec::new();
+                self.player = None;
+                self.current = None;
+                self.clear = CLEAR;
+                // A fresh empty level; if even that fails, the error is real.
+                self.overlay = Some(upload(&mut self.renderer, None, OVERLAY_CHARS)?.overlay);
+                self.message = Some(format!("world {index} failed to upload: {e}"));
+                return Ok(false);
+            }
+        };
+        self.hud = match (level.hud.take(), up.ui.take()) {
+            (Some(data), Some(layer)) => Some((HudView::new(data), layer)),
+            _ => None,
+        };
+        self.motion = LevelMotion::new(&level, &up);
+        self.clear = level.look.clear;
+        self.overlay = Some(up.overlay);
+        self.instances = up.instances;
+        self.player = level.player.take();
+        self.camera.place(level.spawn);
+        self.current = Some(Current {
+            index,
+            name: level.name.clone(),
+            stats: level.stats,
+            spawn: level.spawn,
+            pools: up.pools,
+            materials: up.materials.len() as u32,
+        });
+        self.message = None;
+        Ok(true)
     }
 
     /// Loads world `index` and waits for it (harness and start-up).
@@ -363,5 +382,45 @@ mod tests {
         let lines = s.overlay_lines();
         assert!(lines.len() >= 2 && lines.iter().all(|l| l.len() <= 60), "{lines:?}");
         assert_eq!(lines.join(" ").replace("  ", " "), long);
+    }
+
+    #[test]
+    fn a_failed_upload_leaves_a_working_empty_level() {
+        let mut s: NoDisc = Session::new(NullBackend::new(640, 448), Err("no disc".into())).unwrap();
+        // A level whose draw names a mesh it does not have.
+        let mut p = stage::prep::Prepared::default();
+        p.geometry.textures.push(render::TextureData::rgba8(1, 1, alloc::vec![255; 4]).unwrap());
+        let look = crate::level::DrawLook {
+            pass: render::Pass::Opaque,
+            order: 5,
+            blend: render::BlendMode::None,
+            sort: render::SortMode::Grouped,
+            two_step: false,
+            no_darkening: false,
+        };
+        p.geometry.materials.push(crate::level::MaterialDesc {
+            texture: 0,
+            palettes: None,
+            look,
+            tint: [255; 4],
+            cutoff: None,
+            two_colour: false,
+        });
+        p.geometry.draws.push(crate::level::DrawItem {
+            mesh: 7,
+            material: 0,
+            transform: render::math::Mat4::IDENTITY,
+            weights: None,
+            sort_key: None,
+            fog: 1.0,
+        });
+        let level = crate::sly2::wrap(0, "broken", p);
+        assert!(!s.install(0, level).unwrap());
+        assert!(s.message.as_deref().is_some_and(|m| m.contains("failed to upload")));
+        assert!(s.current().is_none());
+        // The next frames update and draw (the message over an empty level).
+        assert!(s.update(&mut Blocking, &Controls::default(), 1.0 / 60.0).unwrap());
+        s.render(16_666_667).unwrap();
+        s.render(16_666_667).unwrap();
     }
 }

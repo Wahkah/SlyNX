@@ -173,6 +173,7 @@ pub(crate) fn run(
 ) -> Result<Value, ScriptError> {
     let c = Call { op, args };
     if HOST_OPERATIONS.contains(&op) {
+        crate::sly2::charge_host_args(it, args)?;
         return match host.game_operation(op, args) {
             Value::Error(e) => Err(e),
             v => Ok(v),
@@ -226,6 +227,18 @@ pub(crate) fn run(
     })
 }
 
+/// A list's elements, refusing one longer than the interpreter's list limit (a list that loops back on itself
+/// would otherwise be walked to `MAX_LIST_ITEMS` on every call), and charging them to the step budget.
+fn bounded_items(it: &mut Interpreter, v: &Value) -> Result<Vec<Value>, ScriptError> {
+    let max = it.limits.max_list_len;
+    let items: Vec<Value> = v.iter().take(max + 1).collect();
+    if items.len() > max {
+        return Err(ScriptError::TooLarge);
+    }
+    it.charge(items.len())?;
+    Ok(items)
+}
+
 /// Working assumption for operations 90 and 91: the fraction of the way to the goal covered in one step, the rate
 /// times the time step, limited to 0..1.
 fn step(rate: f32, dt: f32) -> f32 {
@@ -243,7 +256,7 @@ fn sort(it: &mut Interpreter, host: &mut dyn ScriptHost, c: &Call<'_>) -> Result
         return Err(c.bad(1));
     }
     let f = c.arg(1).clone();
-    let items = c.arg(0).to_vec();
+    let items = bounded_items(it, c.arg(0))?;
     it.charge(items.len().saturating_mul(items.len()))?;
     let mut out: Vec<Value> = Vec::with_capacity(items.len());
     for e in items {
@@ -268,7 +281,7 @@ fn eval_value(it: &mut Interpreter, host: &mut dyn ScriptHost, v: &Value, depth:
     Ok(match v {
         &Value::Symbol(s) => it.global_lookup(s).ok_or(ScriptError::Unbound(s))?,
         Value::List(_) => {
-            let items = v.to_vec();
+            let items = bounded_items(it, v)?;
             if let Some(Value::Keyword(k)) = items.first() {
                 return match (*k, items.get(1)) {
                     (kind::QUOTE, Some(d)) => Ok(d.clone()),
@@ -289,6 +302,27 @@ fn eval_value(it: &mut Interpreter, host: &mut dyn ScriptHost, v: &Value, depth:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eval_and_sort_refuse_a_looping_list() {
+        use crate::{NullHost, Program};
+        let mut it = Interpreter::new(Program::for_game(crate::Game::Sly3), None);
+        let mut h = NullHost;
+        // (1 2 1 2 ...): the rest of the second cell is the first cell.
+        let l = Value::list([Value::Int(1), Value::Int(2)]);
+        if let Value::List(c) = &l
+            && let Value::List(second) = &*c.cdr.borrow()
+        {
+            *second.cdr.borrow_mut() = l.clone();
+        }
+        let r = it.call(&mut h, Value::Builtin(47), alloc::vec![l.clone()]);
+        assert!(matches!(r, Value::Error(ScriptError::TooLarge)), "{r:?}");
+        let r = it.call(&mut h, Value::Builtin(46), alloc::vec![l, Value::Builtin(8)]);
+        assert!(matches!(r, Value::Error(ScriptError::TooLarge)), "{r:?}");
+        // An ordinary list still evaluates: (op0 1 2) is 3.
+        let call = Value::list([Value::Builtin(0), Value::Int(1), Value::Int(2)]);
+        assert!(matches!(it.call(&mut h, Value::Builtin(47), alloc::vec![call]), Value::Int(3)));
+    }
 
     #[test]
     fn numbering() {

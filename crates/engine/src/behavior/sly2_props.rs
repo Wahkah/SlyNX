@@ -95,6 +95,13 @@ pub enum Item {
     Task(i32, i32),
 }
 
+impl Item {
+    /// Whether the item sets the prop's look (objects added or removed), the only kind applied at load.
+    pub fn sets_look(&self) -> bool {
+        matches!(self, Item::Add(_) | Item::Remove(_))
+    }
+}
+
 /// One event of a prop.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PropEvent {
@@ -150,6 +157,19 @@ fn pair_of(v: &OptionValue) -> (i32, i32) {
         }
         _ => (v.as_i32().unwrap_or(0), 0),
     }
+}
+
+/// A trigger volume's task-state requests on enter (option 440, up to 4): stored values and, as on the disc, the
+/// loader's action entries (typed argument lists).
+pub fn volume_requests(world: &World, h: Handle) -> Vec<(i32, i32)> {
+    let mut out: Vec<(i32, i32)> = world.options(h).map(|o| o.all(440).map(pair_of).collect()).unwrap_or_default();
+    if let (Some(l), Some(slot)) = (world.sly2.as_deref(), world.slot(h)) {
+        out.extend(
+            l.actions.iter().filter(|a| a.0 == slot && a.1 == 440).map(|a| pair_of(&OptionValue::Args(a.2.clone()))),
+        );
+    }
+    out.truncate(4);
+    out
 }
 
 impl Prop {
@@ -288,7 +308,9 @@ impl ClassBehavior for Prop {
     }
 
     fn post_load(&mut self, cx: &mut Cx<'_>) {
-        let setup = self.setup.clone();
+        // Only the intact look applies at once (interactables.md 3.1): explosions, drops, events and task requests
+        // read before any event are not set off at load (they blew up hundreds of explosion groups on frame 0).
+        let setup: Vec<Item> = self.setup.iter().copied().filter(Item::sets_look).collect();
         Self::run(cx, &setup, true, false);
     }
 
@@ -325,6 +347,9 @@ pub struct TriggerVolume {
     pub hold: f32,
     /// Members inside (tracking).
     pub members: Vec<Handle>,
+    /// The played character counts as inside next frame (a route standing in for the player walking in; the smoke
+    /// tool's job route).
+    pub visit: bool,
 }
 
 impl TriggerVolume {
@@ -349,11 +374,17 @@ impl ClassBehavior for TriggerVolume {
 
     fn update(&mut self, cx: &mut Cx<'_>) {
         let Some(shape) = volume_box(cx.world, cx.me) else { return };
-        let inside: Vec<Handle> = characters(cx.world)
+        let mut inside: Vec<Handle> = characters(cx.world)
             .into_iter()
             .filter(|&(h, c)| in_volume(&shape, c) && Self::counts(cx.world, cx.me, h))
             .map(|(h, _)| h)
             .collect();
+        if core::mem::take(&mut self.visit)
+            && let Some(p) = cx.world.player
+            && !inside.contains(&p)
+        {
+            inside.push(p);
+        }
         let o = cx.world.options(cx.me);
         let hold_time = o.and_then(|o| o.f32(434)).unwrap_or(1.0);
         let tracking = o.is_some_and(|o| o.bool_or(443, false));
@@ -379,8 +410,7 @@ impl ClassBehavior for TriggerVolume {
                         .sequence_requests
                         .push(super::sly2_commands::SequenceRequest::Start { sequence: seq, starter });
                 }
-                let requests: Vec<(i32, i32)> =
-                    cx.world.options(cx.me).map(|o| o.all(440).map(pair_of).collect()).unwrap_or_default();
+                let requests: Vec<(i32, i32)> = volume_requests(cx.world, cx.me);
                 cx.world.shared.task_requests.extend(requests);
                 self.state = 2;
                 self.hold = hold_time;
@@ -399,6 +429,20 @@ impl ClassBehavior for TriggerVolume {
                 self.state = 0;
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Item;
+
+    #[test]
+    fn only_the_look_applies_at_load() {
+        assert!(Item::Add(5).sets_look());
+        assert!(Item::Remove(-1).sets_look());
+        for i in [Item::Explode(7), Item::Source(7), Item::Drop(-1), Item::Event(3), Item::Task(1, 2)] {
+            assert!(!i.sets_look(), "{i:?}");
         }
     }
 }

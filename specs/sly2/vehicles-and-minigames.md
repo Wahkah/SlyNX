@@ -4,6 +4,9 @@ title: Sly 2 driven machines, turrets, hacking, dance, the combat car and bosses
 side: reference
 status: draft
 sources:
+  - kind: disc
+    what: row 14 (p_prison_macro record condition lists, 2026-11-20)
+    used_for: section 10.3, where sequences 2410/2411 come from [D]
   - kind: executable
     what: SCUS_973.16 (SHA-256 a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73), option-table entries 47, 362, 364, 365 at 0x2AC880 + 40 × ID and their routines; the knock-back routine at 0x1A16C8 (hit-kind tests at 0x1A170C and 0x1A1714) and its floats at 0x2BFACC to 0x2BFAD4 (2026-11-18)
     used_for: what option 364 stores; contact kind 0x8000
@@ -35,8 +38,17 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release (guardstart.cpp boss options 231, 254-258, 1340, 1350; aihit.cpp hit handling; asegevent.cpp events 15/16)
     used_for: what the boss options do and how a fight is staged [R]
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73), option table at 0x2AC880 (entries 1342-1356, 1363, 1396, 372, 699-701) and the class map at 0x279AD0 (script ID to stream option per class) (2026-11-19)
+    used_for: dance option layout, the dance command options, hack script IDs (section 10)
+  - kind: disc
+    what: SCUS-97316, 2026-11-19 re-read of the option values of rows 8-11 (class 114 sequences, class 121 director, class 68 dancers) and the scripts of every job macro that handles task events 16, 19, 52-54 and 57 (palace, blimp, sawmill, castle, prison)
+    used_for: dance windows on the disc, how dance and hack results reach the job, how the hack ship is brought in (section 10)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release dance.cpp, scpt.cpp (dance command builders), hack.cpp, damage.cpp, projectile.cpp, launcher.cpp, turret.cpp, vehiclecontrol.cpp (2026-11-19)
+    used_for: task events raised by the dance and the hack, projectile speeds and radii [R] (section 10)
 reviewed_by: pending
-date: 2026-11-17
+date: 2026-11-20
 ---
 
 # Sly 2 driven machines, turrets, hacking, dance, the combat car and bosses
@@ -389,3 +401,84 @@ of the stage tasks [R] [I].
 6. The dance director's options (class 121) on the disc; the window and score values above are the reference's
    defaults.
 7. Everything [R] needs checking in play.
+
+## 10. Minigame questions answered (2026-11-19 findings)
+
+### 10.1 Dance director options and commands
+
+- **Options 1344 to 1346 are not the three dance commands** [D]. On the director (class 121) they are: 1344 the
+  early window (seconds), 1345 the late window (seconds), 1346 a crowd entry (an object and its first state). The
+  rest of the director's options: 1347 score range, 1348 how many scores make the mean (8), 1349 smoothing,
+  1350 to 1353 the early, wrong-button, pressed-twice and missed scores, 1354 the director state (script ID 342),
+  1355 the mean (read only, script ID 1169), 1356 clear the scores (script ID 1170) [D for the layout, R for the
+  meanings]. On the dancer (class 68): 1342 its idle animation, 1343 its move entries (button, good animation,
+  flags, bad animation, missed animation) [D layout, R meaning].
+- **The three commands are options of the sequence (class 114)** [D]: 699 set the director state (one value),
+  700 add a beat (music time, button, move, dancer; dancer −1 means the sequence's current subject), 701 set a
+  dancer's default move (animation object, dancer). Their script IDs are 694, 695 and 696 [D].
+- **On the disc** (rows 8 to 11) [D]: 68 uses of 699, 190 of 700 (for example music time 8.02 s, button 16, move −1,
+  dancer −1) and 62 of 701. Row 11's director sets 1344 = **0.2** and 1345 = **0.2**, so the window in play is 0.2 s
+  each side, not the 0.4 s default given in section 5. 1346 is set 93 times (each with first state 1575). The dancer
+  moves use buttons 16, 32, 128 and 64.
+- **How a result is reported**: there is no script event 5 carrying the mean [R]. The director raises task event
+  **52** when a beat's music time passes, **53** on each press and **54** on each score [R]. The jobs read the mean
+  themselves: jobs 2055 and 2116 (the palace macro) on task event 54 count a failure (script 1067, which is 1238)
+  when the mean is below **−0.75** [D]. Sequences 1947 and 1960, on their event 4 with value 106678, play a sound
+  manager cue when the mean is above 0.7 [D for the test, I for its purpose].
+
+### 10.2 Hack loss and docking
+
+- **Ship destroyed**: raises task event **16**, the same event a defeated gang member raises [R]. A hit that leaves
+  the ship alive raises 15; an enemy killed 24; a dock opened (script 235, stream option 1396) 26; docking
+  abandoned 27; docking done **57**; a swarm entry cleared 58 [R].
+- **What the jobs do with 16** [D]: in the blimp, sawmill, castle and prison macros the job's event handler checks
+  whether the object is the hack ship 17344. If so it resets every hack object (script 454; job properties 1289
+  and 1290), puts the focus back (class-136 script option 478, stream option 372: first to 17345, then the saved
+  focus) and restarts the hack's sequence (2408, or 2555). If not, it restarts the job at its checkpoint (script
+  1068, which is 1239).
+- **Task event 57 is queued, but no script on the disc handles it** [D]: the hack ends through the dock's own
+  sequence and task state, not through a job handler.
+- The hack ship 17344 sets option 1363 (maximum hit points) to **100**, not the default 10 of section 4.1 [D].
+
+### 10.3 How the hack ship is brought in
+
+- Each hack macro's load handler adds two job properties [D]: 1285 (put the hack focus back on 17345) and 1286
+  (focus object, hack area).
+- In the prison hub [D], each hack task (2414, 2416, 2418, 2420, 2422, 2424) has a handler for event **19** (the
+  task becomes current) that calls its job's 1286 with a (focus, area) pair (17350 and 17351, 17352 and 17353,
+  17354 and 17355, 60231 and 60232, 77162 and 77163, 77164 and 77165) and starts sequence 2410 with the current
+  character. 17351 is a class-48 object in package `p_prison_ext_hack`; 2410 is a class-114 sequence.
+- Sequence 2411's handlers [D]: event 5 calls the current job's 1285 and the sound manager's 277 (1, 1); event 6
+  maps the current task (2414 → 1913, 2416 → 1914, 2418 → 1915, 2420 → 1916, 2422 → 1917), sets that value as
+  option 1600 of object 2361, calls its 235 (open the dock), then asks the current task for state 2. Sequence 2557
+  does the same without the dock step.
+- The station Bentley uses is an interaction object (class 35; for example 28060 for `t4_hack_station1`) [R]; the
+  keypad package's event 4 sets 28060's option 779 to −1 [D].
+
+- **Where 2410 and 2411 are (added 2026-11-20)** [D]: both are class-114 records of the kept package
+  `p_prison_macro` in row 14's world file, each with a level condition listing row 14 (2408 too; 2409 lists rows 14
+  and 15). They load with the world when the current level-table row is 14; no switch or placement brings them in.
+  Details and the likely cause of missing objects in missions.md 4.1.
+
+### 10.4 Projectile numbers
+
+- **No biplane in Sly 2** [D]: no biplane class or package among the 121,153 object bodies walked; the biplane
+  belongs to Sly 1's minigames.
+- **Turret** [R]: the turret fires an object from its pool through its launcher (class 112, option 1003); the shot's
+  speed is the launcher's speed setting (script ID 509), so it is per launcher, not a turret constant. The missile
+  family starts at 800 when no speed is given; a homing missile's speed limit defaults to 1500. Neither pool nor
+  launcher is set on the disc for `turret_player` (section 3.1), so the turret job's scripts supply them.
+- **Combat car** [R]: a shot's speed is solved from the target's distance and the shot's gravity, then clamped to
+  the weapon attachment's speed limits; there is no single shot speed.
+- **Blast and damage** [R]: a projectile's blast hits every object whose collision tree meets a sphere of radius
+  200 (a player's own radius setting, else the other one, both defaulting to 200); its contact defaults to kind
+  0x100 with value −10 [I that −10 is the damage].
+- **Not found**: none of the figures 6,000 (turret shot speed), 3,000 (combat car), 100, 60 and 150 (hit radii) nor a
+  knock-back of 10 appear in these sources; they remain unconfirmed, and the per-launcher speeds on the disc still
+  need reading (open question 8 below).
+
+### 10.5 Open questions added
+
+8. The speed setting of each launcher used by the turret jobs (rows 8, 12, 17, 38) and the combat car weapons, read
+   from the job scripts that fill options 1002 and 1003.
+9. Whether the dance's 0.2 s window applies to both dance jobs or only to row 11's director.

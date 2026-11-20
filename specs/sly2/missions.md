@@ -25,8 +25,17 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (method registrations, task manager events, job begin and end), frontend.cpp (new game, continue)
     used_for: 2026-11-18 answers on options 1236-1294, script events 17 and 19-23, the current job, task and checkpoint task; marked [R]
+  - kind: disc
+    what: row 0 (jb_intro_macro, jb_intro_rig) and row 14 (p_prison_macro) object records, option lists and script modules (2026-11-20); record condition lists of p_prison_macro
+    used_for: section 4.1 (what finishes task 1696; how the hack sequences 2410/2411 exist in row 14) [D]
+  - kind: executable
+    what: SCUS_973.16 (hash checked), option-table entries 634, 670, 671 (routines 0x106F90, 0x108890, 0x108948) and 1280 (0x10EE60) at 0x2AC880 + 40 × ID
+    used_for: section 4.1, what the sequence commands 634, 670, 671 build [D for the entries]
+  - kind: reference-project
+    what: sly2-decomp src/new_100008 (the three command routines) and src/stepguard-jsg (record kinds)
+    used_for: section 4.1, command meanings [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-20
 ---
 
 # Sly 2 jobs and tasks
@@ -186,6 +195,56 @@ Rules [R]:
   as a whole percentage, 0 only if none, 100 only if all, otherwise clamped to 1–99; saved per episode as
   "percent complete".
 - **Autosave.** When a task outside a job is done and all its successors belong to jobs, the game autosaves.
+
+- **Episode intro tasks** (added 2026-11-19) [D, R for the load rule]: each episode's `tN_intro` task (1752, 1978,
+  2168, 2388, 2624, 2842, 3022, 3339) has no prerequisites, so it is available on load; a macro-package module then
+  starts its intro sequence, which sets the task to 2 or 3 and so opens the chain to the first briefing. Details in
+  [level-flow.md](level-flow.md) 4.1.
+
+### 4.1 Worked routes: what finishes task 1696, and where the hack sequences come from (added 2026-11-20)
+
+**Task 1696 (`t0_chase_hallway_complete`, row 0, job 1671 `m0_intro`).** No option names 1696 because a script
+requests its state through a value passed up from a sequence. The chain [D unless marked]:
+
+1. Task 1689 (`t0_chase_hallway_start`; prerequisite 1684, successor 1696) owns module 14 of `jb_intro_macro`.
+   Its event-19 handler (task becomes current, 3.2) starts sequence 1690 with no starter (script ID 235).
+2. Sequence 1690 (the chase) ends by adding three objects to the world with command 670 (option 670, "add an
+   object": object, time, flag; routine 0x108890) — 150498, 150633 and **150620** — and then command 642 requests
+   task 1689 state 2. 1689's successor 1696 becomes available (4).
+3. Object 150620 is a trigger volume (class 24) in package `jb_intro_rig`. It carries option 26 (removed at level
+   start), option 432 = 7 (only Sly counts) and option 441 = 1697, so it is absent until step 2 adds it, and Sly
+   entering it starts sequence 1697 with Sly as the starter (dialogue-and-voice.md 2.1).
+4. Sequence 1697 (44 commands) first removes the volume again (command 671, "remove an object", routine
+   0x108948), plays its scene, and ends with command **634 = 106777** (option 634, routine 0x106F90: append a
+   "call the sequence's script with this value" record [R]).
+5. Sequence 1697 owns module 20 of `jb_intro_macro`. That module's only handler, `s4`, takes (object, value) and
+   switches on the value; its three cases are exactly the three 634 values in 1697's list (152651, 152652,
+   106777) [D], so a 634 command raises event 4 on the sequence's own module with its value [D for the match, I for
+   the event number]. For 106777 it tests whether op104 returns 1; op104 always returns 0 (scripts.md 4.2), so the
+   else branch runs: task 1696's script ID 1104 = stream option **1280** with (2, the object) — request state 2
+   (done) (3.1). The other branch (task 1711, `t0_van_escape`, forced with 1281) never runs on this disc.
+6. With 1696 done, its successor 1699 (`t0_rooftop_start`) becomes available.
+
+So 1696 is finished by the script of its completion sequence 1697 (module 20), driven by a value command, not by
+job 1671's module, sequence 1690 or a state machine. An engine needs: commands 670/671 (add/remove object),
+634 (raise event 4 on the sequence's module with the value), and trigger volumes that start a sequence on entry.
+
+**Hack sequences 2410/2411 in row 14.** They are in the world file of row 14 (`4_prison/00_0x082_hub.s2w`), in
+package `p_prison_macro` (keep flag set: no clone, 1 copy; not placed; package 110 of 284) [D]. The records carry
+**level conditions**: 2408, 2410 and 2411 (class 114) each list row 14, and screen object 2409 lists rows 14 and
+15 [D]. In this package 171 records are conditioned on row 14, 60 on row 15, 4 on (14, 15) and 1 on (15, 16) [D].
+A record whose condition list does not contain the current level-table row is not loaded (object-stream.md;
+textures.md 2.5) [R]; with the current row correctly 14 they load with the package at world load — no switch,
+placement or task brings them in. The hack task handlers then use them: each of tasks 2414–2424
+(`t4_hack_station1`–`6`) has an event-19 handler (modules 28–33) that sets the job's focus pair and starts
+sequence 2410 with the current character (vehicles-and-minigames.md 10.3); `p_prison_ext_hack`'s event-6 handler
+calls 2411.
+
+If 2410/2411 are missing at run time, the likely cause is the condition test using the wrong number for the
+current level: row 14 is the level-table row, not the file's index (00) or the world identity (0x82 = 130) [I].
+The 12 "too deep" errors are then probably the scripts' method calls on the missing objects (lookups that return
+no object) cascading through handlers, not a data recursion [I]; nothing in row 14's scripts calls itself through
+2410/2411 [D].
 
 ## 5. Jobs
 

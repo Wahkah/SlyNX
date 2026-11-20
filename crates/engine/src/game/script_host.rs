@@ -405,6 +405,11 @@ impl ScriptHost for WorldHost<'_> {
         {
             return v; // Sly 2 hook: the job system's methods.
         }
+        if self.world.sly3.is_some()
+            && let Some(v) = self.sly3_call_action(object, option, args)
+        {
+            return v; // Sly 3 hook: the task methods, for the session's job system.
+        }
         let Some(h) = self.obj(object) else { return Value::Void };
         let args: Vec<Arg> = args.iter().filter_map(|a| self.to_arg(a)).collect();
         self.world.action_result = None;
@@ -590,5 +595,14 @@ impl ScriptHost for WorldHost<'_> {
 
     fn poll_event(&mut self) -> Option<RaisedEvent> {
         self.world.events.pop_front()
+    }
+
+    fn module_of(&mut self, object: ObjectId) -> Option<u32> {
+        // Sly 2 hook: run-time playbacks (classes 134 and 136) run their clip's or machine's module.
+        let h = self.obj(object)?;
+        let class = self.world.class(h)?;
+        let m = self.world.module(h);
+        let playback = [super::sly2_anim::CLIP_PLAYBACK_CLASS, super::sly2_anim::MACHINE_PLAYBACK_CLASS];
+        (self.world.sly2.is_some() && playback.contains(&class) && m >= 0).then_some(m as u32)
     }
 }

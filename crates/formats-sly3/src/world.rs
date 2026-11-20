@@ -12,7 +12,7 @@ pub use formats_sly2::world::TreeNode;
 
 use crate::anim::DEFAULT_MULTIPLIERS;
 use crate::filter::Context;
-use crate::options::{self, OptionList, SET_COPY_COUNT};
+use crate::options::{self, OptionList, SET_COPY_COUNT, SET_EXTRA_CONDITION};
 use crate::stream::{BodyError, Record, Walk};
 use crate::textures::MaterialTables;
 
@@ -413,6 +413,25 @@ impl<'a> World<'a> {
     /// The selection a fresh load uses (world-file.md 3.7): the current world slot and set 0's id as the condition.
     pub fn fresh_context(&self, slot: Option<i16>) -> Context {
         Context { slot, condition: self.option_sets.ids.first().copied().unwrap_or(-1), extra: Vec::new() }
+    }
+
+    /// The selection a load with option set `set` uses (conditions.md 1): the slot, the set's id as the condition,
+    /// and the further conditions its option 1029 adds. A set the world does not have gives the fresh context.
+    pub fn context_for_set(&self, slot: Option<i16>, set: usize) -> Context {
+        let Some(&condition) = self.option_sets.ids.get(set) else { return self.fresh_context(slot) };
+        let mut extra = Vec::new();
+        if let Some(list) = self.option_sets.sets.get(set) {
+            for o in list.options.iter().filter(|o| o.id == SET_EXTRA_CONDITION) {
+                let (at, len) = (o.value.0 as usize, o.value.1 as usize);
+                let bytes = &self.data[at..at + len];
+                match typed_ints(bytes) {
+                    Some(v) => extra.extend(v),
+                    None if len == 4 => extra.push(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+                    None => {}
+                }
+            }
+        }
+        Context { slot, condition, extra }
     }
 
     /// Copy counts after option set `set` (option 1032: group id, count).

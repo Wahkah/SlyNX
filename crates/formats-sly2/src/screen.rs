@@ -39,7 +39,9 @@ pub struct ShapeVertex {
     pub y: i16,
 }
 
-/// How a primitive's vertices form triangles (its first setting byte, user-interface.md 3).
+/// How a primitive's vertices form triangles: 1 fan, 2 strip, 3 line strip (user-interface.md 3). On the disc this is
+/// the **second** of the three setting bytes (the first runs 0 to 4 and the second 1 to 3 over the fonts' 2,000
+/// primitives), not the first as the spec reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Topology {
     Fan,
@@ -51,7 +53,7 @@ pub enum Topology {
 /// A shape primitive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Primitive {
-    /// The three setting bytes (the first selects the topology).
+    /// The three setting bytes (the second selects the topology; the first's meaning is open).
     pub settings: [u8; 3],
     /// The "has extra bytes" flag.
     pub flag: u8,
@@ -61,7 +63,7 @@ pub struct Primitive {
 impl Primitive {
     /// The primitive's topology.
     pub fn topology(&self) -> Topology {
-        match self.settings[0] {
+        match self.settings[1] {
             1 => Topology::Fan,
             2 => Topology::Strip,
             3 => Topology::LineStrip,
@@ -69,14 +71,29 @@ impl Primitive {
         }
     }
 
-    /// Its triangles as vertex index triples (none for line strips).
+    /// Its triangles as vertex index triples (none for line strips). In a strip, a vertex whose byte after the
+    /// colour is 255 draws no triangle (the GS's "no kick" vertex): two such vertices in a row start a new strip
+    /// (user-interface.md 3). Read the other way (a 255 vertex restarting the strip by itself), the Sly 2 text font
+    /// comes out torn, so the vertex-by-vertex rule is the one kept.
     pub fn triangles(&self) -> Vec<[usize; 3]> {
         let n = self.vertices.len();
         match self.topology() {
             Topology::Fan => (1..n.saturating_sub(1)).map(|i| [0, i, i + 1]).collect(),
-            Topology::Strip => (0..n.saturating_sub(2)).map(|i| [i, i + 1, i + 2]).collect(),
+            Topology::Strip => self
+                .vertices
+                .iter()
+                .enumerate()
+                .skip(2)
+                .filter(|(_, v)| v.extra != 255)
+                .map(|(i, _)| [i - 2, i - 1, i])
+                .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// The primitive's colour: one per primitive, its first vertex's (user-interface.md 3).
+    pub fn colour(&self) -> [u8; 4] {
+        self.vertices.first().map_or([0; 4], |v| v.rgba)
     }
 }
 
@@ -192,8 +209,18 @@ fn matrix(r: &mut Reader<'_>) -> Result<[f32; 9]> {
     Ok(m)
 }
 
+/// Deepest nesting of dictionaries (a font's glyphs are a dictionary inside an item; nothing nests further).
+pub const MAX_DICTIONARY_DEPTH: u32 = 4;
+
 /// Reads a dictionary.
 pub fn read_dictionary(r: &mut Reader<'_>) -> Result<Vec<Item>> {
+    dictionary(r, 0)
+}
+
+fn dictionary(r: &mut Reader<'_>, depth: u32) -> Result<Vec<Item>> {
+    if depth >= MAX_DICTIONARY_DEPTH {
+        return Err(r.corrupt("screen-movie dictionaries nested too deeply"));
+    }
     let n = r.u16()? as usize;
     let mut items = Vec::with_capacity(n.min(r.remaining() / 6));
     for _ in 0..n {
@@ -240,7 +267,7 @@ pub fn read_dictionary(r: &mut Reader<'_>) -> Result<Vec<Item>> {
             4 => ItemBody::Value(r.u16()?),
             6 | 7 => ItemBody::Rect { kind, ltrb: [r.i16()?, r.i16()?, r.i16()?, r.i16()?], object: r.i32()? },
             8 => {
-                let glyphs = read_dictionary(r)?;
+                let glyphs = dictionary(r, depth + 1)?;
                 let c = r.u32()? as usize;
                 let chars = (0..c.min(r.remaining() / 4)).map(|_| r.u32()).collect::<Result<Vec<_>>>()?;
                 let c = r.u32()? as usize;
@@ -363,9 +390,34 @@ mod tests {
     #[test]
     fn fans_and_strips() {
         let v = ShapeVertex { rgba: [0; 4], extra: 0, x: 0, y: 0 };
-        let p = |s| Primitive { settings: [s, 0, 0], flag: 0, vertices: alloc::vec![v; 5] };
+        let p = |s| Primitive { settings: [0, s, 1], flag: 0, vertices: alloc::vec![v; 5] };
         assert_eq!(p(1).triangles(), alloc::vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]]);
         assert_eq!(p(2).triangles(), alloc::vec![[0, 1, 2], [1, 2, 3], [2, 3, 4]]);
         assert!(p(3).triangles().is_empty());
+        // Two vertex bytes of 255 in a row start a new strip: 0 1 2 | 3 4 5.
+        let mut q = Primitive { settings: [0, 2, 1], flag: 0, vertices: alloc::vec![v; 6] };
+        q.vertices[3].extra = 255;
+        q.vertices[4].extra = 255;
+        assert_eq!(q.triangles(), alloc::vec![[0, 1, 2], [3, 4, 5]]);
+    }
+
+    #[test]
+    fn nested_fonts_are_capped() {
+        // Each level: one item (number 0) of kind 8, a font whose glyphs are the next level. Deeper than the cap,
+        // the reader stops with an error instead of recursing.
+        let mut d = alloc::vec::Vec::new();
+        for _ in 0..MAX_DICTIONARY_DEPTH + 2 {
+            d.extend_from_slice(&1u16.to_le_bytes());
+            d.extend_from_slice(&0u16.to_le_bytes());
+            d.extend_from_slice(&8u32.to_le_bytes());
+        }
+        assert!(read_dictionary(&mut Reader::new(&d)).is_err());
+        // A font with an empty glyph dictionary and no characters reads.
+        let mut ok = alloc::vec::Vec::new();
+        ok.extend_from_slice(&1u16.to_le_bytes());
+        ok.extend_from_slice(&0u16.to_le_bytes());
+        ok.extend_from_slice(&8u32.to_le_bytes());
+        ok.extend_from_slice(&[0; 2 + 4 + 4]);
+        assert_eq!(read_dictionary(&mut Reader::new(&ok)).unwrap().len(), 1);
     }
 }

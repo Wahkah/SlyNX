@@ -22,6 +22,26 @@ pub type Mesh = formats::collision::CollisionMesh;
 use formats::error::{Error, Result};
 use formats::reader::Reader;
 
+/// The polygon a stored surface covers (classes/solid-object.md 2.1): the convex hull, in the plane of its three
+/// corners, of the corners and every end of the edges that name it, as vertex indices in order around it. The edges
+/// naming a surface are those stored under it and those stored under a neighbouring surface with it as the other
+/// side; together they name only the convex sides it shares with others (concave sides and open borders are not
+/// stored, and 2,584 Sly 2 surfaces have no edges at all), and one to three corners can lie inside the polygon, so
+/// the hull is taken over all of them. The layout is Sly 1's, so this is
+/// [`formats::collision::CollisionMesh::surface_polygon`]. Test vector: the cellar's solid 136751, surface 0
+/// (corners 13, 9, 7), is a seven-sided polygon.
+pub fn surface_polygon(mesh: &Mesh, t: usize) -> Vec<u16> {
+    mesh.surface_polygon(t, &mesh.edge_ends())
+}
+
+/// The surfaces of a collision mesh as triangles that cover them: each stored surface's polygon
+/// ([`surface_polygon`]) as a fan. The result keeps every stored surface first, at its index (the tree names surfaces
+/// by index), and appends the extra fan triangles after them with no edges; a fan triangle over the three stored
+/// corners is not added again. This is [`formats::collision::CollisionMesh::with_polygons`] (same layout as Sly 1).
+pub fn with_polygons(mesh: &Mesh) -> Mesh {
+    mesh.with_polygons()
+}
+
 /// One collision part of a solid body (2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CollisionPart {

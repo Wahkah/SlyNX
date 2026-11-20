@@ -22,6 +22,14 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/task.cpp, frontend.cpp, transition.cpp
     used_for: 2026-11-18 answers on arrival-point lists, the new-game start, the current job and task, the episode save group; marked [R]
+  - kind: disc
+    what: >-
+      SCUS-97316, 2026-11-19 read of every episode macro package's script modules attached to tasks 1752, 1978, 2168,
+      2388, 2624, 2842, 3022 and 3339, their intro sequences' option lists and the episode-menu exits 1329-1336
+    used_for: what starts each episode's opening sequence (section 4.1)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (restoring tasks on load)
+    used_for: the intro task becoming available on load; [R]
 reviewed_by: pending
 date: 2026-11-17
 ---
@@ -107,6 +115,41 @@ World rows are rows of the level table ([disc.md](disc.md) 6, 7). Option numbers
   1 if it is below 100 %.
 - **Exit to Episode Menu** (pause menu, string 66) [R]: ends the current job and loads the menu world from file record
   26 (`0x002A3928`, identity `0x39` [D]).
+
+### 4.1 What starts each episode's opening sequence (added 2026-11-19)
+
+- **Not the menu exit or the movie** [D]: exits 1329 to 1336 carry only option 780 = 778 (the wipe) and no task or
+  sequence options; the opening movie has no script hook. The opening is started from inside the hub.
+- **The intro task becomes available on load** [R]: each episode's root task (`tN_intro`) has no prerequisite tasks,
+  and a task with no saved state and no prerequisites is set to available (state 1) when the world's tasks are
+  restored. Tasks that follow it stay locked until it is done (missions.md 4).
+- **A script module reacts to that state** [D]: a module in the episode's macro package, attached to the intro task,
+  handles the task's "after state change" event (21; the prison uses "became current", 19). When the task's state
+  (script ID 342 = option 1286) is 1, it starts the intro sequence (class 114) with the current character (script ID
+  638 = option 614); the nightclub uses script ID 235 (option 613) with no starter.
+- **The sequence closes the intro task** [D]: each intro sequence holds option 660 (command 0x23, arguments 0, −1,
+  −1) and option 642 (command 0x11, set task state) setting the intro task to 3 (episodes 1, 3, 4, 8) or 2
+  (episodes 2, 5, 6, 7). Completing it opens the successor chain toward the episode's first briefing task
+  `tN_chalktalk1` (its option 1273 = 1).
+
+  | Ep. | Intro task | Intro sequence | Package (module) | Event | Start option | State set | First briefing |
+  |---:|---:|---:|---|---:|---:|---:|---:|
+  | 1 | 1752 | 1753 | `f_nightclub_macro` (14) | 21 | 613 | 3 | 1799 |
+  | 2 | 1978 | 1979 | `i_palace_macro` (13) | 21 | 614 | 2 | 1999 |
+  | 3 | 2168 | 2169 | `i_temple_macro` (7) | 21 | 614 | 3 | 2186 |
+  | 4 | 2388 | 2389 | `p_prison_macro` (11) | 19 | 614 | 3 | (see below) |
+  | 5 | 2624 | 2625 | `p_castle_macro` (3) | 21 | 614 | 2 | 2642 |
+  | 6 | 2842 | 2843 | `c_train_macro` (5) | 21 | 614 | 2 | 2865 |
+  | 7 | 3022 | 3023 | `c_sawmill_macro` (6) | 21 | 614 | 2 | 3043 |
+  | 8 | 3339 | 3340 | `a_blimp_macro` (13) | 21 | 614 | 3 | 3378 |
+
+  Episode 1's sequence also holds options 635, 670 and 671; episode 4's holds dialogue options 695, 697 and 698. No
+  `t4_chalktalk1` with option 1273 = 1 was found for the prison.
+- **Related hooks** [D]: in the prison a rig module (sequence 27254) requests `t4_intro` state 4 on event 6; in the
+  nightclub a rig module requests `t1_intro` state 3 (script ID 1104 = option 1280). Arrival point 393's event-5
+  handlers enable the safe house (option 884 via script ID 806); in the nightclub only once `t1_intro` is done
+  (script ID 1080 = option 1268). The nightclub, temple and sawmill handlers also call method 1491 on object 33735
+  while tasks 1931, 2342 and 3291 respectively are not done.
 
 ## 5. Exits (class 26)
 
@@ -294,4 +337,5 @@ Other vectors:
 - How the hub's job doors are closed or opened by task state (scripts and task world effects), and whether walking
   into a job door is the only way to start a job.
 - The exact flags of each kind of load request (same world, new game, task start) beyond those listed.
+- Which task follows `t4_intro` toward the prison's first briefing (no `t4_chalktalk1` with option 1273 = 1 found).
 - All [R] statements need checking in play.

@@ -42,6 +42,18 @@ pub struct CollisionPart {
     pub tail: (u32, u16, i8, i16, i8),
 }
 
+/// The surfaces of a collision mesh as triangles that cover them (spec question: classes/solid-object.md 2.1): the
+/// shared `formats::collision::CollisionMesh::with_polygons` (Sly 3's mesh layout is Sly 1's and Sly 2's). A stored
+/// surface is a convex polygon in the plane of its three corners: the convex hull of its corners and the ends of
+/// every edge naming it, its own and its neighbours'. The v_apt level object's floor (surface 281) is a polygon at
+/// z −33 whose corners (173, 177, 172) cover part of it. Some surfaces cannot be rebuilt this way: v_apt's
+/// arrival floor (401) names one edge, and even the positions in its plane inside its bounding sphere do not
+/// reach the arrival point (1,586, −5,000), so only the collision tree knows its extent. The stored surfaces stay first, at their indices (the tree names surfaces by
+/// index); the extra triangles come after them with no edges.
+pub fn with_polygons(mesh: &Mesh) -> Mesh {
+    mesh.with_polygons()
+}
+
 /// No child, as stored.
 pub const NO_CHILD_STORED: u32 = u32::MAX;
 
@@ -129,6 +141,40 @@ mod tests {
         d.extend_from_slice(tree);
         d.extend_from_slice(&[0u8; 10]);
         d
+    }
+
+    #[test]
+    fn a_surface_is_the_hull_of_its_corners_and_edge_ends() {
+        use formats::collision::{CollisionEdge, CollisionTriangle};
+        // A 10 × 10 square at z 0: corners 0, 1 and 4 (the centre, inside), edges reaching 2 and 3.
+        let positions =
+            alloc::vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0], [5.0, 5.0, 0.0]];
+        let mesh = Mesh {
+            radius: 15.0,
+            positions,
+            triangles: alloc::vec![CollisionTriangle {
+                corners: [0, 1, 4],
+                radius: 8.0,
+                center: [5.0, 5.0, 0.0],
+                first_edge: 0,
+                edge_count: 2
+            }],
+            edges: alloc::vec![CollisionEdge { ends: [1, 2], other: 0 }, CollisionEdge { ends: [2, 3], other: 0 }],
+        };
+        let full = with_polygons(&mesh);
+        assert_eq!(full.triangles[0], mesh.triangles[0]);
+        // The hull is the square (the centre corner inside it is dropped): two triangles cover it.
+        let added = &full.triangles[1..];
+        assert_eq!(added.len(), 2);
+        assert!(added.iter().all(|t| !t.corners.contains(&4)));
+        let area: f32 = added
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.corners.map(|v| full.positions[v as usize]);
+                ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs() / 2.0
+            })
+            .sum();
+        assert!((area - 100.0).abs() < 1e-3, "{area}");
     }
 
     #[test]

@@ -21,6 +21,13 @@
 //!   - 129 to 132 objects in a box or sphere and objects hit by a segment: none (no Sly 3 collision bodies yet);
 //!   - 139 stop a sound: nothing to stop;
 //!   - 146 and 147 the pickpocket items (`Sly3Level::pickpocket`).
+//! - **Task methods** (class 169; specs/sly3/missions.md 3.2): scripts name script IDs 1309, 1310, 1311 and 1314
+//!   to 1318, which the class option map turns into stream options 1409 (request a state: state, requester; −1 or 4
+//!   makes the task current), 1410 (the same, forced), 1413 (raise script event 23 on the task with an integer),
+//!   1418 to 1421 (force state 0 to 3) and 1422 (make current). The session's job system lives outside the world, so
+//!   the requests are queued in `World::shared.task_calls`; event 23 is raised here. Script IDs 1280 and 1281 on Sly
+//!   3 tasks are stored fields (stream 1411, 1412), not methods. The job methods (class 168, script IDs 1259 to 1263)
+//!   are not run yet: their meanings are only inferred.
 
 use alloc::vec::Vec;
 
@@ -42,6 +49,27 @@ pub const GAME_CLASS: i16 = 158;
 pub const PLACEMENT_CLASS: i16 = 8;
 /// Classes of the characters for operations 104 and 105: Sly, Bentley.
 pub const CHARACTER_CLASSES: [i16; 2] = [52, 54];
+/// The task class.
+pub const TASK_CLASS: i16 = 169;
+/// The script event task method 1413 raises on the task (missions.md 3.2).
+pub const TASK_SIGNAL_EVENT: u32 = 23;
+/// The world object's player methods (stream options; script IDs 984 and 1000).
+mod world_method {
+    /// The object player n controls.
+    pub const CONTROLLED: u16 = 986;
+    /// Whether player n's control is held.
+    pub const HELD: u16 = 1001;
+}
+
+/// Task methods: request, forced request, signal, force state 0 to 3 (1418 to 1421), make current.
+pub mod task_method {
+    pub const REQUEST: u16 = 1409;
+    pub const FORCE: u16 = 1410;
+    pub const SIGNAL: u16 = 1413;
+    pub const FORCE_LOCKED: u16 = 1418;
+    pub const FORCE_CLOSED: u16 = 1421;
+    pub const MAKE_CURRENT: u16 = 1422;
+}
 
 impl WorldHost<'_> {
     /// The root of the copy placement `slot` (class 8) made: the first object of that copy, below the placement.
@@ -133,6 +161,48 @@ impl WorldHost<'_> {
 
     pub(super) fn sly3_camera(&mut self) -> Option<ObjectId> {
         self.sly3_game_object(125, CAMERA_CLASS)
+    }
+
+    /// The task methods (module documentation), queued for the session's job system. `None` for any other option
+    /// or class.
+    pub(super) fn sly3_call_action(&mut self, object: ObjectId, option: u16, args: &[Value]) -> Option<Value> {
+        use crate::world::shared::TaskCall;
+        use task_method::*;
+        // The world object's player methods (missions.md 4.2), for player 0: 984 (stream 986) the object it
+        // controls, 1000 (stream 1001) whether its control is held.
+        if object == crate::object::WORLD_SCRIPT_ID {
+            return match option {
+                world_method::CONTROLLED => Some(Value::Object(self.sly3_player())),
+                world_method::HELD => Some(Value::Bool(self.world.shared.sly3_holds > 0)),
+                _ => None,
+            };
+        }
+        if !matches!(option, REQUEST | FORCE | SIGNAL | MAKE_CURRENT)
+            && !(FORCE_LOCKED..=FORCE_CLOSED).contains(&option)
+        {
+            return None;
+        }
+        let h = self.obj(object)?;
+        if self.world.class(h)? != TASK_CLASS {
+            return None;
+        }
+        let task = self.world.sly3_id(h)?;
+        let state = args.first().and_then(|a| a.as_i32()).unwrap_or(-1);
+        let call = match option {
+            REQUEST | FORCE => Some(TaskCall::Request { task, state, forced: option == FORCE }),
+            MAKE_CURRENT => Some(TaskCall::MakeCurrent(task)),
+            SIGNAL => {
+                // Raises script event 23 on the task with the integer (missions.md 3.2).
+                let n = args.first().and_then(|a| a.as_i32()).unwrap_or(0);
+                self.world.raise(h, TASK_SIGNAL_EVENT, alloc::vec![Value::Int(n)]);
+                None
+            }
+            o => Some(TaskCall::Force { task, state: (o - FORCE_LOCKED) as i8 }),
+        };
+        if let Some(c) = call {
+            self.world.shared.task_calls.push(c);
+        }
+        Some(Value::Void)
     }
 
     pub(super) fn sly3_game_operation(&mut self, op: u32, args: &[Value]) -> Value {

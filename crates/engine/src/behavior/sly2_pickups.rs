@@ -74,6 +74,8 @@ pub struct Sly2Pickup {
     pub kind: Kind,
     /// Collected.
     pub collected: bool,
+    /// A bottle: the save record was looked at.
+    pub checked: bool,
 }
 
 impl Sly2Pickup {
@@ -90,7 +92,7 @@ impl Sly2Pickup {
             }
             _ => return None,
         };
-        Some(Sly2Pickup { kind, collected: false })
+        Some(Sly2Pickup { kind, collected: false, checked: false })
     }
 }
 
@@ -113,6 +115,17 @@ impl ClassBehavior for Sly2Pickup {
     fn update(&mut self, cx: &mut Cx<'_>) {
         if self.collected || !cx.world.in_world(cx.me) {
             return;
+        }
+        // A bottle in the save record is gone for good (the record is attached after the behaviours load).
+        if let Kind::Clue(n) = self.kind
+            && !self.checked
+        {
+            self.checked = true;
+            if super::sly2_vault::clue_collected(cx.world, n) {
+                self.collected = true;
+                cx.world.set_in_world(cx.me, false);
+                return;
+            }
         }
         let Some(player) = cx.world.player else { return };
         let Some(p) = cx.world.position(player) else { return };
@@ -138,6 +151,7 @@ impl ClassBehavior for Sly2Pickup {
                 if n < 64 {
                     cx.progress.level(cx.world.info.id).bottles |= 1 << n;
                 }
+                super::sly2_vault::set_clue(cx.world, n);
                 let at = me;
                 super::sly2::make_noise(cx.world, 706, at, Some(player), None, cx.time);
             }

@@ -6,6 +6,7 @@
 
 use alloc::format;
 
+use platform_api::FileSystem as _;
 use platform_switch::platform_api::{Event, Platform};
 use platform_switch::{SwitchConfig, SwitchPlatform, debug_log};
 use render::RenderError;
@@ -66,6 +67,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         session.request_world(&mut platform, index);
     }
 
+    let mut perf = render::perf::PerfMeter::new();
+    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let mut last = now();
     let mut log_at = last + LOG_EVERY_NS;
     let mut paused = false;
@@ -87,6 +90,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             Ok(false) => break,
             Err(e) => panic!("upload: {e}"),
         }
+        // The performance overlay: L + R + ZL; numbers to perf.log in the user folder every five seconds.
+        let pad = platform.input().p1();
+        let _ = perf.show(&mut session.renderer, pad.held.0, pad.pressed.0);
         let stats = match session.render(frame_ns) {
             Ok(s) => s,
             Err(RenderError::LimitReached(what)) => {
@@ -100,6 +106,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             }
             Err(e) => panic!("render: {e}"),
         };
+        perf.record(frame_ns, now() - t, &stats);
+        if perf.log_due() {
+            let _ = platform.fs().write_user(render::perf::LOG_PATH, perf.log().as_bytes());
+        }
         if t >= log_at {
             let m = session.smoothed();
             let cmd = session.renderer.backend().cmd_usage();

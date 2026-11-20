@@ -105,22 +105,27 @@ data, so it belongs on their own machine, never in a synced or shared folder.
 Other crates in the tree may be mid-change and not build when a release is made. The release builds are then made
 from a snapshot of a tree state that builds, so the build cannot pick up a half-edited file:
 
-1. Copy the repository to a scratch folder outside the synced tree (WSL `/tmp`), leaving out `dist`, `.git` and
-   `target`:
-   `(cd SlyNX && tar --exclude=./dist --exclude=./.git --exclude=./target -cf - .) | tar -xf - -C /tmp/slynx-snap`.
+1. Copy the repository to a snapshot folder of its own, outside the synced tree, leaving out `dist`, `.git` and
+   `target`. Every snapshot gets a fresh folder, so two snapshots made at the same time (two agents, a build and
+   a review) never share or delete each other's files:
+   `SNAP=$(mktemp -d "$HOME/slynx-snap.XXXXXX")`, then
+   `(cd SlyNX && tar --exclude=./dist --exclude=./.git --exclude=./target -cf - .) | tar -xf - -C "$SNAP"`.
 2. Check that the snapshot builds on the host (`cargo build -p game`). If it does not, wait and copy again.
-3. Build in the snapshot with a target folder of its own (`CARGO_TARGET_DIR=~/slynx-target-snap`), so a build in the
-   live tree never shares intermediate files with it:
+3. Build in the snapshot with a target folder of its own (`CARGO_TARGET_DIR="$SNAP-target"`), so neither the live
+   tree's build nor another snapshot shares intermediate files with it:
    - the icons: `slynx-pack --write-icon dist/icons/slyN.jpg --number N`;
    - the programs: `SLYNX_ICON=dist/icons/slyN.jpg crates/game/tools/build-switch[-sly2|-sly3].sh`.
 4. Copy only the program `.nro` files from the snapshot's `dist/` to the repository's `dist/`.
 5. Package each disc with `slynx-pack <disc.iso> --out ~/slynx-packaged/slyN --program
-   ~/slynx-target-snap/switch-build/release/<name>/<name>.elf --icon dist/icons/slyN.jpg`, into the WSL home and
+   "$SNAP-target"/switch-build/release/<name>/<name>.elf --icon dist/icons/slyN.jpg`, into the WSL home and
    never into the synced tree. Check the result with `slynx-pack --inspect`.
 6. Run the checks on the snapshot: the crates' tests, `cargo clippy` for the host and the Switch target, `cargo fmt
    --check`, and the packager's disc tests with `SLYNX_PACK_PROGRAM` set to the built ELF.
 
-The snapshot is a build aid only: changes are made in the repository, never in the snapshot.
+The snapshot is a build aid only: changes are made in the repository, never in the snapshot. Delete it and its
+target folder when done (`rm -rf "$SNAP" "$SNAP-target"`). `tools/switch-test-package.sh` does all of this for the
+final test pass (docs/switch-test.md): it builds every program from its own snapshot, then packages the discs into
+`~/slynx-packaged/` (with `--package`) and prints where each file goes on the SD card.
 
 ## What the script does
 

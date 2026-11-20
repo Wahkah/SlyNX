@@ -98,6 +98,12 @@ pub struct XformRig {
     pub mirrors: Vec<MirrorRig>,
 }
 
+/// `x` brought into `[−π, π]` (Sly 2 pose hook: angle blends).
+fn rem_pi(x: f32) -> f32 {
+    use core::f32::consts::PI;
+    crate::math::rem_euclid(x + PI, 2.0 * PI) - PI
+}
+
 /// The rotation turning unit vector `a` onto unit vector `b`.
 fn rotation_between(a: Vec3, b: Vec3) -> Mat3 {
     let c = cross(a, b);
@@ -236,6 +242,82 @@ impl XformRig {
                 *w = s;
             }
         }
+    }
+
+    /// Sly 2 pose hook (gait blends, characters.md 1.1): applies several members' channels at once, each
+    /// `(channels, t, weight)`, writing `Σ wᵢ · valueᵢ / Σ wᵢ` per transform (vectors by kind, scalars as swivels).
+    /// Members are evaluated in order; a transform keeps its current value where no member has a channel. Euler
+    /// angles of later members are taken within π of the first member's, so the sum does not cross a wrap.
+    pub fn blend_channels<'a, I>(&mut self, members: impl IntoIterator<Item = (I, f32, f32)>, scalar_wins: bool)
+    where
+        I: IntoIterator<Item = (i16, Option<&'a VectorCurve>, Option<&'a ScalarCurve>)>,
+    {
+        // Per transform: Σ w·v, Σ w and the first member's value; Σ w·s and Σ w.
+        let n = self.nodes.len();
+        let mut vectors: Vec<(Vec3, f32, Vec3)> = alloc::vec![([0.0; 3], 0.0, [0.0; 3]); n];
+        let mut scalars: Vec<(f32, f32)> = alloc::vec![(0.0, 0.0); n];
+        for (channels, t, w) in members {
+            if w <= 0.0 {
+                continue;
+            }
+            for (transform, vector, scalar) in channels {
+                let i = transform as usize;
+                if i >= n {
+                    continue;
+                }
+                if !(scalar_wins && scalar.is_some())
+                    && let Some(mut v) = vector.and_then(|v| eval_vector(v, t))
+                {
+                    let e = &mut vectors[i];
+                    if e.1 == 0.0 {
+                        e.2 = v;
+                    } else if self.nodes[i].kind == kind::EULER {
+                        for k in 0..3 {
+                            v[k] = e.2[k] + rem_pi(v[k] - e.2[k]);
+                        }
+                    }
+                    e.0 = crate::math::madd(e.0, v, w);
+                    e.1 += w;
+                }
+                if let Some(s) = scalar.and_then(|s| eval_scalar(s, t)) {
+                    scalars[i].0 += w * s;
+                    scalars[i].1 += w;
+                }
+            }
+        }
+        for (i, &(sum, w, _)) in vectors.iter().enumerate() {
+            if w > 0.0 {
+                self.set_vector(i, scale(sum, 1.0 / w));
+            }
+        }
+        for (i, &(sum, w)) in scalars.iter().enumerate() {
+            if w > 0.0 {
+                self.swivel[i] = sum / w;
+            }
+        }
+    }
+
+    /// Sly 2 pose hook: the channels of a Sly 2 clip that target `object`, in the form [`Self::blend_channels`]
+    /// takes.
+    pub fn clip_channels(
+        clip: &Clip,
+        object: i32,
+    ) -> impl Iterator<Item = (i16, Option<&VectorCurve>, Option<&ScalarCurve>)> {
+        clip.channels
+            .iter()
+            .filter(move |c| c.target == object)
+            .map(|c| (c.transform, c.vector.as_ref(), c.scalar.as_ref()))
+    }
+
+    /// Sly 3 pose hook: the channels of a Sly 3 clip that target `object`, for [`Self::blend_channels`].
+    pub fn sly3_clip_channels(
+        clip: &ClipData,
+        object: i32,
+    ) -> impl Iterator<Item = (i16, Option<&VectorCurve>, Option<&ScalarCurve>)> {
+        clip.channels
+            .iter()
+            .filter(move |c| c.target == object)
+            .map(|c| (c.transform, c.vector.as_ref(), c.scalar.as_ref()))
     }
 
     /// Applies a Sly 2 clip at time `t`: the channels whose target is `object` (the character's object ID).
@@ -380,6 +462,26 @@ mod tests {
         let c = r.measure(1, 2, 3, [0.0; 3], 4, [0.0; 3]);
         r.chains.push(c);
         r
+    }
+
+    #[test]
+    fn blends_weigh_members_and_unwrap_angles() {
+        // Sly 2 pose hook: gait blends.
+        let mut r = XformRig::default();
+        let t = r.push(node(None, kind::TRANSLATION, [0.0; 3]));
+        let e = r.push(node(Some(0), kind::EULER, [0.0; 3]));
+        let c = |v: Vec3| VectorCurve::Components { mask: 0, base: v, curves: [None, None, None] };
+        let (a0, a1) = (c([0.0, 0.0, 100.0]), c([40.0, 0.0, 100.0]));
+        // 3.0 and −3.0 rad are 0.28 apart across the wrap: their mean is π, not 0.
+        let (b0, b1) = (c([3.0, 0.0, 0.0]), c([-3.0, 0.0, 0.0]));
+        let m0 = alloc::vec![(t as i16, Some(&a0), None), (e as i16, Some(&b0), None)];
+        let m1 = alloc::vec![(t as i16, Some(&a1), None), (e as i16, Some(&b1), None)];
+        r.blend_channels([(m0, 0.0, 0.75), (m1, 0.0, 0.25)], false);
+        assert!((r.local[t].t[0] - 10.0).abs() < 1e-5, "{:?}", r.local[t].t);
+        let want = super::super::curve::euler_zyx([3.0 * 0.75 + (2.0 * core::f32::consts::PI - 3.0) * 0.25, 0.0, 0.0]);
+        for (x, y) in r.local[e].cols.iter().flatten().zip(want.iter().flatten()) {
+            assert!((x - y).abs() < 1e-4);
+        }
     }
 
     #[test]

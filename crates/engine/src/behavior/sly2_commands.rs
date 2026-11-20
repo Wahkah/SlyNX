@@ -5,7 +5,8 @@
 //!   current character as starter, 615 stops it. The requests go to `World::shared.sequence_requests` for the game's
 //!   sequence player. Trigger volumes start the sequence of option 441 with the entering object, interaction spots
 //!   (class 35) that of option 1070 with the character using it (the gang system), and guard command lists signal
-//!   sequences (command 15).
+//!   sequences (command 15). A clip's timed type-4 event whose object ID names a sequence starts it, with no
+//!   starter, when the clip crosses its frame ([`animation_sequence_starts`]).
 //! - **Guard command lists** (class 113): options 595 to 612 each append one command, in stream order at load and
 //!   when a script calls them. A guard told to run a list ([`run_commands`]), or running its patrol route (option
 //!   273), works through it, waiting on commands 5 (wait), 6 and 13 (follow a path, a ladder, pipe or rail: along the
@@ -120,6 +121,97 @@ pub fn generic_action(world: &mut World, h: Handle, id: u16, args: &[Arg]) -> bo
     }
 }
 
+/// The Sly 2 sequence class.
+pub const SEQUENCE_CLASS: i16 = 114;
+
+/// The clip event type that names an object (a sequence when timed; dialogue-and-voice.md 2.1).
+pub const EVENT_OBJECT: i8 = 4;
+
+/// Starts the sequences named by the timed type-4 events the clips fired this frame (call after the poses are
+/// stepped). The event's object ID is looked up near the clip's target.
+pub fn animation_sequence_starts(world: &mut World) {
+    let Some(level) = world.sly2.as_deref() else { return };
+    let mut ids: Vec<(i32, Handle)> = Vec::new();
+    for e in &level.poser.fired {
+        if e.kind != EVENT_OBJECT || !matches!(e.fired, crate::anim::sly2::Fired::Timed(_)) {
+            continue;
+        }
+        let Some(ev) = level.poser.event_of(world, e) else { continue };
+        let Some(b) = ev.payload.get(..4) else { continue };
+        ids.push((i32::from_le_bytes([b[0], b[1], b[2], b[3]]), e.target));
+    }
+    for (id, near) in ids {
+        if let Some(seq) = world.find_sly2_id(id, Some(near))
+            && world.class(seq) == Some(SEQUENCE_CLASS)
+        {
+            world.shared.sequence_requests.push(SequenceRequest::Start { sequence: seq, starter: None });
+        }
+    }
+}
+
+/// The safe house's actions (option 1338, safehouse-and-shop.md 1): (state, buttons, target object).
+pub const SAFE_HOUSE_ACTION: u16 = 1338;
+
+/// The integer arguments of an option entry, in order.
+fn ints(args: &[Arg]) -> Vec<i32> {
+    args.iter()
+        .filter_map(|a| match *a {
+            Arg::Int(n) => Some(n),
+            Arg::Short(_, n) => Some(i32::from(n)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The safe house's actions (option 1338) as (state, buttons, target, ...): its own and its placements' (the
+/// objects above it), nearest first.
+pub fn safe_house_actions(world: &World, house: Handle) -> Vec<Vec<i32>> {
+    let mut entries: Vec<Vec<i32>> = Vec::new();
+    let mut at = Some(house);
+    while let Some(h) = at {
+        if let Some(o) = world.options(h) {
+            entries.extend(o.all(SAFE_HOUSE_ACTION).filter_map(|v| match v {
+                crate::object::OptionValue::Args(a) => Some(ints(a)),
+                _ => None,
+            }));
+        }
+        if let (Some(level), Some(slot)) = (world.sly2.as_deref(), world.slot(h)) {
+            entries.extend(
+                level
+                    .actions
+                    .iter()
+                    .filter(|(s, id, _)| *s == slot && *id == SAFE_HOUSE_ACTION)
+                    .map(|(_, _, a)| ints(a)),
+            );
+        }
+        at = world.parent(h);
+    }
+    entries
+}
+
+/// Acts in the safe house (class 70, safehouse-and-shop.md 2; dialogue-and-voice.md 2.1): the action of `house`
+/// for the shown `state` whose buttons include one of `pressed` names its target. A sequence target is started here
+/// (with `character` as starter, or none); any other target (the shop screen 888, a script object) is returned for
+/// the safe-house system to open or start. For the safe-house system's owner.
+pub fn safe_house_action(
+    world: &mut World,
+    house: Handle,
+    state: i32,
+    pressed: u32,
+    character: Option<Handle>,
+) -> Option<Handle> {
+    let entries = safe_house_actions(world, house);
+    let target = entries.iter().find_map(|e| match e.as_slice() {
+        [s, buttons, target, ..] if *s == state && (*buttons as u32) & pressed != 0 => Some(*target),
+        _ => None,
+    })?;
+    let h = world.find_sly2_id(target, Some(house))?;
+    if world.class(h) == Some(SEQUENCE_CLASS) {
+        world.shared.sequence_requests.push(SequenceRequest::Start { sequence: h, starter: character });
+    }
+    Some(h)
+}
+
 /// A sequence object (class 114): takes the script calls that start and stop it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sequence {
@@ -136,7 +228,8 @@ impl ClassBehavior for Sequence {
             }
             opt::START_WITH_PLAYER => SequenceRequest::StartWithPlayer(me),
             opt::STOP => SequenceRequest::Stop(me),
-            _ => return false,
+            // Vehicles hook: the dance commands (699 to 701) go to the dance director.
+            _ => return crate::behavior::vehicles::dance::sequence_command(world, id, args),
         };
         if id != opt::STOP {
             self.started += 1;

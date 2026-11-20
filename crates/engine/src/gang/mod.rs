@@ -17,6 +17,7 @@ pub mod health;
 pub mod input;
 pub mod items;
 pub mod pocket;
+pub mod pool;
 pub mod sly3;
 pub mod throw;
 
@@ -24,6 +25,19 @@ pub mod throw;
 mod tests;
 
 pub use character::{Character, Combo, GangEvent, Shared, bentley, murray, sly};
+
+/// Sly's binocucom (Sly 2 and Sly 3; camera.md 6): R3 turns it on with `focus` (the played character), and again
+/// off. The camera reads `World::shared.camera_binocucom`; while it is on the left stick turns the view, so the
+/// player systems give the gang a still stick ([`binocucom_on`]).
+pub fn toggle_binocucom(world: &mut crate::world::World, focus: crate::object::Handle, invert: bool) {
+    let s = &mut world.shared.camera_binocucom;
+    *s = if s.is_some() { None } else { Some((focus, invert)) };
+}
+
+/// Whether the binocucom is on.
+pub fn binocucom_on(world: &crate::world::World) -> bool {
+    world.shared.camera_binocucom.is_some()
+}
 pub use consts::{GangConstants, GangTunables};
 pub use gadgets::{Assignment, CarryState, Carryable, Effect, GadgetConstants, PayAt, Refusal, WorldEffect};
 pub use health::{Health, Hit, Reaction};
@@ -80,6 +94,10 @@ pub struct Gang {
     pub player: Who,
     /// Shared rules and what the gang owns.
     pub shared: Shared,
+    /// The player's left stick as the games read it (Sly 1 and 2's rule, Sly 3's with a Sly 3 item table).
+    pub stick: crate::player::stick::StickReader,
+    /// Whether the input's stick is raw (the pad's) and goes through [`Gang::stick`]; off for inputs made by hand.
+    pub raw_stick: bool,
 }
 
 /// Height above Murray's feet where a carried character rides.
@@ -89,7 +107,12 @@ impl Gang {
     /// A gang with these members; the first is the player.
     pub fn new(members: Vec<Character>, shared: Shared) -> Gang {
         let player = members.first().map_or(Who::Sly, |c| c.who);
-        Gang { members, player, shared }
+        let rule = if shared.items.is_sly3() {
+            crate::player::stick::StickRule::Sly3
+        } else {
+            crate::player::stick::StickRule::Normalised
+        };
+        Gang { members, player, shared, stick: crate::player::stick::StickReader::new(rule), raw_stick: true }
     }
 
     /// A member.
@@ -122,6 +145,15 @@ impl Gang {
     /// One frame: the player reads `input`, the others an idle input.
     pub fn update(&mut self, dt: f32, input: &GangInput, world: &GangWorld<'_>) -> Vec<(Who, GangEvent)> {
         let mut events = Vec::new();
+        // The pad's stick as the game reads it (player-moves.md 1.2; Sly 2 characters.md 12; Sly 3 11).
+        let read;
+        let input = if self.raw_stick {
+            let (dir, u) = self.stick.read_axes(input.stick);
+            read = GangInput { stick: dir, deflection: u, ..*input };
+            &read
+        } else {
+            input
+        };
         // Each member sees the others as targets.
         let snapshot: Vec<(Who, Vec3, f32)> = self.members.iter().map(|c| (c.who, c.position, c.yaw)).collect();
         let idle = GangInput {

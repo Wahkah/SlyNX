@@ -108,9 +108,12 @@ pub fn collision_from_world(world: &World) -> Option<CollisionWorld> {
         }
         let Some(at) = world.world_transform(h) else { continue };
         for (k, part) in s.collision.iter().enumerate() {
-            let shape = *shapes
-                .entry((r.header_offset, k))
-                .or_insert_with(|| cw.add_shape(Shape { main: TriMesh::new(&part.mesh, &part.tree), camera: None }));
+            let shape = *shapes.entry((r.header_offset, k)).or_insert_with(|| {
+                // Gang hook: each stored surface is a convex polygon, not only its three corners (the floor holes
+                // a character fell through; formats_sly2::collision::with_polygons).
+                let mesh = formats_sly2::collision::with_polygons(&part.mesh);
+                cw.add_shape(Shape { main: TriMesh::new(&mesh, &part.tree), camera: None })
+            });
             cw.add_body(shape, at, 0, h.index(), true);
             bodies += 1;
         }
@@ -141,7 +144,9 @@ pub fn collision_from_scene(scene: &Scene, exclude: &[(u32, u32)]) -> (Collision
             let mut positions: Vec<[f32; 3]> = Vec::new();
             let mut triangles = Vec::new();
             for sm in &scene.submeshes[m.submeshes.start as usize..m.submeshes.end as usize] {
-                if positions.len() + sm.vertex_count as usize > 65_000 {
+                // Shadow hulls and projected volumes (shader kinds 2 and 3, rendering.md 3.4 and 3.5) are not solid.
+                let kind = scene.materials.get(sm.material as usize).map(|m| m.kind);
+                if positions.len() + sm.vertex_count as usize > 65_000 || matches!(kind, Some(2 | 3)) {
                     continue;
                 }
                 let base = positions.len() as u32;
@@ -159,14 +164,53 @@ pub fn collision_from_scene(scene: &Scene, exclude: &[(u32, u32)]) -> (Collision
                     triangles.push(CollisionTriangle { corners, radius, center, first_edge: 0, edge_count: 0 });
                 }
             }
+            if triangles.is_empty() {
+                return None;
+            }
             let radius = positions.iter().map(|p| dist(*p, [0.0; 3])).fold(0.0, f32::max);
             let mesh = CollisionMesh { radius, positions, triangles, edges: Vec::new() };
-            cw.add_shape(Shape { main: TriMesh::new(&mesh, &CollisionTree::default()), camera: None })
+            Some(cw.add_shape(Shape { main: TriMesh::new(&mesh, &CollisionTree::default()), camera: None }))
         });
-        cw.add_body(shape, inst.transform, 0, u32::MAX, true);
+        if let Some(shape) = shape {
+            cw.add_body(shape, inst.transform, 0, u32::MAX, true);
+        }
     }
     cw.rebuild();
     (cw, found)
+}
+
+/// Contact kind `0x8000` (the pop-up cobra and tentacle, characters.md 2.2): knocked back exactly as `0x200`.
+pub const KNOCK_POPUP: u32 = 0x8000;
+/// Knock-back (`0x200`).
+pub const KNOCK: u32 = 0x200;
+/// The speed of a knock-back away from its sender. *Placeholder*: the game uses the sender's own motion, which the
+/// guards (moved without their clips' root motion) do not have yet.
+pub const KNOCK_SPEED: f32 = 600.0;
+/// A walking sender's knock-back boost (characters.md 2.2): times 1 + 0.25, at most 1,200, at least 700 up.
+pub const KNOCK_BOOST: (f32, f32, f32) = (1.25, 1200.0, 700.0);
+
+/// The kind bits the gang's hit rules see: `0x8000` is a knock-back.
+pub fn hit_kind(kind: u32) -> u32 {
+    if kind & KNOCK_POPUP != 0 { kind | KNOCK } else { kind }
+}
+
+/// The knock-back vector of a hit from `from` on a character at `to` (characters.md 2.2): away from the sender,
+/// boosted as a walking sender's; no vector for other kinds.
+pub fn knock_vector(from: [f32; 3], to: [f32; 3], kind: u32) -> [f32; 3] {
+    if kind & (KNOCK | KNOCK_POPUP) == 0 {
+        return [0.0; 3];
+    }
+    let d = [to[0] - from[0], to[1] - from[1], 0.0];
+    let l = engine::math::length(d);
+    let away = if l > 1e-3 { [d[0] / l, d[1] / l, 0.0] } else { [1.0, 0.0, 0.0] };
+    let (gain, max, up) = KNOCK_BOOST;
+    let mut v = [away[0] * KNOCK_SPEED * gain, away[1] * KNOCK_SPEED * gain, 0.0];
+    let s = engine::math::length(v);
+    if s > max {
+        v = [v[0] * max / s, v[1] * max / s, 0.0];
+    }
+    v[2] = v[2].max(up);
+    v
 }
 
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -186,12 +230,25 @@ pub struct GangPlayer {
     handles: [Option<Handle>; 3],
     /// Coins and loot collected (pickpocketed entries, coins spilled by knocked-out guards).
     pub purse: Purse,
+    /// The safe house was the current player last frame.
+    in_safe_house: bool,
+    /// Sly 2 pose hook: the characters' clips by state (`engine::anim::sly2_gang`).
+    pub clips: engine::anim::sly2_gang::GangClips,
 }
 
 impl GangPlayer {
     /// The gang with the executable's shared values, moving through `collision`, starting near `start`.
     pub fn new(shared: Option<Shared>, collision: CollisionWorld, start: Option<[f32; 3]>) -> GangPlayer {
-        GangPlayer { gang: None, shared, collision, start, handles: [None; 3], purse: Purse::default() }
+        GangPlayer {
+            gang: None,
+            shared,
+            collision,
+            start,
+            handles: [None; 3],
+            purse: Purse::default(),
+            in_safe_house: false,
+            clips: Default::default(), // Sly 2 pose hook
+        }
     }
 
     /// The current member.
@@ -218,6 +275,14 @@ impl GangPlayer {
 }
 
 impl PlayerSystem for GangPlayer {
+    fn gang_mut(&mut self) -> Option<&mut Gang> {
+        self.gang.as_mut() // Sly 2 hook (menus).
+    }
+
+    fn gang(&self) -> Option<&Gang> {
+        self.gang.as_ref()
+    }
+
     fn load(&mut self, world: &mut World, _collision: &dyn CollisionQueries) {
         let Some(shared) = self.shared.take() else { return };
         for (who, class) in CHARACTER_CLASSES {
@@ -256,7 +321,8 @@ impl PlayerSystem for GangPlayer {
             }
         }
         let gi = GangInput {
-            stick: input.left,
+            // Gang hook: the binocucom's view takes the left stick.
+            stick: if engine::gang::binocucom_on(world) { [0.0; 2] } else { input.left },
             camera_yaw: world.shared.camera_yaw,
             held: gang_buttons(input.buttons),
             pressed: gang_buttons(input.pressed),
@@ -265,6 +331,8 @@ impl PlayerSystem for GangPlayer {
                 let (s, c) = (engine::math::sin(world.shared.camera_yaw), engine::math::cos(world.shared.camera_yaw));
                 [c, s, 0.0]
             },
+            // Gang hook: the gang's stick reader fills the deflection (`player::stick`).
+            deflection: 0.0,
         };
         // Guards as targets.
         let at = gang.current().map_or([0.0; 3], |c| c.position);
@@ -299,7 +367,7 @@ impl PlayerSystem for GangPlayer {
             filter: QueryFilter::default(),
             targets: &targets,
             help: 0.0,
-            safehouse: false,
+            safehouse: world.shared.safe_house,
             // No pooled items are limited yet (gadget pools are not tracked in the world).
             pools: &[],
         };
@@ -331,12 +399,13 @@ impl PlayerSystem for GangPlayer {
                 else {
                     continue;
                 };
+                let to = world.position(wh.target).unwrap_or(wh.source);
                 let h = Hit {
                     amount: wh.amount,
-                    kind: wh.kind,
+                    kind: hit_kind(wh.kind),
                     source: wh.source,
                     source_yaw: 0.0,
-                    vector: [0.0; 3],
+                    vector: knock_vector(wh.source, to, wh.kind),
                     shrunk: false,
                 };
                 if let Some(c) = gang.get_mut(member) {
@@ -346,7 +415,10 @@ impl PlayerSystem for GangPlayer {
         }
         let gang = self.gang.as_mut().unwrap();
         if step.game_dt > 0.0 {
-            events.extend(gang.update(step.game_dt, &gi, &gw).into_iter().map(|(_, e)| e));
+            let done = gang.update(step.game_dt, &gi, &gw);
+            // Sly 2 pose hook: each character's clips for its state, posed by this frame's pose step.
+            self.clips.drive(world, &gang.members, &self.handles, &done, step.game_dt);
+            events.extend(done.into_iter().map(|(_, e)| e));
         }
         // The gang's attacks on the guards.
         let Some(me) = player else {
@@ -389,6 +461,33 @@ impl PlayerSystem for GangPlayer {
                         world.notify(h, Notice::Pickpocket(me));
                     }
                 }
+                // Gang hook: gadget copies leave their pools (gadgets.md 6, `engine::gang::pool`): taken when the item
+                // starts or is summoned, placed where a throw lands, returned when the bomb goes off.
+                GangEvent::Summoned(item) | GangEvent::ItemStarted(item)
+                    if engine::gang::pool::class_of_item(item).is_some()
+                        && engine::gang::pool::copy_of(world, item).is_none_or(|g| g.state != 0) =>
+                {
+                    engine::gang::pool::take(world, me, item);
+                }
+                GangEvent::Thrown { id, velocity } if id <= 255 => {
+                    if let Some(g) = engine::gang::pool::copy_of(world, id as u8).filter(|g| g.state == 0)
+                        && let Some(t) = world.world_transform(me)
+                    {
+                        let from = [t.t[0], t.t[1], t.t[2] + 100.0];
+                        let mut land = engine::gang::pool::landing(from, velocity, -2275.0, 3.0);
+                        land[2] = t.t[2];
+                        let yaw = engine::math::atan2(t.cols[0][1], t.cols[0][0]);
+                        engine::gang::pool::release(world, g.object, land, yaw, true);
+                    }
+                }
+                GangEvent::Triggered(item) => {
+                    if let Some(g) = engine::gang::pool::copy_of(world, item) {
+                        engine::gang::pool::set_state(world, g.object, 3);
+                        engine::gang::pool::return_copy(world, g.object);
+                    }
+                }
+                // Gang hook: R3's binocucom (camera.md 6).
+                GangEvent::Binocucom => engine::gang::toggle_binocucom(world, me, false),
                 GangEvent::AirAttack(_) => around(world, at),
                 GangEvent::FlopLanded { position, .. } => around(world, position),
                 GangEvent::Dart { to, .. } => around(world, to),
@@ -396,6 +495,16 @@ impl PlayerSystem for GangPlayer {
             }
         }
         // Medicine the played character touches: taken unless its health and power are both full.
+        // Entering the safe house refills every character's health and gadget power (safehouse-and-shop.md 2).
+        if world.shared.safe_house && !self.in_safe_house {
+            for who in [Who::Sly, Who::Bentley, Who::Murray] {
+                if let Some(c) = self.gang.as_mut().and_then(|g| g.get_mut(who)) {
+                    c.health.value = c.health.capacity;
+                    c.power.value = c.power.max;
+                }
+            }
+        }
+        self.in_safe_house = world.shared.safe_house;
         for m in core::mem::take(&mut world.shared.medicine) {
             if let Some(c) = self.gang.as_mut().and_then(|g| {
                 let who = g.player;
@@ -431,5 +540,18 @@ impl PlayerSystem for GangPlayer {
             c.leave_ground();
         }
         self.write_back(world);
+    }
+}
+
+#[cfg(test)]
+mod knock_tests {
+    use super::*;
+
+    #[test]
+    fn popup_hits_knock_back_like_0x200() {
+        assert_eq!(hit_kind(KNOCK_POPUP), KNOCK_POPUP | KNOCK);
+        let v = knock_vector([0.0; 3], [10.0, 0.0, 0.0], KNOCK_POPUP);
+        assert!((v[0] - 750.0).abs() < 1e-3 && v[1] == 0.0 && v[2] == 700.0);
+        assert_eq!(knock_vector([0.0; 3], [10.0, 0.0, 0.0], 0x800), [0.0; 3]);
     }
 }

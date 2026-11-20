@@ -57,6 +57,9 @@ extern const uint8_t slynx_render_mesh_vsh[], slynx_render_mesh_vsh_end[];
 extern const uint8_t slynx_render_mesh_fsh[], slynx_render_mesh_fsh_end[];
 extern const uint8_t slynx_render_mesh_alpha_fsh[], slynx_render_mesh_alpha_fsh_end[];
 
+// GPU timestamp reports per frame slot: two of 16 bytes (value, timestamp).
+#define QUERY_SLOT_BYTES 32u
+
 static struct {
     bool ready;
     DkDevice device;
@@ -96,6 +99,10 @@ static struct {
     DkFence fence[FRAME_SLOTS];
     bool fence_pending[FRAME_SLOTS];
     uint64_t frame;
+    // GPU timestamps: per frame slot, two 16-byte reports (top of the pipe at the start, end of the pipe at the end),
+    // read once the slot's fence has passed.
+    DkMemBlock query_mem;
+    uint64_t last_gpu_ns;
 
     // Level data.
     bool have_level;
@@ -287,6 +294,9 @@ int slynx_render_init(uint32_t max_instances, uint32_t max_draws, uint32_t max_b
     g.cmd_mem = make_block(FRAME_SLOTS * (g.cmd_slot_bytes + CMD_RESERVE_BYTES),
                            DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
     if (!g.cmd_mem) goto oom;
+    // Optional: without it, frames report no GPU time.
+    g.query_mem = make_block(FRAME_SLOTS * QUERY_SLOT_BYTES, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
+    if (g.query_mem) memset(dkMemBlockGetCpuAddr(g.query_mem), 0, FRAME_SLOTS * QUERY_SLOT_BYTES);
     DkCmdBufMaker cbm;
     dkCmdBufMakerDefaults(&cbm, g.device);
     cbm.cbAddMem = cmd_add_mem;
@@ -302,6 +312,7 @@ int slynx_render_init(uint32_t max_instances, uint32_t max_draws, uint32_t max_b
     return SLYNX_RENDER_OK;
 
 oom:
+    destroy_block(&g.query_mem);
     destroy_block(&g.cmd_mem);
     destroy_block(&g.frame_mem);
     destroy_block(&g.slot_stream_mem);
@@ -690,6 +701,12 @@ int slynx_render_frame(const SlynxRenderFrame* f, SlynxRenderStats* stats) {
         dkFenceWait(&g.fence[slot], -1);
         wait_ns = armTicksToNs(armGetSystemTick()) - t0;
         g.fence_pending[slot] = false;
+        // The slot's previous frame is done: its GPU time is end minus start, in GPU ticks (614.4 MHz).
+        if (g.query_mem) {
+            const uint64_t* q = (const uint64_t*)((const uint8_t*)dkMemBlockGetCpuAddr(g.query_mem) + slot * QUERY_SLOT_BYTES);
+            uint64_t start = q[1], end = q[3];
+            g.last_gpu_ns = end > start ? (end - start) * 625u / 384u : 0;
+        }
     }
     // The GPU is done with this slot's commands, extra blocks included.
     free_cmd_extra(slot);
@@ -734,6 +751,8 @@ int slynx_render_frame(const SlynxRenderFrame* f, SlynxRenderStats* stats) {
     g.cmd_extra_bytes = 0;
     g.cmd_exhausted = false;
     cmd_add_mem(NULL, cb, CMD_CHUNK_BYTES);
+    DkGpuAddr query = g.query_mem ? dkMemBlockGetGpuAddr(g.query_mem) + slot * QUERY_SLOT_BYTES : 0;
+    if (query) dkCmdBufReportCounter(cb, DkCounter_TimestampPipelineTop, query);
 
     bool video_sync = false;
     if (g.video_w && g.video_desc_dirty && g.desc_mem) {
@@ -888,6 +907,7 @@ int slynx_render_frame(const SlynxRenderFrame* f, SlynxRenderStats* stats) {
         }
     }
 
+    if (query) dkCmdBufReportCounter(cb, DkCounter_Timestamp, query + 16);
     dkCmdBufSignalFence(cb, &g.fence[slot], false);
     dkQueueSubmitCommands(g.queue, dkCmdBufFinishList(cb));
     slynx_display_present(image);
@@ -900,6 +920,7 @@ int slynx_render_frame(const SlynxRenderFrame* f, SlynxRenderStats* stats) {
         stats->cmd_bytes_used = (g.cmd_cursor < g.cmd_slot_bytes ? g.cmd_cursor : g.cmd_slot_bytes) +
                                 g.cmd_extra_bytes + (g.cmd_exhausted ? CMD_RESERVE_BYTES : 0);
         stats->wait_ns = wait_ns;
+        stats->gpu_ns = g.last_gpu_ns;
     }
     // The frame was presented either way; without memory for all of it, the draws that did not fit are missing.
     return g.cmd_exhausted ? SLYNX_RENDER_ERR_OUT_OF_MEMORY : SLYNX_RENDER_OK;
@@ -912,6 +933,7 @@ void slynx_render_exit(void) {
     free_level();
     dkCmdBufDestroy(g.cmdbuf);
     for (uint32_t i = 0; i < FRAME_SLOTS; i++) free_cmd_extra(i);
+    destroy_block(&g.query_mem);
     destroy_block(&g.cmd_mem);
     destroy_block(&g.frame_mem);
     destroy_block(&g.slot_stream_mem);

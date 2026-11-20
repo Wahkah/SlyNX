@@ -19,8 +19,15 @@
 //! - **What the world does** goes out as [`Request`]s for the session: dialogue, exits (`0x68` with its point),
 //!   adding and removing objects (`0x38`, `0x39`), task states (`0x1E`), state-machine goals (`0x19`), screens
 //!   (`0x1A`, `0x1B`) and music (`0x59`, `0x5A`).
-//! - Commands not listed (animation, camera keys, walking, the module hook `0x15`, ...) complete at once; they are
-//!   counted in [`Scripts::unhandled`].
+//! - **Objects and control:** `0x14` sets the script's default target and `0x18` its context object (kept per
+//!   script here, not per runner); `0x22` places the target on an object, and `0x30` walks it there (it arrives
+//!   at once: [`Request::Place`]); `0x13` gives a player's control to an object (missions.md 5); `0x12`
+//!   activates an object by its class (scripts.md 7.3); `0x69` returns the player to the nearest mission
+//!   waypoint; `0x15` calls the script's module with message 4 and a value; `0x1F`
+//!   pauses or resumes the run (working reading: the pause lasts until its script ends or resumes it); `0x45` is a camera key (the camera is not moved; with the wait flag the runner
+//!   waits for the key's time).
+//! - Commands not listed (animation `0x16`: clips and segments are not played by the session yet, and the
+//!   unestablished ones) complete at once; they are counted in [`Scripts::unhandled`].
 //!
 //! Working readings (to confirm with the spec): `0x1E`'s byte is the task state, 4 meaning "current"; `0x0F` /
 //! `0x10` set and clear an alarm by ID, alarms being one set for all scripts.
@@ -67,6 +74,18 @@ pub enum Request {
     Screen { screen: i32, on: bool },
     /// `0x59` / `0x5A`: push or pop a music track.
     Music { push: Option<i16> },
+    /// `0x22`, `0x30`: put `target` where `at` is (an interaction start or a walk, arriving at once).
+    Place { target: i32, at: i32 },
+    /// `0x13`: player `player`'s control goes to `object`.
+    Control { object: i32, player: i32 },
+    /// `0x12`: activate `object` (scripts.md 7.3: by its class).
+    Activate { object: i32 },
+    /// `0x69`: return the player to the nearest suitable mission waypoint (scripts.md 7.3, interpretation).
+    ReturnToWaypoint,
+    /// `0x15`: call `script`'s module with message 4 and `value`.
+    Module { script: i32, value: i32 },
+    /// `0x1F`: `script` pauses (true) or resumes the run; a pause ends with its script.
+    Pause { script: i32, on: bool },
 }
 
 /// What scripts can ask about the world this frame.
@@ -117,6 +136,9 @@ pub struct ScriptRun {
     finish: Vec<usize>,
     finishing: bool,
     orders: BTreeMap<usize, LineOrder>,
+    /// The default target (`0x14`) and context object (`0x18`), −1 none.
+    target: i32,
+    context: i32,
 }
 
 /// The running scripts of a world.
@@ -196,6 +218,8 @@ impl Scripts {
             finish: Vec::new(),
             finishing: false,
             orders: BTreeMap::new(),
+            target: -1,
+            context: -1,
         });
         true
     }
@@ -435,7 +459,27 @@ impl Scripts {
                 0x5A => self.requests.push(Request::Music { push: None }),
                 0x5F => r.wait = Some(Wait::NoLine),
                 0x68 => self.requests.push(Request::FireExit { exit: word(&a, 0), point: word(&a, 1) }),
-                0x55 | 0x56 | 0x18 | 0x14 => {}
+                0x14 => s.target = word(&a, 0),
+                0x18 => s.context = word(&a, 0),
+                0x12 => self.requests.push(Request::Activate { object: word(&a, 0) }),
+                0x69 => self.requests.push(Request::ReturnToWaypoint),
+                0x13 => {
+                    self.requests.push(Request::Control { object: word(&a, 0), player: *a.get(4).unwrap_or(&0) as i32 })
+                }
+                0x15 => self.requests.push(Request::Module { script: s.oid, value: word(&a, 0) }),
+                0x1F => self.requests.push(Request::Pause { script: s.oid, on: a.first().is_some_and(|&b| b != 0) }),
+                0x22 | 0x30 => {
+                    let target = [c.object, s.context, s.target, s.object].into_iter().find(|&o| o != -1).unwrap_or(-1);
+                    self.requests.push(Request::Place { target, at: word(&a, 0) });
+                }
+                0x45 => {
+                    // The key's time: the third float after the two vectors.
+                    let t = f32::from_bits(u32::from_le_bytes([a[32], a[33], a[34], a[35]]));
+                    if wait && t.is_finite() && t > 0.0 {
+                        r.wait = Some(Wait::Time(t));
+                    }
+                }
+                0x55 | 0x56 => {}
                 id => *self.unhandled.entry(id).or_default() += 1,
             }
             // A command with children of its own (other than the blocks above) runs them next.
@@ -469,6 +513,8 @@ mod tests {
             finish: Vec::new(),
             finishing: false,
             orders: BTreeMap::new(),
+            target: -1,
+            context: -1,
         }
     }
 

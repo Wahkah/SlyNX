@@ -1525,3 +1525,26 @@ fn sly3_value_kinds_and_unknown_keywords() {
     assert_eq!(op(66, vec![Value::Vector([1.0, 0.0, 0.0]), Value::Vector([0.0, 1.0, 0.0])]), "#(0.0 0.0 1.0)");
     assert_eq!(op(5, vec![]), "#error(UnknownOperation(5))");
 }
+
+#[test]
+fn host_list_arguments_are_charged() {
+    // Sly 2's 114 (objects for a list of IDs) and 131 (a progress value by path) walk their lists in the host: the
+    // elements are charged to the step budget first, and a looping list is refused.
+    let mut it = Interpreter::new(Program::for_game(crate::Game::Sly2), None);
+    it.limits.max_steps = 1000;
+    let mut h = Mock::default();
+    let long = Value::list((0..5000).map(Value::Int).collect::<Vec<_>>());
+    let r = it.call(&mut h, Value::Builtin(114), vec![long, Value::Object(None)]);
+    assert!(matches!(r, Value::Error(ScriptError::OutOfSteps)), "{r:?}");
+    let looped = Value::list([Value::Int(1)]);
+    if let Value::List(c) = &looped {
+        *c.cdr.borrow_mut() = looped.clone();
+    }
+    let r = it.call(&mut h, Value::Builtin(131), vec![looped]);
+    assert!(matches!(r, Value::Error(ScriptError::TooLarge)), "{r:?}");
+    assert!(h.log.is_empty(), "the host never saw them: {:?}", h.log);
+    // A short list reaches the host.
+    let r = it.call(&mut h, Value::Builtin(131), vec![Value::list([Value::Symbol(7)])]);
+    assert!(!matches!(r, Value::Error(ScriptError::OutOfSteps | ScriptError::TooLarge)), "{r:?}");
+    assert_eq!(h.log.len(), 1);
+}

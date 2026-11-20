@@ -97,8 +97,14 @@ pub const INSTANCE_VIDEO: u32 = 4096;
 /// buffer), which also gives its texture layer and tint.
 pub const INSTANCE_PLACED: u32 = 8192;
 
+/// Matrices (three rows each) of a shader light block ([`crate::Renderer::set_shader_light`]).
+pub const LIGHT_BLOCK_MATRICES: u32 = 5;
+
 /// [`GpuInstance::layers`] bit: the weights are [`crate::Lighting::TwoColour`]'s two colours.
 pub const LAYERS_TWO_COLOUR: u32 = 1 << 24;
+/// [`GpuInstance::layers`] bit: the two colours are computed in the vertex shader from a light block in the bone store
+/// ([`crate::Renderer::set_shader_light`]; its first matrix in the morph field).
+pub const LAYERS_SHADER_LIGHT: u32 = 1 << 25;
 /// Instance flags: sample panel image 0 or 1 (fragment texture bindings 5 and 6) instead of the texture.
 pub const INSTANCE_PANEL0: u32 = 16384;
 pub const INSTANCE_PANEL1: u32 = 32768;
@@ -300,6 +306,8 @@ pub(crate) struct InstanceRec {
     pub sort_key: Option<f32>,
     /// First vertex weight in the level's weight buffer.
     pub weights: Option<u32>,
+    /// Two colours computed in the shader: the light block's first matrix within the instance's bones.
+    pub shader_light: Option<u32>,
     /// Fog factor (1 = full fog).
     pub fog: f32,
     /// Screen-space instances: the texture area `[u0, v0, u1, v1]` the unit quad maps to.
@@ -649,6 +657,15 @@ impl FrameBuilder {
                 if mat.lighting == Lighting::TwoColour {
                     layers |= LAYERS_TWO_COLOUR;
                 }
+            }
+            if mat.lighting == Lighting::TwoColour
+                && let (Some(k), Some((start, n)), Some([t0, t2])) = (rec.shader_light, rec.bones, mat.palettes)
+                && k + LIGHT_BLOCK_MATRICES <= n
+            {
+                flags |= INSTANCE_WEIGHTS;
+                morph_base = start + k;
+                let l = |t: crate::TextureId| res.textures[t.0 as usize].layer as u32 & 0xff;
+                layers = l(t0) | (l(t2) << 8) | LAYERS_TWO_COLOUR | LAYERS_SHADER_LIGHT;
             }
             layers |= unorm8(rec.fog) << 16;
             let cutoff = if state & STATE_ALPHA_TEST != 0 { mat.alpha_cutoff } else { 0.0 };

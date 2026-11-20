@@ -257,6 +257,17 @@ impl World {
         self.sly2_object(h).map(|o| o.id)
     }
 
+    /// A Sly 2 object's zone mask (its transform header's, `0xFF` without one; camera.md 7.1). Object-model hook:
+    /// activation by visibility volume.
+    pub fn sly2_zone_mask(&self, h: Handle) -> u32 {
+        match self.sly2_record(h).map(|r| &r.body) {
+            Some(formats_sly2::stream::Body::Solid(s)) => s.zone_mask,
+            Some(formats_sly2::stream::Body::Placement(p)) => p.zone_mask,
+            Some(formats_sly2::stream::Body::Other { header: Some(h), .. }) => h.zone_mask,
+            _ => 0xFF,
+        }
+    }
+
     /// The record a Sly 2 object was made from.
     pub fn sly2_record(&self, h: Handle) -> Option<&Record> {
         let r = self.record(h)?;

@@ -45,6 +45,9 @@ pub struct GangInput {
     pub camera_eye: Vec3,
     /// Camera forward (unit).
     pub camera_forward: Vec3,
+    /// The stick's deflection as the game reads it (filled by `Gang::update` from its stick reader; with the Sly 3
+    /// rule the stick vector is shorter than this).
+    pub deflection: f32,
 }
 
 impl GangInput {

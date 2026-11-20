@@ -45,6 +45,40 @@ pub struct Sequence {
 pub enum SeqCommand {
     /// A dialogue command (dialogue-and-voice.md 3).
     Talk(TalkCommand),
+    /// Option 642 (command 0x11): set a task's state (task object ID, state; level-flow.md 4.1), as a request to the
+    /// job system.
+    Task {
+        /// The task's object ID.
+        task: i32,
+        /// The state asked for.
+        state: i32,
+    },
+    /// Option 682 (command 0x38): open a camera block, a timed move from `from` to `to` (the matching 683's values)
+    /// over `duration` seconds (0: the block's contents) on curve `curve` (camera.md 2.1.1).
+    CameraOpen {
+        /// State A: position, Euler angles (radians), field of view; near-zero parts mean "the current value".
+        from: CamArgs,
+        /// State B (the matching end's), if there is one.
+        to: Option<CamArgs>,
+        /// Seconds.
+        duration: f32,
+        /// One of the four curves.
+        curve: i32,
+    },
+    /// Option 683 (command 0x39): the block's end: removes the timed view when `remove` (cutting when `cut`).
+    CameraEnd {
+        /// State B.
+        state: CamArgs,
+        /// "End the timed view here".
+        remove: bool,
+        /// "Cut".
+        cut: bool,
+    },
+    /// Option 684 (command 0x3A): end the sequence's view (`cut`: at once).
+    CameraEndView {
+        /// "Cut".
+        cut: bool,
+    },
     /// Option 636: start a sub-sequence (with the starter passed on), waiting for it to end unless `no_wait`.
     Start {
         /// The sequence.
@@ -56,6 +90,41 @@ pub enum SeqCommand {
 
 /// Option 636: start a sub-sequence (sequence, starter or −1, no-wait flag).
 pub const START_SUB_SEQUENCE: i16 = 636;
+/// Option 642 (command 0x11): set a task's state (task, state).
+pub const TASK_STATE: i16 = 642;
+/// Camera block options (camera.md 2.1.1): open (0x38), end (0x39), end the runner's view (0x3A).
+pub const CAMERA_OPEN: i16 = 682;
+/// See [`CAMERA_OPEN`].
+pub const CAMERA_END: i16 = 683;
+/// See [`CAMERA_OPEN`].
+pub const CAMERA_END_VIEW: i16 = 684;
+
+/// A camera block's state: position, Euler angles (radians), field of view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CamArgs {
+    /// Position.
+    pub position: [f32; 3],
+    /// Euler angles, radians.
+    pub angles: [f32; 3],
+    /// Field of view, radians (0: the current one).
+    pub fov: f32,
+}
+
+fn floats<const N: usize>(v: &[u8]) -> Option<[f32; N]> {
+    let mut out = [0.0; N];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = f32::from_le_bytes(v.get(4 * i..4 * i + 4)?.try_into().ok()?);
+    }
+    Some(out)
+}
+
+/// Position, angles (degrees in the data) and field of view of a camera block's first three arguments.
+fn cam_args(a: &[(u16, &[u8])]) -> Option<CamArgs> {
+    let position = floats::<3>(a.first()?.1)?;
+    let deg = floats::<3>(a.get(1)?.1)?;
+    let fov = floats::<1>(a.get(2)?.1)?[0];
+    Some(CamArgs { position, angles: deg.map(|d| d.to_radians()), fov })
+}
 
 /// The typed arguments of an option value: (tag, value bytes) (object-stream.md 1).
 fn typed_args(mut b: &[u8]) -> Option<Vec<(u16, &[u8])>> {
@@ -90,11 +159,33 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
     let Some(r) = world.sly2_record(h) else { return Vec::new() };
     let Some(list) = r.options() else { return Vec::new() };
     let bytes = &world.level.bytes;
-    list.options
+    let mut out = list
+        .options
         .iter()
         .filter_map(|o| {
             let (at, len) = (o.value.0 as usize, o.value.1 as usize);
             let v = bytes.get(at..at + len)?;
+            if o.id == CAMERA_OPEN {
+                let a = typed_args(v)?;
+                let from = cam_args(&a)?;
+                let duration = floats::<1>(a.get(3)?.1)?[0];
+                let curve = int_of(a.get(4)?.1);
+                return Some(SeqCommand::CameraOpen { from, to: None, duration, curve });
+            }
+            if o.id == CAMERA_END {
+                let a = typed_args(v)?;
+                let remove = a.get(3).is_some_and(|x| x.1.first() == Some(&1));
+                let cut = a.get(4).is_some_and(|x| x.1.first() == Some(&1));
+                return Some(SeqCommand::CameraEnd { state: cam_args(&a)?, remove, cut });
+            }
+            if o.id == CAMERA_END_VIEW {
+                let a = typed_args(v)?;
+                return Some(SeqCommand::CameraEndView { cut: a.first().is_some_and(|x| x.1.first() == Some(&1)) });
+            }
+            if o.id == TASK_STATE {
+                let a = typed_args(v)?;
+                return Some(SeqCommand::Task { task: int_of(a.first()?.1), state: int_of(a.get(1)?.1) });
+            }
             if o.id == START_SUB_SEQUENCE {
                 let a = typed_args(v)?;
                 let sequence = world.find_sly2_id(int_of(a.first()?.1), Some(h))?;
@@ -103,7 +194,48 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
             }
             TalkCommand::decode(o.id, v).map(SeqCommand::Talk)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    pair_camera_blocks(&mut out);
+    out
+}
+
+/// Gives each camera block's open the state of its matching end (the next end at the same nesting depth).
+fn pair_camera_blocks(cmds: &mut [SeqCommand]) {
+    let mut open: Vec<usize> = Vec::new();
+    for i in 0..cmds.len() {
+        match cmds[i] {
+            SeqCommand::CameraOpen { .. } => open.push(i),
+            SeqCommand::CameraEnd { state, .. } => {
+                if let Some(o) = open.pop()
+                    && let SeqCommand::CameraOpen { to, .. } = &mut cmds[o]
+                {
+                    *to = Some(state);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a sequence asked of the camera, for the session (it has the camera's current state).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CameraCue {
+    /// A timed move from A to B.
+    Move {
+        /// State A.
+        from: CamArgs,
+        /// State B (A when the block has no end).
+        to: CamArgs,
+        /// Seconds (0: the block's contents).
+        duration: f32,
+        /// Curve index.
+        curve: i32,
+    },
+    /// The timed view ends (`cut`: at once).
+    End {
+        /// "Cut".
+        cut: bool,
+    },
 }
 
 /// The Sly 2 session's sound.
@@ -115,6 +247,10 @@ pub struct Sly2Sound {
     talk: Talk,
     sequences: Vec<Sequence>,
     sub_starts: Vec<Handle>,
+    /// Task states asked for (option 642).
+    task_requests: Vec<(i32, i32)>,
+    /// Camera blocks run (options 682 to 684).
+    camera_cues: Vec<CameraCue>,
     /// The world's music streams queued by scripts (action 146).
     music: MusicQueue,
     /// The sequences running at the start of this update.
@@ -139,6 +275,8 @@ impl Sly2Sound {
             talk: Talk::default(),
             sequences: Vec::new(),
             sub_starts: Vec::new(),
+            task_requests: Vec::new(),
+            camera_cues: Vec::new(),
             music: MusicQueue::new(),
             live: Vec::new(),
             cues: Vec::new(),
@@ -180,6 +318,56 @@ impl Sly2Sound {
     /// Sub-sequences the running sequences started this frame, for the session to start (it has the world).
     pub fn take_sub_starts(&mut self) -> Vec<Handle> {
         core::mem::take(&mut self.sub_starts)
+    }
+
+    /// Task states the running sequences asked for this frame (option 642), for the job system.
+    pub fn take_task_requests(&mut self) -> Vec<(i32, i32)> {
+        core::mem::take(&mut self.task_requests)
+    }
+
+    /// The length of the camera block opened at `cmds[open]`: the commands up to its matching end at the same depth,
+    /// summed. Waits for a line (708) last the line just played (its longest track; a non-negative time instead),
+    /// a wait without a line nothing; nested blocks count with their own durations. Lines are timed only with the
+    /// world's sound loaded.
+    pub fn block_length(&self, cmds: &[SeqCommand], open: usize) -> f32 {
+        let line_length = |line: i16| {
+            self.world
+                .as_ref()
+                .and_then(|w| w.line(line))
+                .map_or(0.0, |l| l.tracks.iter().map(|t| t.duration).fold(0.0, f32::max))
+        };
+        let mut depth = 0usize;
+        let mut total = 0.0;
+        let mut last = None;
+        for c in &cmds[open + 1..] {
+            match *c {
+                SeqCommand::CameraOpen { duration, .. } => {
+                    if depth == 0 && duration > 0.0 {
+                        total += duration;
+                    }
+                    depth += 1;
+                }
+                SeqCommand::CameraEnd { .. } if depth == 0 => break,
+                SeqCommand::CameraEnd { .. } => depth -= 1,
+                SeqCommand::Talk(TalkCommand::PlayLine { line, wait, .. }) if depth == 0 => {
+                    last = Some(line);
+                    if wait {
+                        total += line_length(line);
+                        last = None;
+                    }
+                }
+                SeqCommand::Talk(TalkCommand::WaitLine { time }) if depth == 0 => {
+                    total += if time >= 0.0 { time } else { last.take().map_or(0.0, line_length) };
+                }
+                _ => {}
+            }
+        }
+        total
+    }
+
+    /// What the running sequences asked of the camera this frame (options 682 to 684).
+    pub fn take_camera_cues(&mut self) -> Vec<CameraCue> {
+        core::mem::take(&mut self.camera_cues)
     }
 
     /// Stops sequence `h`.
@@ -230,6 +418,30 @@ impl Sly2Sound {
                         break;
                     }
                     seq.started_sub = false;
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::Task { task, state } => {
+                    self.task_requests.push((task, state));
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::CameraOpen { from, to, duration, curve } => {
+                    // A duration of 0 lasts as long as the block's contents (camera.md 2.1.1).
+                    let duration = if duration > 0.0 { duration } else { self.block_length(&seq.commands, seq.at) };
+                    self.camera_cues.push(CameraCue::Move { from, to: to.unwrap_or(from), duration, curve });
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::CameraEnd { remove, cut, .. } => {
+                    if remove {
+                        self.camera_cues.push(CameraCue::End { cut });
+                    }
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::CameraEndView { cut } => {
+                    self.camera_cues.push(CameraCue::End { cut });
                     seq.at += 1;
                     continue;
                 }

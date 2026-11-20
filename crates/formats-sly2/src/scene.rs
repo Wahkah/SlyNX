@@ -41,6 +41,12 @@ pub struct SceneOptions {
     pub passes: u32,
     /// Deepest chain of placements followed.
     pub max_depth: u32,
+    /// Most records visited, placed copies included ([`MAX_SCENE_RECORDS`] by default): placements that place
+    /// placements can fan out without bound in corrupt data.
+    pub record_budget: u32,
+    /// Record classes (first, last) whose meshes' textures are decoded even when their meshes are not drawn (the
+    /// game's characters, drawn skinned by another path). Default: none.
+    pub texture_classes: (i16, i16),
 }
 
 impl Default for SceneOptions {
@@ -50,6 +56,8 @@ impl Default for SceneOptions {
             decode_textures: true,
             passes: (1 << 1) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 8) | (1 << 10),
             max_depth: 8,
+            record_budget: MAX_SCENE_RECORDS,
+            texture_classes: (0, -1),
         }
     }
 }
@@ -62,6 +70,8 @@ pub struct SceneBuild {
     pub material_base: Vec<u32>,
     /// Placements whose set ID names no package of the world.
     pub unresolved_placements: u32,
+    /// Records left out once [`SceneOptions::record_budget`] was spent.
+    pub over_budget: u32,
     /// Per material: the texture of frame 0, palette slot 1 (kinds 1 and 7: the grey palette; rendering.md 3),
     /// decoded with the others.
     pub slot1: Vec<Option<u32>>,
@@ -82,6 +92,9 @@ pub struct SceneBuild {
     pub baked_colours: Vec<BakedColour>,
     /// Texture animations of the used materials (rendering.md 4).
     pub anims: Vec<SceneAnim>,
+    /// Per scene instance: its record's zone mask (the solid's; camera.md 0: drawn only while it shares a bit with
+    /// the camera's visibility mask).
+    pub instance_zones: Vec<u32>,
 }
 
 /// First and last texture-animation classes that change frames (loop, ping-pong, random frame, eyes).
@@ -202,7 +215,12 @@ struct Builder<'w, 'a> {
     set_index: BTreeMap<i32, usize>,
     /// Per scene mesh: each submesh's strip-list index across the body (the vertex-map table's numbering).
     submesh_index: BTreeMap<u32, Vec<u32>>,
+    /// Records visited so far.
+    visited: u32,
 }
+
+/// Default record budget of a scene build: far above any world on the disc.
+pub const MAX_SCENE_RECORDS: u32 = 1 << 20;
 
 /// Builds the scene of `world`.
 pub fn build(world: &World<'_>, opts: SceneOptions) -> SceneBuild {
@@ -228,6 +246,7 @@ pub fn build(world: &World<'_>, opts: SceneOptions) -> SceneBuild {
             scene: Scene { materials, ..Scene::default() },
             material_base: base,
             unresolved_placements: 0,
+            over_budget: 0,
             slot1,
             self_illum,
             color2,
@@ -237,16 +256,31 @@ pub fn build(world: &World<'_>, opts: SceneOptions) -> SceneBuild {
             baked: BTreeMap::new(),
             baked_colours: Vec::new(),
             anims: Vec::new(),
+            instance_zones: Vec::new(),
         },
         mesh_cache: BTreeMap::new(),
         texture_cache: BTreeMap::new(),
         used_materials: used,
         set_index,
         submesh_index: BTreeMap::new(),
+        visited: 0,
     };
     for (i, p) in world.header.packages.iter().enumerate() {
         if p.keep != 0 {
             b.package(i, &Affine::IDENTITY, 0);
+        }
+    }
+    // Objects of `texture_classes` in any package (placed or not): their textures are decoded too.
+    let (lo, hi) = opts.texture_classes;
+    if lo <= hi {
+        for (pkg, body) in world.bodies.iter().enumerate() {
+            crate::stream::visit(&body.objects, &mut |r| {
+                if (lo..=hi).contains(&r.class)
+                    && let Body::Solid(s) = &r.body
+                {
+                    b.mark_materials(pkg, s);
+                }
+            });
         }
     }
     if opts.decode_textures {
@@ -266,6 +300,11 @@ impl Builder<'_, '_> {
             if !r.loaded_for(self.opts.row) || r.removed_at_start() {
                 continue;
             }
+            if self.visited >= self.opts.record_budget {
+                self.out.over_budget += 1;
+                continue;
+            }
+            self.visited += 1;
             match &r.body {
                 Body::Solid(s) => {
                     let world = s.transforms.world_matrices(root, enclosing);
@@ -329,8 +368,13 @@ impl Builder<'_, '_> {
             let t = resolve(c.transform, own, enclosing, root);
             draws.push((t.mul(&c.matrix), crate::geometry::VertexMap::read_at(self.world.data, c.vertex_map_at)));
         }
+        let zone = match &r.body {
+            Body::Solid(s) => s.zone_mask,
+            _ => u32::MAX,
+        };
         for (t, map) in draws {
             let instance = self.out.scene.instances.len() as u32;
+            self.out.instance_zones.push(zone);
             self.baked(instance, scene_mesh, &map);
             self.out.scene.instances.push(SceneInstance {
                 mesh: scene_mesh,
@@ -342,6 +386,25 @@ impl Builder<'_, '_> {
                 clone_of_proxy: None,
                 issuing_mesh: index,
             });
+        }
+    }
+
+    /// Marks every shader the rigid meshes of `s` use as used, so their textures are decoded.
+    fn mark_materials(&mut self, pkg: usize, s: &crate::stream::Solid) {
+        let shaders = self.world.bodies[pkg].materials.shaders.len();
+        let base = self.out.material_base[pkg] as usize;
+        for m in s.meshes.meshes.iter().filter(|m| m.body_type == RIGID) {
+            for g in &m.groups {
+                if let crate::geometry::Group::Rigid { lists, .. } = g {
+                    for l in lists {
+                        if let Ok(k) = usize::try_from(l.shader)
+                            && k < shaders
+                        {
+                            self.used_materials[base + k] = true;
+                        }
+                    }
+                }
+            }
         }
     }
 

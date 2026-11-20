@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use formats::error::{Error, Result};
 use formats::geometry::{Affine, GpuVertex};
 use formats::reader::{Reader, le_f32};
-use formats_sly2::geometry::strip_triangles;
+use formats_sly2::geometry::strip_triangles_at;
 use formats_sly2::transforms::read_matrix;
 
 use crate::filter::{Context, Filter};
@@ -403,19 +403,19 @@ impl Group {
     /// Triangles of every strip list: (shader index, triangles of position indices). Outlines have none.
     pub fn triangles(&self, data: &[u8]) -> Vec<(i32, Vec<[u8; 3]>)> {
         match self {
-            Group::Strips { lists, indices_at, breaks_at, .. } => lists
+            Group::Strips { lists, indices_at, breaks_at, positions, .. } => lists
                 .iter()
                 .map(|l| {
                     let start = *indices_at as usize + l.first as usize;
-                    let idx = &data[start..start + l.count as usize];
                     let first = l.first as usize;
-                    (l.shader, strip_triangles(idx, |i| break_bit(data, *breaks_at as usize, first + i)))
+                    let bit = |i| break_bit(data, *breaks_at as usize, first + i);
+                    (l.shader, strip_triangles_at(data, start, l.count as usize, *positions as usize, bit))
                 })
                 .collect(),
-            Group::Indexed { shader, count, indices_at, breaks_at, .. } => {
-                let start = *indices_at as usize;
-                let idx = &data[start..start + *count as usize];
-                alloc::vec![(*shader as i32, strip_triangles(idx, |i| break_bit(data, *breaks_at as usize, i)))]
+            Group::Indexed { shader, count, indices_at, breaks_at, positions, .. } => {
+                let bit = |i| break_bit(data, *breaks_at as usize, i);
+                let t = strip_triangles_at(data, *indices_at as usize, *count as usize, *positions as usize, bit);
+                alloc::vec![(*shader as i32, t)]
             }
             Group::Outline { .. } => Vec::new(),
         }

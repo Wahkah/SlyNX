@@ -48,6 +48,12 @@ differences.
 | 24 | [user-interface.md](user-interface.md) | Screen objects (classes 158 to 167), streamed screens, options, the shared screens and their game-supplied strings |
 | 25 | [saving.md](saving.md) | The save-variable tree (1,201 names, 6,559 records), what it holds, memory-card names |
 | 26 | [options-by-class.md](options-by-class.md) | The option table, meanings gathered from the behaviour specs, the options every class uses |
+| 27 | [missions.md](missions.md) | Jobs and tasks: options with Sly 2 equivalents, corrections, becoming current, the commands missions use |
+| 28 | [camera.md](camera.md) | Camera classes, lens objects, zones (priority, switching, curves, winding), cutscene cameras, constants |
+| 29 | [effects.md](effects.md) | Emitters, effect objects and their components, sky: classes and option tables with Sly 2 equivalents |
+| 30 | [physics.md](physics.md) | Gravity (−2,275 for the gang), constraints, physics options, polygon collision surfaces |
+| 31 | [clock-and-loop.md](clock-and-loop.md) | The clock block and what is known of Sly 3's frame loop |
+| 32 | [conditions.md](conditions.md) | Option sets and conditions per world, the selection tables |
 
 ## Conventions
 

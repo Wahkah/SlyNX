@@ -98,6 +98,16 @@ pub struct Ids {
     pub task_keys: [u16; 5],
     /// A command script started with the task (Sly 3; 0 in Sly 2).
     pub task_script: u16,
+    /// The task is done as soon as it becomes current (Sly 3's 1405; 0 in Sly 2).
+    pub done_when_current: u16,
+    /// Sly 3 job options read at completion (missions.md 4.1; 0 in Sly 2): the completion mode (2: the first task
+    /// goes back to 0), the item granted, the resume task, the task-event list.
+    pub completion_mode: u16,
+    pub item: u16,
+    pub resume_task: u16,
+    pub event_list: u16,
+    /// Sly 3: the job ignores the player's defeat (1362; 0 in Sly 2).
+    pub ignore_defeat: u16,
     /// Typed values after a switch's (owner, row) pair that are not part of it (Sly 3 adds one flag).
     pub switch_trailing: usize,
 }
@@ -132,6 +142,12 @@ impl Ids {
         goal: opt::GOAL,
         task_keys: [1295, 1296, 1297, 1298, 1299],
         task_script: 0,
+        done_when_current: 0,
+        completion_mode: 0,
+        item: 0,
+        resume_task: 0,
+        event_list: 0,
+        ignore_defeat: 0,
         switch_trailing: 0,
     };
 }
@@ -211,6 +227,16 @@ pub struct JobDef {
     pub close_events: Vec<i32>,
     /// Load-time switches (option 1255).
     pub switches: Vec<Switch>,
+    /// Sly 3 hook: on completion the first task goes back to 0 (1367 = 2) so the job can be replayed.
+    pub replay: bool,
+    /// Sly 3 hook: the item-table record granted on completion (1385).
+    pub item: Option<i32>,
+    /// Sly 3 hook: the resume task (1366), an index.
+    pub resume: Option<usize>,
+    /// Sly 3 hook: the task-event numbers of option 1368 (at most 8; their use is an interpretation).
+    pub events: Vec<i32>,
+    /// Sly 3 hook: the player's defeat does not restart the job (1362).
+    pub ignore_defeat: bool,
     /// Save keys.
     pub keys: Keys,
 }
@@ -246,6 +272,8 @@ pub struct TaskDef {
     pub resume: bool,
     /// Sly 3 hook: the command script started with the task (option 1408 in Sly 3).
     pub script: Option<i32>,
+    /// Sly 3 hook: done as soon as it becomes current (option 1405 in Sly 3).
+    pub done_on_current: bool,
     /// Prerequisites and successors (indexes).
     pub prereq: Vec<usize>,
     pub succ: Vec<usize>,
@@ -437,6 +465,18 @@ impl Graph {
                 close_events: args_of(ids.close_events),
                 switches: switches_of(ls, ids.job_switch, ids.switch_trailing),
                 keys: keys(world, h, &ids.job_keys, names),
+                replay: ids.completion_mode != 0 && i32_of(ids.completion_mode) == Some(2),
+                item: (ids.item != 0).then(|| i32_of(ids.item)).flatten().filter(|&v| v >= 0),
+                ignore_defeat: ids.ignore_defeat != 0 && o.is_some_and(|o| o.bool_or(ids.ignore_defeat, false)),
+                resume: (ids.resume_task != 0)
+                    .then(|| i32_of(ids.resume_task))
+                    .flatten()
+                    .and_then(|t| g.task_ids.get(&t).copied()),
+                events: if ids.event_list != 0 {
+                    args_of(ids.event_list).into_iter().take(8).collect()
+                } else {
+                    Vec::new()
+                },
             });
         }
         for &(id, h) in &tasks {
@@ -480,6 +520,8 @@ impl Graph {
                 auto_current: o.is_some_and(|o| o.bool_or(ids.auto_current, false)),
                 resume: o.is_some_and(|o| o.bool_or(ids.resume, false)),
                 script: (ids.task_script != 0).then(|| i32_of(ids.task_script)).flatten().filter(|&v| v >= 0),
+                done_on_current: ids.done_when_current != 0
+                    && o.is_some_and(|o| o.bool_or(ids.done_when_current, false)),
                 prereq: idx(pre),
                 succ: idx(suc),
                 switches,

@@ -16,7 +16,7 @@ sources:
     what: earlier research (Games/Sly3-RE-notes.md, 2026-11); SafeHouse @ c70803ce (2026-11-12), Sly3-Release (read for what the game does)
     used_for: load-time rules (conditions, option sets, placements, deferred clips); marked [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-19
 ---
 
 # Sly 3 runtime systems: overview and roadmap
@@ -102,30 +102,34 @@ Classes in every playable world [D]: 2, 4, 5, 8, 24, 40, 45, 47, 48, 103, 105, 1
 
 "Carry-over" says how much of the Sly 2 plan applies (Sly 2 overview section 9): **same**, **delta** or **new**.
 
-| Spec | Scope | Depends on | Carry-over |
-|---|---|---|---|
-| clock-and-loop.md | frame order, rate factors, activation | — | same as Sly 2 (confirm) |
-| scripts.md | script cells (renumbered kinds), built-ins, option map, command scripts (class 135) | world-file.md 4.1, classes/animation.md 3 | delta of Sly 2 |
-| conditions.md | option sets, conditions, world filters, job and task states | world-file.md 3.7, 6 | new |
-| physics.md | contacts, collision parts (two new fields) | classes/solid-object.md | delta of Sly 2 |
-| characters.md | Sly, Murray, Bentley, and the five recruits: moves, health, switching | animation.md | delta of Sly 2 (recruits new) |
-| camera.md | follow camera, zones, cutscenes | classes/paths-and-volumes.md | delta of Sly 2 |
-| missions.md | jobs, tasks (169's lists), class 170, the thief-net screens | conditions.md | delta of Sly 2 |
-| safehouse-and-shop.md | safe house, shop, recruits' gadgets | missions.md | delta of Sly 2 |
-| guards.md | patrols, perception, swarms, loot | missions.md | delta of Sly 2 |
-| pickups-and-loot.md | coins, medicine, keys, loot, pickpocketing, vaults, treasure maps, compass | guards.md | delta of Sly 2 |
-| vehicles-and-minigames.md | trucks, biplanes, ships, raft, RC car, hacking, bosses | characters.md | delta of Sly 2 (biplanes and ships new) |
-| effects.md | effects with components (class 45), emitters, sky | renderer | new layout, Sly 2 behaviour |
-| rendering.md | colour grading, colour tables, passes, outlines | textures.md, geometry.md | delta of Sly 2 |
-| dialogue-and-voice.md | voice entries, speakers | audio.md | delta of Sly 2 |
-| user-interface.md | screen objects (classes 158 to 167), external screen files | classes/effects-logic-ui.md 6 | delta of Sly 2 |
-| level-flow.md | exits (class 24), hubs, job entry and exit | missions.md | delta of Sly 2 |
-| saving.md | progress variables, job and task states | missions.md | delta of Sly 2 |
-| options-by-class.md | option meanings for the renumbered classes | object-stream.md 1 | delta of Sly 2 |
+| Spec | Scope | Depends on | Carry-over | Status |
+|---|---|---|---|---|
+| clock-and-loop.md | frame order, rate factors, activation | — | same as Sly 2 (confirm) | written |
+| scripts.md | script cells (renumbered kinds), built-ins, option map, command scripts (class 135) | world-file.md 4.1, classes/animation.md 3 | delta of Sly 2 | written |
+| conditions.md | option sets, conditions, world filters, job and task states | world-file.md 3.7, 6 | new | written |
+| physics.md | contacts, collision parts (two new fields) | classes/solid-object.md | delta of Sly 2 | written |
+| characters.md | Sly, Murray, Bentley, and the five recruits: moves, health, switching | animation.md | delta of Sly 2 (recruits new) | written |
+| camera.md | follow camera, zones, cutscenes | classes/paths-and-volumes.md | delta of Sly 2 | written |
+| missions.md | jobs, tasks (169's lists), class 170, the thief-net screens | conditions.md | delta of Sly 2 | written |
+| safehouse-and-shop.md | safe house, shop, recruits' gadgets | missions.md | delta of Sly 2 | written |
+| guards.md | patrols, perception, swarms, loot | missions.md | delta of Sly 2 | written |
+| pickpocket-and-pickups.md | coins, medicine, keys, loot, pickpocketing, vaults, treasure maps, compass | guards.md | delta of Sly 2 | written |
+| vehicles-and-minigames.md | trucks, biplanes, ships, raft, RC car, hacking, bosses | characters.md | delta of Sly 2 (biplanes and ships new) | written |
+| effects.md | effects with components (class 45), emitters, sky | renderer | new layout, Sly 2 behaviour | written |
+| rendering.md | colour grading, colour tables, passes, outlines | textures.md, geometry.md | delta of Sly 2 | written |
+| dialogue-and-voice.md | voice entries, speakers | audio.md | delta of Sly 2 | written |
+| user-interface.md | screen objects (classes 158 to 167), external screen files | classes/effects-logic-ui.md 6 | delta of Sly 2 | written |
+| level-flow.md | exits (class 24), hubs, job entry and exit | missions.md | delta of Sly 2 | written |
+| saving.md | progress variables, job and task states | missions.md | delta of Sly 2 | written |
+| options-by-class.md | option meanings for the renumbered classes | object-stream.md 1 | delta of Sly 2 | written |
+| alarms-sensors.md | lasers, detectors, contact triggers, bouncers, alarms | guards.md | delta of Sly 2 | written |
+| gadgets.md | item usage, slots, power and drains, the gang's gadget objects | characters.md | delta of Sly 2 | written |
+| interactables.md | breakables, barriers, water, use points, trigger shapes, hiding spots | — | delta of Sly 2 | written |
 
 ## 7. Open questions
 
 1. Where deferred clips come from.
-2. The roles of classes 170 and 143 (key lists in macro groups).
+2. The roles of classes 170 and 143 (key lists in macro groups). Class 170 is probably the challenges: the menu
+   world's 101 records match the 101 `w…` challenge entries of the save tree ([saving.md](saving.md) 2) [I].
 3. (Answered in [characters.md](characters.md) 2 and 6: the safe house chooses among the core three; recruits are
    played only in their jobs.)

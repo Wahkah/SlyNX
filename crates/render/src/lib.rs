@@ -26,6 +26,7 @@ pub mod iris;
 pub mod math;
 pub mod overlay;
 pub mod panel;
+pub mod perf;
 mod renderer;
 mod resources;
 pub mod types;

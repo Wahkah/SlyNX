@@ -130,6 +130,8 @@ struct GroupKey {
     cutoff: u32,
     mirrored: bool,
     lit: bool,
+    /// Zone mask: groups never mix masks, so the camera's visibility mask applies to whole groups.
+    zone: u32,
     cell: (i32, i32, i32),
 }
 
@@ -188,6 +190,10 @@ pub struct SceneInput<'a> {
     /// Scene instances whose record (header offset) falls in one of these ranges are left out (drawn by another
     /// path, the game's characters).
     pub skip: &'a [(u32, u32)],
+    /// Scene instances whose record falls in one of these ranges stay unmerged instances, always shown by zone, and
+    /// are listed in [`Prepared::dynamic`]: the game moves and shows them every frame (objects attached to the
+    /// characters).
+    pub dynamic: &'a [(u32, u32)],
     /// Sly 3's pre-baked colours (`SceneBuild::baked`, `baked_colours`): static draws that have them take their two
     /// colours from them instead of the bake (Sly 3 rendering.md 2.3).
     pub baked: Option<Baked<'a>>,
@@ -199,6 +205,8 @@ pub struct SceneInput<'a> {
     pub anims: &'a [formats_sly2::scene::SceneAnim],
     /// Per material: the shader's second colour (kind 3's constant colour).
     pub color2: &'a [[u8; 4]],
+    /// Per scene instance: its zone mask (Sly 2 `SceneBuild::instance_zones`; empty: every zone).
+    pub zones: &'a [u32],
 }
 
 impl<'a> SceneInput<'a> {
@@ -212,11 +220,13 @@ impl<'a> SceneInput<'a> {
             lighting,
             merge: true,
             skip: &[],
+            dynamic: &[],
             baked: Some((&build.baked, &build.baked_colours)),
             mesh_flags: &build.mesh_flags,
             submesh_flags: &build.submesh_flags,
             anims: &build.anims,
             color2: &build.color2,
+            zones: &build.instance_zones,
         }
     }
 
@@ -230,11 +240,13 @@ impl<'a> SceneInput<'a> {
             lighting,
             merge: true,
             skip: &[],
+            dynamic: &[],
             baked: Some((&build.baked, &build.baked_colours)),
             mesh_flags: &build.mesh_flags,
             submesh_flags: &build.submesh_flags,
             anims: &[],
             color2: &build.color2,
+            zones: &[],
         }
     }
 }
@@ -272,6 +284,21 @@ pub struct Prepared {
     pub stats: PrepStats,
     /// Texture animations of the prepared materials ([`crate::texanim::Animator`]).
     pub anims: Vec<TexAnimDesc>,
+    /// The draws of [`SceneInput::dynamic`] records, by their index in the geometry's draws.
+    pub dynamic: Vec<DynamicDraw>,
+}
+
+/// A draw the game moves and shows every frame ([`SceneInput::dynamic`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicDraw {
+    /// Index in [`Geometry::draws`] (and in the placed instances).
+    pub draw: u32,
+    /// The scene instance's record (header offset).
+    pub record: u32,
+    /// A kind 2 or 3 stencil volume.
+    pub volume: bool,
+    /// The scene mesh's bounding radius.
+    pub radius: f32,
 }
 
 /// Converts a Sly 2 or Sly 3 scene: materials by shader and list, meshes once per submesh, every vertex of lit kinds
@@ -285,11 +312,13 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
         lighting,
         merge,
         skip,
+        dynamic,
         baked,
         mesh_flags,
         submesh_flags,
         anims,
         color2,
+        zones,
     } = input;
     let anim_of: BTreeMap<u32, &formats_sly2::scene::SceneAnim> = anims.iter().map(|a| (a.material, a)).collect();
     let mut out = Prepared::default();
@@ -314,7 +343,9 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
     // Every draw in scene order; unsorted ones may be merged into static groups afterwards ([`merge_static`]).
     let mut entries: Vec<Entry> = Vec::new();
     for (ii, inst) in scene.instances.iter().enumerate() {
-        if skip.iter().any(|&(a, b)| inst.record >= a && inst.record < b) {
+        // Dynamic records win over skipped ones: they may be nested in a skipped record (parts of a character).
+        let moved = dynamic.iter().any(|&(a, b)| inst.record >= a && inst.record < b);
+        if !moved && skip.iter().any(|&(a, b)| inst.record >= a && inst.record < b) {
             continue;
         }
         // Sly 2's pass numbers (Sly 3's plus one).
@@ -322,12 +353,25 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
             Game::Sly2 => inst.pass,
             Game::Sly3 => inst.pass.saturating_add(1),
         };
-        let m = &scene.meshes[inst.mesh as usize];
+        let zone = if moved { u32::MAX } else { zones.get(ii).copied().unwrap_or(u32::MAX) };
+        let Some(m) = scene.meshes.get(inst.mesh as usize) else {
+            out.stats.skipped_draws += 1;
+            continue;
+        };
         let transform = mat4(&inst.transform);
         let centre = transform.transform_point(Vec3::new(m.center[0], m.center[1], m.center[2]));
         let mut placed = false;
         for si in m.submeshes.clone() {
-            let sm = &scene.submeshes[si as usize];
+            let Some(sm) = scene.submeshes.get(si as usize) else { continue };
+            // Ranges outside the scene's arrays (a damaged build) are left out, not indexed.
+            let in_range =
+                |first: u32, n: u32, len: usize| (first as usize).checked_add(n as usize).is_some_and(|e| e <= len);
+            if !in_range(sm.base_vertex, sm.vertex_count, scene.vertices.len())
+                || !in_range(sm.first_index, sm.index_count, scene.indices.len())
+            {
+                out.stats.skipped_draws += 1;
+                continue;
+            }
             let Some(mat) = scene.materials.get(sm.material as usize) else { continue };
             let classified = match game {
                 Game::Sly2 => classify_sly2(mat.kind, inst.pass, mat.blend),
@@ -416,20 +460,22 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
             // Animated materials stay instances: a placed mesh fixes its pieces' images and texture coordinates.
             // Stencil volumes too: each counts and paints on its own.
             let animated = anim_of.contains_key(&(sm.material as u32)) || look.pass == Pass::Volume;
-            let key = (merge && grouped && !animated && sm.vertex_count as usize <= MAX_MERGED_VERTICES).then(|| {
-                let cell = |v: f32| render::math::floor(v / STATIC_CELL) as i32;
-                GroupKey {
-                    order: look.order,
-                    pass: look.pass as u8,
-                    blend: look.blend as u8,
-                    two_step: look.two_step,
-                    no_darkening: look.no_darkening,
-                    cutoff: cutoff.to_bits(),
-                    mirrored,
-                    lit,
-                    cell: (cell(centre.x), cell(centre.y), cell(centre.z)),
-                }
-            });
+            let key = (merge && grouped && !animated && !moved && sm.vertex_count as usize <= MAX_MERGED_VERTICES)
+                .then(|| {
+                    let cell = |v: f32| render::math::floor(v / STATIC_CELL) as i32;
+                    GroupKey {
+                        order: look.order,
+                        pass: look.pass as u8,
+                        blend: look.blend as u8,
+                        two_step: look.two_step,
+                        no_darkening: look.no_darkening,
+                        cutoff: cutoff.to_bits(),
+                        mirrored,
+                        lit,
+                        zone,
+                        cell: (cell(centre.x), cell(centre.y), cell(centre.z)),
+                    }
+                });
             let (lo, hi) = mesh_bounds[mesh as usize];
             // The two colours (rendering.md 2.3): bit 0 of the mesh body's flags lights it per frame; otherwise
             // kinds 1 and 7 take the pre-baked table (strip-list flag 0x20) or the static bake, and the other kinds
@@ -475,7 +521,9 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
                 mirrored,
                 grouped,
                 key,
+                zone,
                 bounds: world_bounds(&transform, lo, hi),
+                dynamic: moved.then_some((inst.record, volume, m.radius)),
             });
         }
         if placed && pass != 1 {
@@ -483,7 +531,17 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
         }
     }
     let groups = merge_static(&entries);
-    g.draws = entries.into_iter().filter(|e| e.key.is_none()).map(|e| e.draw).collect();
+    let kept: Vec<&Entry> = entries.iter().filter(|e| e.key.is_none()).collect();
+    out.dynamic = kept
+        .iter()
+        .enumerate()
+        .filter_map(|(k, e)| {
+            let (record, volume, radius) = e.dynamic?;
+            Some(DynamicDraw { draw: k as u32, record, volume, radius })
+        })
+        .collect();
+    g.draw_zones = kept.iter().map(|e| e.zone).collect();
+    g.draws = kept.iter().map(|e| e.draw).collect();
     out.stats.weights = g.weights.len() as u32;
     out.stats.static_pieces = groups.iter().map(|s| s.pieces.len() as u32).sum();
     out.stats.static_groups = groups.len() as u32;
@@ -584,8 +642,12 @@ struct Entry {
     grouped: bool,
     /// Its static group's key while it may be merged; `None`: drawn as an instance.
     key: Option<GroupKey>,
+    /// Its instance's zone mask.
+    zone: u32,
     /// World-space bounds (min, max).
     bounds: (Vec3, Vec3),
+    /// A [`SceneInput::dynamic`] draw: its record, whether it is a volume, the mesh radius.
+    dynamic: Option<(u32, bool, f32)>,
 }
 
 /// How far apart (game units) two pieces' bounds must be for their draw order not to matter: depth values of
@@ -677,6 +739,7 @@ fn merge_static(entries: &[Entry]) -> Vec<StaticGroup> {
                         material: e.draw.material,
                         mirrored: e.mirrored,
                         after_mesh: e.draw.mesh,
+                        zone: e.zone,
                         pieces: Vec::new(),
                     },
                     e.bounds,
@@ -753,6 +816,7 @@ mod tests {
             cutoff: 0,
             mirrored: false,
             lit: false,
+            zone: u32::MAX,
             cell: (cell, 0, 0),
         };
         Entry {
@@ -769,7 +833,9 @@ mod tests {
             mirrored: false,
             grouped: true,
             key: Some(key),
+            zone: u32::MAX,
             bounds: (Vec3::new(at, 0.0, 0.0), Vec3::new(at + 10.0, 10.0, 10.0)),
+            dynamic: None,
         }
     }
 
@@ -808,5 +874,125 @@ mod tests {
         assert_eq!((w.mid, w.shadow, w.high, w.alpha), ([248; 3], 128, [0; 3], 0));
         // Half-white vertices: (128 * 255 + 255) / 256 = 128.
         assert_eq!(unlit_weights([0x80, 0x80, 0x80, 0xff], [0xff; 4]).mid, [128; 3]);
+    }
+
+    #[test]
+    fn damaged_scenes_are_skipped_not_indexed() {
+        use formats::scene::{SceneInstance, SceneMaterial, SceneMesh, SceneSubmesh};
+        let mut scene = Scene::default();
+        scene.materials.push(SceneMaterial { kind: 1, blend: 0, pass: 3, color: [255; 4], texture: None });
+        // A submesh past the (empty) vertex and index arrays, and an instance of a mesh that does not exist.
+        scene.submeshes.push(SceneSubmesh {
+            first_index: 0,
+            index_count: 3,
+            base_vertex: 0,
+            vertex_count: 3,
+            material: 0,
+        });
+        scene.meshes.push(SceneMesh { record: 0, mesh: 0, submeshes: 0..1, center: [0.0; 3], radius: 1.0 });
+        let inst = SceneInstance {
+            mesh: 0,
+            transform: formats::geometry::Affine::IDENTITY,
+            mirrored: false,
+            pass: 3,
+            billboard: 0,
+            record: 0,
+            clone_of_proxy: None,
+            issuing_mesh: 0,
+        };
+        scene.instances.push(inst);
+        scene.instances.push(SceneInstance { mesh: 9, ..inst });
+        let input = SceneInput {
+            game: Game::Sly2,
+            scene: &scene,
+            slot1: &[],
+            self_illum: &[],
+            lighting: None,
+            merge: true,
+            skip: &[],
+            dynamic: &[],
+            baked: None,
+            mesh_flags: &[],
+            submesh_flags: &[],
+            anims: &[],
+            color2: &[],
+            zones: &[],
+        };
+        let p = prepare(input).unwrap();
+        assert!(p.geometry.draws.is_empty() && p.geometry.static_groups.is_empty());
+        assert_eq!(p.stats.skipped_draws, 2);
+    }
+
+    #[test]
+    fn dynamic_records_stay_instances_and_win_over_skips() {
+        use formats::scene::{SceneInstance, SceneMaterial, SceneMesh, SceneSubmesh};
+        // Three opaque instances of one triangle, records 10, 20 and 30: 20 is dynamic inside a skipped 0..25 range,
+        // 30 is plain. The dynamic one stays an instance and is listed; 10 is skipped; 30 may be merged.
+        let mut scene = Scene::default();
+        scene.materials.push(SceneMaterial { kind: 1, blend: 0, pass: 3, color: [255; 4], texture: None });
+        let v = |x: f32| formats::geometry::GpuVertex {
+            position: [x, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0; 2],
+            color: [0x80; 4],
+        };
+        scene.vertices.extend([v(0.0), v(1.0), v(2.0)]);
+        scene.indices.extend([0, 1, 2]);
+        scene.submeshes.push(SceneSubmesh {
+            first_index: 0,
+            index_count: 3,
+            base_vertex: 0,
+            vertex_count: 3,
+            material: 0,
+        });
+        scene.meshes.push(SceneMesh { record: 0, mesh: 0, submeshes: 0..1, center: [1.0, 0.0, 0.0], radius: 7.0 });
+        let inst = SceneInstance {
+            mesh: 0,
+            transform: formats::geometry::Affine::IDENTITY,
+            mirrored: false,
+            pass: 3,
+            billboard: 0,
+            record: 10,
+            clone_of_proxy: None,
+            issuing_mesh: 0,
+        };
+        for record in [10, 20, 30] {
+            scene.instances.push(SceneInstance { record, ..inst });
+        }
+        let input = SceneInput {
+            game: Game::Sly2,
+            scene: &scene,
+            slot1: &[],
+            self_illum: &[],
+            lighting: None,
+            merge: true,
+            skip: &[(0, 25)],
+            dynamic: &[(20, 21)],
+            baked: None,
+            mesh_flags: &[],
+            submesh_flags: &[],
+            anims: &[],
+            color2: &[],
+            zones: &[],
+        };
+        let p = prepare(input).unwrap();
+        assert_eq!(p.dynamic.len(), 1);
+        let d = p.dynamic[0];
+        assert_eq!((d.record, d.volume, d.radius), (20, false, 7.0));
+        assert!((d.draw as usize) < p.geometry.draws.len());
+        assert_eq!(p.geometry.draw_zones[d.draw as usize], u32::MAX);
+    }
+
+    #[test]
+    fn groups_never_mix_zone_masks() {
+        // Two far-apart pieces of one look, in zones 1 and 2: two groups, each with its mask.
+        let mut e = [entry(0, Pass::Opaque, 0, 0.0), entry(1, Pass::Opaque, 0, 500.0)];
+        for (k, x) in e.iter_mut().enumerate() {
+            let zone = 1 << k;
+            x.zone = zone;
+            x.key = x.key.map(|key| GroupKey { zone, ..key });
+        }
+        let g = merge_static(&e);
+        assert_eq!(g.iter().map(|g| g.zone).collect::<Vec<_>>(), [1, 2]);
     }
 }

@@ -5,8 +5,12 @@
 //! fonts and timings. See `docs/ui.md`.
 
 pub mod font;
+pub mod front;
+pub mod grid;
 pub mod hud;
 pub mod jobs;
+pub mod options;
 pub mod pause;
+pub mod shop;
 
 pub use jobs::*;

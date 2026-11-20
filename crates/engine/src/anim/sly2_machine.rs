@@ -230,6 +230,30 @@ impl MachineRun {
         }
     }
 
+    /// Walks to `goal` at once, step by step along the route (each state entered is reported), ending a step under
+    /// way. With no route the walk stops where it is.
+    pub fn walk(&mut self, def: &MachineDef, goal: i32, random: &mut dyn FnMut() -> f32, out: &mut Vec<RunEvent>) {
+        self.step = None;
+        self.goal = None;
+        for _ in 0..MAX_INSTANT_STEPS {
+            if self.state == goal {
+                return;
+            }
+            match def.choose(self.state, goal, random()) {
+                Some((_, _, to)) => {
+                    let from = self.state;
+                    self.state = to;
+                    self.held = 0.0;
+                    out.push(RunEvent::Entered { from, to });
+                }
+                None => {
+                    out.push(RunEvent::NoRoute { goal });
+                    return;
+                }
+            }
+        }
+    }
+
     /// Advances by `dt` seconds. `length(object)` gives a clip's duration; `random()` a number in [0, 1).
     pub fn update(
         &mut self,
@@ -342,5 +366,12 @@ mod tests {
         assert!(ev.contains(&RunEvent::NoRoute { goal: 1 }));
         r.set_goal(4, true, &mut ev);
         assert_eq!(r.state, 4);
+        // Walking: 1 → 2 → 3 at once, each state reported.
+        let mut r = MachineRun::new(&d);
+        let mut ev = Vec::new();
+        r.walk(&d, 3, &mut || 0.0, &mut ev);
+        assert_eq!(r.state, 3);
+        let entered: Vec<_> = ev.iter().filter(|e| matches!(e, RunEvent::Entered { .. })).collect();
+        assert_eq!(entered.len(), 2);
     }
 }

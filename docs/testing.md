@@ -260,3 +260,17 @@ character on the d-pad every 4 s. A stage fails when its world is not reached or
 the route goes on), its state never changes, its host errors grow in its second half, the two runs differ, or (release
 builds) its 95th-percentile frame is over 16.7 ms. Each line gives the frame times, the update share's 95th
 percentile, the load time, and the script and host error counts with the commonest kinds.
+
+## Sly 2 and Sly 3 game sessions on PC
+
+`slynx_game` also registers `sly2` and `sly3` (OpenGL, offscreen when headless): the game sessions the Switch NROs
+run, with captures, for checking lighting, characters and HUD.
+
+```sh
+cargo run --release -p game --example slynx_game -- run --app sly2 --opt world=3 --frames 90 --capture 80 --out DIR
+cargo run --release -p game --example slynx_game -- run --app sly3 --opt world=v_apt --frames 90 --capture 80 --out DIR
+```
+
+`sly2`: `world=ROW` or a world id (`0x3B`), default the hub; `disc=PATH`, default `SLYNX_DISC_SLY2`. `sly3`:
+`world=NAME` or `slotN`, default v_apt; `disc=PATH`, default `SLYNX_DISC_SLY3`.
+

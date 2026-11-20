@@ -23,7 +23,7 @@ pub mod opt {
     pub const COMBINATION: u16 = 1046;
     /// Hint dialogues: (kind, dialogue OID) typed arguments.
     pub const HINTS: u16 = 1047;
-    /// Lock group: key slots.
+    /// Lock group: its lock objects, one OID per entry (one key slot each).
     pub const SLOTS: u16 = 1000;
     /// Lock group: index of its world-state bit (`2 << index`).
     pub const INDEX: u16 = 1002;
@@ -49,6 +49,12 @@ pub const LOCK_CLOSED: i16 = 558;
 pub const LOCK_OPEN: i16 = 559;
 /// See [`LOCK_CLOSED`].
 pub const LOCK_PARTIAL: i16 = 560;
+/// See [`LOCK_CLOSED`]: a lock without a key.
+pub const LOCK_EMPTY: i16 = 561;
+/// The lock class.
+pub const LOCK_CLASS: i16 = 92;
+/// A lock group holds at most this many locks.
+pub const MAX_LOCKS: usize = 8;
 
 /// A vault's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,11 +200,18 @@ impl ClassBehavior for Vault {
     }
 }
 
-/// A lock group (class 93): opens when the episode has as many keys as it has slots.
+/// A lock group (class 93, level-flow.md 7.1): its locks are the objects option 1000 names, then the lock objects
+/// among its children (at most 8). Used with k keys of the episode and n locks, lock i shows 561 (empty) when i ≥ k,
+/// else 559 (open) when k ≥ n and 560 (partly filled) otherwise; the group opens (559, its bit `1 << (index + 1)` in
+/// the episode's flags) when k ≥ n, else shows 560. Loaded with its bit set, everything shows 559; otherwise 558.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LockGroup {
     /// Open.
     pub open: bool,
+    /// The locks, in order.
+    pub locks: Vec<crate::object::Handle>,
+    /// The key count the states were last set for.
+    pub shown: Option<u32>,
 }
 
 impl LockGroup {
@@ -206,10 +219,25 @@ impl LockGroup {
         2 << cx.world.options(cx.me).and_then(|o| o.i32(opt::INDEX)).unwrap_or(0).clamp(0, 30)
     }
 
-    fn goal(cx: &mut Cx<'_>, g: i16) {
-        for m in cx.world.children_of_class(cx.me, id::STATE_MACHINE) {
+    fn goal_of(cx: &mut Cx<'_>, h: crate::object::Handle, g: i16) {
+        for m in cx.world.children_of_class(h, id::STATE_MACHINE) {
             cx.world.set_option(m, 516, OptionValue::Short(g));
         }
+    }
+
+    fn goal(cx: &mut Cx<'_>, g: i16) {
+        Self::goal_of(cx, cx.me, g);
+    }
+
+    /// The lock states for `keys` keys and `n` locks: each lock's, then the group's (level-flow.md 7.1).
+    pub fn states(keys: u32, n: u32) -> (impl Iterator<Item = i16>, i16) {
+        let open = keys >= n;
+        let locks = (0..n).map(move |i| match () {
+            _ if i >= keys => LOCK_EMPTY,
+            _ if open => LOCK_OPEN,
+            _ => LOCK_PARTIAL,
+        });
+        (locks, if open { LOCK_OPEN } else { LOCK_PARTIAL })
     }
 }
 
@@ -219,11 +247,32 @@ impl ClassBehavior for LockGroup {
     }
 
     fn post_load(&mut self, cx: &mut Cx<'_>) {
-        let episode = cx.world.info.id >> 8;
-        if cx.progress.episode_flags.get(&episode).is_some_and(|f| f & Self::bit(cx) != 0) {
-            self.open = true;
-            Self::goal(cx, LOCK_OPEN);
+        let named: Vec<i16> = cx
+            .world
+            .options(cx.me)
+            .map(|o| o.all(opt::SLOTS).filter_map(OptionValue::as_i32).map(|v| v as i16).collect())
+            .unwrap_or_default();
+        self.locks.clear();
+        for oid in named {
+            if let Some(h) = cx.world.find_oid(oid, Some(cx.me))
+                && !self.locks.contains(&h)
+            {
+                self.locks.push(h);
+            }
         }
+        for h in cx.world.children_of_class(cx.me, LOCK_CLASS) {
+            if !self.locks.contains(&h) {
+                self.locks.push(h);
+            }
+        }
+        self.locks.truncate(MAX_LOCKS);
+        let episode = cx.world.info.id >> 8;
+        self.open = cx.progress.episode_flags.get(&episode).is_some_and(|f| f & Self::bit(cx) != 0);
+        let state = if self.open { LOCK_OPEN } else { LOCK_CLOSED };
+        for h in self.locks.clone() {
+            Self::goal_of(cx, h, state);
+        }
+        Self::goal(cx, state);
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
@@ -233,16 +282,37 @@ impl ClassBehavior for LockGroup {
             return;
         }
         let episode = cx.world.info.id >> 8;
-        let slots = cx.world.options(cx.me).and_then(|o| o.i32(opt::SLOTS)).unwrap_or(1).max(1) as u32;
+        let n = self.locks.len().max(1) as u32;
         let keys = cx.progress.keys.get(&episode).copied().unwrap_or(0);
-        if keys >= slots {
+        if self.shown == Some(keys) {
+            return;
+        }
+        self.shown = Some(keys);
+        let (locks, group) = Self::states(keys, n);
+        for (h, s) in self.locks.clone().into_iter().zip(locks) {
+            Self::goal_of(cx, h, s);
+        }
+        Self::goal(cx, group);
+        if group == LOCK_OPEN {
             self.open = true;
             let bit = Self::bit(cx);
             *cx.progress.episode_flags.entry(episode).or_insert(0) |= bit;
-            Self::goal(cx, LOCK_OPEN);
             cx.raise(script::event::TRIGGERED, Vec::new());
-        } else if keys > 0 {
-            Self::goal(cx, LOCK_PARTIAL);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn lock_states_follow_the_key_count() {
+        let (locks, group) = LockGroup::states(2, 3);
+        assert_eq!((locks.collect::<Vec<_>>(), group), (vec![LOCK_PARTIAL, LOCK_PARTIAL, LOCK_EMPTY], LOCK_PARTIAL));
+        let (locks, group) = LockGroup::states(7, 3);
+        assert_eq!((locks.collect::<Vec<_>>(), group), (vec![LOCK_OPEN; 3], LOCK_OPEN));
+        assert_eq!(Vault::combination(937), [9, 3, 7]);
     }
 }

@@ -257,7 +257,9 @@ pub fn item_bytes<'a>(data: Data, len: usize, world: &'a [u8], texture_data: &'a
         Data::Inline(o) => (world, o as usize),
         Data::TextureData(o) => (texture_data, o as usize),
     };
-    src.get(off..off + len).ok_or(Error::Corrupt { offset: off, what: "texture item outside its data" })
+    off.checked_add(len)
+        .and_then(|end| src.get(off..end))
+        .ok_or(Error::Corrupt { offset: off, what: "texture item outside its data" })
 }
 
 /// The colour-grading numbers (textures.md 5).
@@ -345,7 +347,8 @@ pub fn decode(
         FORMAT_8BIT => 8,
         _ => return Err(Error::Corrupt { offset: bitmap.offset as usize, what: "unknown pixel format" }),
     };
-    let texels = item_bytes(bitmap.data, w * h * bits / 8, world, texture_data)?;
+    // Rounded up: a 4-bit image of odd size ends in half a byte.
+    let texels = item_bytes(bitmap.data, (w * h * bits).div_ceil(8), world, texture_data)?;
     let n = palette.colors() as usize;
     let raw = item_bytes(palette.data, n * 4, world, texture_data)?;
     let mut lut = Vec::with_capacity(n);
@@ -404,5 +407,31 @@ mod tests {
         assert_eq!(s.palettes_per_frame(), 2);
         s.kind = 0;
         assert_eq!(s.palettes_per_frame(), 1);
+    }
+
+    #[test]
+    fn odd_4_bit_images_end_in_half_a_byte() {
+        let pal = Palette {
+            id: 0,
+            storage: 1,
+            filter: Filter::default(),
+            flags: 2 << 7,
+            data: Data::TextureData(0),
+            offset: 0,
+        };
+        let td = [10, 20, 30, 0x80, 40, 50, 60, 0x40, 0x10, 0x01];
+        let bmp = Bitmap {
+            id: 0,
+            storage: 1,
+            filter: Filter::default(),
+            width: 3,
+            height: 1,
+            format: FORMAT_4BIT,
+            size: 2,
+            data: Data::TextureData(8),
+            offset: 0,
+        };
+        assert_eq!(decode(&bmp, &pal, &[], &td, None).unwrap().pixels.len(), 12);
+        assert!(decode(&bmp, &pal, &[], &td[..9], None).is_err());
     }
 }

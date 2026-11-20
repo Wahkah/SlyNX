@@ -36,11 +36,15 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// From a parsed solid.
+    /// From a parsed solid. Each stored surface is a convex polygon, not only its three corners (specs/sly1
+    /// collision.md 1.2): the meshes are covered with each surface's polygon, the convex hull in its plane of its
+    /// corners and the ends of every edge naming it (`CollisionMesh::with_polygons`).
     pub fn from_solid(solid: &Solid) -> Shape {
+        let polygons = |m: &formats::collision::CollisionMesh| m.with_polygons();
         Shape {
-            main: TriMesh::new(&solid.mesh, &solid.tree),
-            camera: (!solid.camera_mesh.is_empty()).then(|| TriMesh::new(&solid.camera_mesh, &solid.camera_tree)),
+            main: TriMesh::new(&polygons(&solid.mesh), &solid.tree),
+            camera: (!solid.camera_mesh.is_empty())
+                .then(|| TriMesh::new(&polygons(&solid.camera_mesh), &solid.camera_tree)),
         }
     }
 
@@ -429,6 +433,48 @@ impl CollisionWorld {
             body: h.body,
             is_ground: h.normal[2] > GROUND_Z,
         })
+    }
+
+    /// The ground below `point` within `max_drop` by the collision trees' one-sided rule ([`TriMesh::tree_floor`]):
+    /// the nearest floor of any body whose bounds the drop crosses, with the deciding surface's normal. For floors
+    /// whose stored surfaces do not cover the point (an outline stored incompletely, Sly 3's v_apt surface 401).
+    pub fn tree_ground_probe(&self, point: Vec3, max_drop: f32, filter: &QueryFilter) -> Option<GroundHit> {
+        let end = add(point, [0.0, 0.0, -max_drop]);
+        let q = Aabb { min: min3(point, end), max: max3(point, end) };
+        let mut best: Option<GroundHit> = None;
+        self.top.walk(
+            |b| b.overlaps(&q),
+            |items| {
+                for &i in items {
+                    let Some(body) = self.usable(i, filter) else { continue };
+                    if !body.bounds.overlaps(&q) {
+                        continue;
+                    }
+                    let mesh = self.shapes[body.shape.0 as usize].mesh(filter.camera);
+                    let lp = body.inverse.transform_point(point);
+                    let ld = normalize(mat_mul_vec(&body.inverse.cols, [0.0, 0.0, -1.0]));
+                    let scale_z = crate::math::length(mat_mul_vec(&body.inverse.cols, [0.0, 0.0, max_drop]));
+                    let Some((d_local, tri)) = mesh.tree_floor(lp, ld, scale_z) else { continue };
+                    let distance = d_local * max_drop / scale_z.max(1e-6);
+                    if best.as_ref().is_none_or(|b| distance < b.distance) {
+                        let mut n = mat_mul_vec(&body.transform.cols, mesh.normal(tri));
+                        if n[2] < 0.0 {
+                            n = scale(n, -1.0);
+                        }
+                        best = Some(GroundHit {
+                            distance,
+                            point: madd(point, [0.0, 0.0, -1.0], distance),
+                            normal: n,
+                            material: body.material,
+                            body: BodyId(i),
+                            is_ground: n[2] > GROUND_Z,
+                        });
+                    }
+                }
+                true
+            },
+        );
+        best
     }
 
     /// The ground below a sphere: a sphere sweep straight down by `max_drop`, which also finds ledges and slopes

@@ -7,6 +7,7 @@
 
 use alloc::format;
 
+use platform_api::FileSystem as _;
 use platform_switch::platform_api::{Event, Platform};
 use platform_switch::{SwitchConfig, SwitchPlatform, debug_log};
 use render::RenderError;
@@ -70,6 +71,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         platform.set_cpu_boost(false);
     }
 
+    let mut perf = render::perf::PerfMeter::new();
+    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let mut last = now();
     let mut log_at = last + LOG_EVERY_NS;
     let mut paused = false;
@@ -95,10 +98,15 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                 Err(e) => panic!("update: {e}"),
             }
         }
+        // The performance overlay: L + R + ZL; numbers to perf.log in the user folder every five seconds.
+        let _ = perf.show(&mut session.renderer, input.buttons, input.pressed);
         match session.render(frame_ns as f64 * 1e-6) {
-            Ok(_) => {}
+            Ok(stats) => perf.record(frame_ns, now() - t, &stats),
             Err(RenderError::LimitReached(what)) => session.message = Some(format!("renderer limit reached: {what}")),
             Err(e) => panic!("render: {e}"),
+        }
+        if perf.log_due() {
+            let _ = platform.fs().write_user(render::perf::LOG_PATH, perf.log().as_bytes());
         }
         if t >= log_at {
             for line in session.status_lines(frame_ns as f64 * 1e-6) {

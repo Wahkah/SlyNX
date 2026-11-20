@@ -74,6 +74,16 @@ pub mod class {
     pub const WATER: i16 = 101;
     /// Noise templates.
     pub const NOISE_TEMPLATE: i16 = 139;
+    /// Continuous particle emitters (Sly 2's 29; effects.md 1).
+    pub const EMITTER: i16 = 27;
+    /// The grouper (Sly 2's explosion group 31).
+    pub const GROUPER: i16 = 29;
+    /// Explosion parts (Sly 2's 32).
+    pub const EXPLOSION_PART: i16 = 30;
+    /// Explosion emitters (Sly 2's 33).
+    pub const EXPLOSION: i16 = 31;
+    /// Skies (Sly 2's 97).
+    pub const SKY: i16 = 110;
     /// Coin.
     pub const COIN: i16 = 103;
     /// Task item.
@@ -127,6 +137,42 @@ pub fn aliases(class: i16) -> &'static [(u16, u16)] {
         class::BARRIER => &[(513, 458)],
         class::WATER => &[(930, 874)],
         class::NOISE_TEMPLATE => &[(1184, 1090), (1185, 1091), (1186, 1092), (1187, 1093), (1188, 1094)],
+        // effects.md 2: the emitter's options with a Sly 2 counterpart (609 the rate, Sly 2's 472).
+        class::EMITTER => &[
+            (609, 472),
+            (630, 496),
+            (631, 497),
+            (632, 498),
+            (636, 502),
+            (660, 526),
+            (661, 527),
+            (611, 477),
+            (628, 494),
+            (621, 487),
+        ],
+        // effects.md 3: explosion emitters and parts.
+        class::EXPLOSION | class::EXPLOSION_PART => &[
+            (672, 538),
+            (673, 539),
+            (680, 546),
+            (682, 548),
+            (683, 549),
+            (684, 550),
+            (690, 556),
+            (693, 559),
+            (694, 560),
+            (696, 562),
+            (697, 563),
+            (698, 564),
+            (700, 568),
+            (704, 570),
+            (715, 581),
+            (723, 589),
+            (724, 590),
+            (725, 591),
+            (726, 592),
+            (727, 593),
+        ],
         _ => &[],
     }
 }
@@ -211,6 +257,10 @@ pub fn for_class(world: &World, h: Handle) -> Behavior {
             .map_or(Behavior::None, |p| Behavior::Sly2Pickup(Box::new(p))),
         Some(class::BARRIER) => Behavior::Custom(Box::new(interactables::Barrier::new(world, h))),
         Some(class::WATER) => Behavior::Sly2Water(Box::default()),
+        Some(class::EMITTER) => Behavior::Sly2Emitter(Box::default()),
+        Some(class::GROUPER | class::EXPLOSION_PART | class::EXPLOSION) => Behavior::Sly2Explosion(Box::default()),
+        // Sly 2's sky (97) has no behaviour here; Sly 1's keeps it centred on the camera [I].
+        Some(class::SKY) => Behavior::Sky(Box::default()),
         Some(interactables::class::USE_POINT) => Behavior::Custom(Box::new(interactables::UsePoint::new(world, h))),
         _ => devices::for_class(world, h),
     }

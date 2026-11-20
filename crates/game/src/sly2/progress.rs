@@ -85,7 +85,12 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
     pub fn continue_game<F: FileSystem>(&mut self, store: &Sly2Store<F>, slot: Slot) -> Result<(), String> {
         let tree = self.game.as_ref().and_then(|g| sly2_jobs::tree_of(&g.world)).ok_or("no Sly 2 world loaded")?;
         let loaded = store.load(slot, &Progress::new(tree)).map_err(|e| alloc::format!("{e}"))?;
-        let p = loaded.progress;
+        self.continue_from(loaded.progress)
+    }
+
+    /// Continues a loaded progress block (level-flow.md 3): the saved episode's hub at point 393, or the menu world
+    /// when that episode is complete.
+    pub fn continue_from(&mut self, p: Progress) -> Result<(), String> {
         let episode = p.int(&["episodeCurrent"]).max(0) as u8;
         let hub = self.hub_row(episode).unwrap_or(sly2_jobs::BOOT_ROW as usize);
         let done = self.episode_percent(&p, hub) >= 100;
@@ -103,7 +108,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
     }
 
     /// The hub row of `episode` (the level table's hub flag).
-    fn hub_row(&self, episode: u8) -> Option<usize> {
+    pub(super) fn hub_row(&self, episode: u8) -> Option<usize> {
         let w = self.game.as_ref()?.world.sly2.as_deref()?;
         w.header.level_rows.iter().position(|r| r.hub && r.episode == episode)
     }

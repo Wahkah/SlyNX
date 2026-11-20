@@ -44,6 +44,8 @@ fn sly2_run(path: &std::path::Path, row: usize, class: i16) -> Option<Run> {
     let disc = formats_sly2::Disc::open_path(path).map_err(|e| e.to_string());
     let mut s = Sly2Session::new(NullBackend::new(640, 360), disc, 7);
     s.load_row(row).unwrap_or_else(|e| panic!("row {row}: {e}"));
+    // One frame first: objects removed at start (a job's machines, held until the job) leave the world in it.
+    s.update(&FrameInput::default(), 1.0 / 60.0);
     if !s.drive(Some(class)) {
         return None;
     }
@@ -64,6 +66,7 @@ fn sly3_run(path: &std::path::Path, slot: usize, class: i16) -> Option<Run> {
     let disc = formats_sly3::Disc::open_path(path).map_err(|e| e.to_string());
     let mut s = Sly3Session::new(NullBackend::new(640, 360), disc, 7);
     s.load_slot(slot).unwrap_or_else(|e| panic!("slot {slot}: {e}"));
+    s.update(&FrameInput::default(), 1.0 / 60.0);
     if !s.drive(Some(class)) {
         return None;
     }
@@ -80,15 +83,13 @@ fn sly3_run(path: &std::path::Path, slot: usize, class: i16) -> Option<Run> {
     Some(Run { live, moved, turned, hashes })
 }
 
-/// `must_move`: an active machine must move. Off for the two that do not move yet although active and attached
-/// (the combat car of row 33 and the remote car of c_ext; open, docs/engine.md "Vehicles and minigames").
-fn check(name: &str, a: Option<Run>, b: Option<Run>, must_move: bool) -> bool {
+fn check(name: &str, a: Option<Run>, b: Option<Run>) -> bool {
     let (Some(a), Some(b)) = (a, b) else {
         eprintln!("{name}: no machine of the class in the loaded world");
         return false;
     };
     eprintln!("{name}: active {}, moved {:.1}, turned {:.3}", a.live, a.moved, a.turned);
-    if a.live && must_move {
+    if a.live {
         assert!(a.moved > 1.0 || a.turned > 0.01, "{name}: the machine did not move");
     }
     assert_eq!(a.hashes, b.hashes, "{name}: not deterministic");
@@ -102,7 +103,7 @@ fn sly2_machines_take_input_and_move() {
     let cases =
         [(33, 77, "combat car (row 33)", true), (14, 72, "hack ship (row 14)", true), (8, 69, "turret (row 8)", false)];
     for (row, class, name, required) in cases {
-        let found = check(name, sly2_run(&path, row, class), sly2_run(&path, row, class), class != 77);
+        let found = check(name, sly2_run(&path, row, class), sly2_run(&path, row, class));
         assert!(found || !required, "{name}: expected in the loaded world");
     }
 }
@@ -122,7 +123,68 @@ fn sly3_machines_take_input_and_move() {
         (15, 74, "hack ship (h_ext)", false),
     ];
     for (slot, class, name, required) in cases {
-        let found = check(name, sly3_run(&path, slot, class), sly3_run(&path, slot, class), class != 85);
+        let found = check(name, sly3_run(&path, slot, class), sly3_run(&path, slot, class));
         assert!(found || !required, "{name}: expected in the loaded world");
+    }
+}
+
+/// Starting a Sly 2 job's machine task brings its machine in and hands it to the player (the vehicles' job hook).
+fn sly2_job_run(path: &std::path::Path, row: usize, task: &str, class: i16) -> (bool, Run, usize) {
+    let disc = formats_sly2::Disc::open_path(path).map_err(|e| e.to_string());
+    let mut s = Sly2Session::new(NullBackend::new(640, 360), disc, 7);
+    s.load_row(row).unwrap_or_else(|e| panic!("row {row}: {e}"));
+    s.update(&FrameInput::default(), 1.0 / 60.0);
+    assert!(s.start_task(task), "{task}");
+    let handed = |s: &Sly2Session<NullBackend, std::fs::File>| {
+        let w = &s.game.as_ref().unwrap().world;
+        w.shared.driving.filter(|&m| w.class(m) == Some(class) && w.is_active(m))
+    };
+    for _ in 0..60 {
+        if handed(&s).is_some() {
+            break;
+        }
+        s.update(&FrameInput::default(), 1.0 / 60.0);
+    }
+    let Some(m) = handed(&s) else {
+        return (false, Run { live: false, moved: 0.0, turned: 0.0, hashes: Vec::new() }, 0);
+    };
+    let start = s.game.as_ref().unwrap().world.world_transform(m).unwrap();
+    let mut hashes = Vec::new();
+    let mut fired = 0;
+    for f in 0..120 {
+        s.update(&input(f), 1.0 / 60.0);
+        hashes.push(s.state_hash());
+        fired += s.game.as_ref().unwrap().world.shared.vehicles.shots.len();
+    }
+    let w = &s.game.as_ref().unwrap().world;
+    let end = w.world_transform(m).unwrap();
+    let (moved, turned) = delta(&start, &end);
+    if class == 69 {
+        let launcher = w.options(m).and_then(|o| o.i32(engine::behavior::vehicles::turret::LAUNCHER_OPTION));
+        eprintln!(
+            "turret: launcher option {launcher:?}, shot speed {}",
+            engine::behavior::vehicles::turret::shot_speed(w, m)
+        );
+    }
+    (true, Run { live: true, moved, turned, hashes }, fired)
+}
+
+#[test]
+fn sly2_jobs_hand_their_machines_to_the_player() {
+    let Some(path) = require_disc(Game::Sly2, "sly2_jobs_hand_their_machines_to_the_player") else { return };
+    for (row, task, class, name) in [
+        (33, "t7_robot_war", 77, "combat car"),
+        (14, "t4_hack_station1", 72, "hack ship"),
+        (8, "t2_turret_attack_chopper", 69, "turret"),
+    ] {
+        let (handed, a, fired) = sly2_job_run(&path, row, task, class);
+        assert!(handed, "{name}: the job did not hand its machine over");
+        let (_, b, _) = sly2_job_run(&path, row, task, class);
+        eprintln!("{name}: moved {:.1}, turned {:.3}, projectiles seen {fired}", a.moved, a.turned);
+        assert!(a.moved > 1.0 || a.turned > 0.01, "{name}: did not move under the pad");
+        assert_eq!(a.hashes, b.hashes, "{name}: not deterministic");
+        if class == 69 {
+            assert!(fired > 0, "the turret's fire sends projectiles");
+        }
     }
 }

@@ -10,6 +10,9 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 (2026-11-12), src/new_2584a8, src/new_258658 (emitter loaders), src/dzg-emitter (explosion-group loader), src/new_161458, src/sensor-geom (mission loaders), src/po-screen, src/screen-font and nonmatching/screen-font (screen-movie loaders)
     used_for: first reading of the field order; every field re-walked on the disc
+  - kind: disc
+    what: SCUS-97316 (USA), streamed gadget-grid screen files 885–887 parsed to their exact ends; executable colour-pair conversion at 0x213300 (2026-11-19)
+    used_for: §4 field names of placements (item, slot, link), colour-pair order (offset word, then scale word) and 16-bit values (slots a key empties)
 date: 2026-11-14
 ---
 
@@ -86,7 +89,7 @@ Streamed: 258 of 1,659 class-126 bodies; never on classes 127 to 131 [D].
 | Kind | Payload | Items on the disc |
 |---:|---|---:|
 | 0, 5 | nothing | 86, 266 |
-| 1 | shape: `u16` primitive count; per primitive 5 × `u8` (vertex count `k`, three settings, a "has extra bytes" flag), then `k` × (`u32` RGBA, `u8`, `s16` x, `s16` y) | 20,117 |
+| 1 | shape: `u16` primitive count; per primitive 5 × `u8` (vertex count `k`; draw layer; topology 1 fan / 2 strip / 3 line strip; unused, always 1; per-vertex-byte flag), then `k` × (`u32` RGBA, `u8`, `s16` x, `s16` y). Setting-byte meanings: ../user-interface.md 3 | 20,117 |
 | 2 | image: 36-byte 3 × 3 matrix, `u16` count `m`, `m` × 24 bytes | 0 |
 | 3 | text: `u32`, `u32`, 3 × `f32`, `s8`, `s8` text kind, then an `s32` only if the text kind is 0 or 1 | 4,093 |
 | 4 | `u16` | 8,494 |
@@ -100,9 +103,9 @@ label: `f32` duration, `s32` label ID, `u16` key count, then per key:
 | Field | Type |
 |---|---|
 | time | `f32` |
-| placements | `u8` count, each `u16`, `u16`, `u16`, `s16`, `u8`, `u8`, `s32`, 36-byte 3 × 3 matrix (50 bytes) |
-| colour pairs | `u8` count, each 2 × `u32` |
-| 16-bit values | `u8` count, each `u16` |
+| placements | `u8` count, each `u16` item number (0 = keep), `u16` slot, `u16` link, `s16` colour-pair index (−1 = none), `u8` interpolate, `u8`, `s32`, 36-byte 3 × 3 matrix (50 bytes); meanings: ../user-interface.md 3 |
+| colour pairs | `u8` count, each 2 × `u32`: offset word, then scale word (../user-interface.md 3) |
+| 16-bit values | `u8` count, each `u16`: a slot the key empties |
 | bytes | `u8` count, each `u8` |
 | actions | `u8` count, each `u8` kind, `s32` argument |
 

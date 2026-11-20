@@ -479,7 +479,15 @@ impl Interpreter {
         event: u32,
         args: &[Value],
     ) -> Option<Value> {
-        let module = self.module_of(object)?;
+        // Sly 2 hook: an object made at run time gets its module from the host on its first event.
+        let module = match self.module_of(object) {
+            Some(m) => m,
+            None => {
+                let m = host.module_of(object)?;
+                self.attach(object, m);
+                m
+            }
+        };
         let handler = self.lookup(module, event)?;
         if !handler.is_callable() {
             return None;

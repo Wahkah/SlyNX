@@ -9,12 +9,17 @@
 //!   returns at once, so the game's machines exist from the start].
 //! - **Machine playback options** (class 136, stream IDs): 372 the goal (setting it starts the walk; the scripts'
 //!   478), 375 the current state (the safe house compares it with 7, 8, 9), 376 the goal read back, 371 the target,
-//!   377 the speed, 378 the clip playing; method 379 jumps to a state at once [inference], method 380 removes the
-//!   playback. Clip playback options (class 134): 116 the clip, 117 the target, 118 the time, 119 the speed; method
-//!   124 removes it. Other options are stored like any option.
-//! - **Runs** ([`crate::anim::sly2_machine`]) advance every frame with the game clock; a clip playback advances its
-//!   time and ends at the clip's end (removed) unless it loops (flag 8 on option 106 [inference from the common
-//!   literal forms (0, 1, 0) and (0.0, 1.0, 8)]).
+//!   377 the speed, 378 the clip playing; method 379 jumps to a state, walking the route at once; method 380
+//!   removes the playback. Clip playback options (class 134): 116 the clip, 117 the target, 118 the time, 119 the
+//!   speed; method 123 seeks (mode 0 set, 1 add, 2 from the end; time; speed); method 124 removes it. Other options
+//!   are stored like any option. (Script ID 236 is 123 on clip playbacks and 379 on machine playbacks.)
+//! - **Events** (scripts.md 6): a playback runs its clip's or machine's module. It gets event 2 when applied and 3
+//!   when removed; a machine playback gets event 8 (from, to) on every state change, its first state (from −1)
+//!   included.
+//! - **Runs** ([`crate::anim::sly2_machine`]) advance every frame with the game clock. A clip playback follows the
+//!   flags of option 106 (animation.md 7): 8 loops, else 16 plays back and forth, else 32 holds at the end; with
+//!   none of them it ends at the clip's end and is removed. Flags 1 (ease), 2 (fire the start events) and 4 (snap
+//!   to the start pose) concern the pose and the clip events, which this module does not apply.
 //! - **Goals from elsewhere**: the job system's state-machine goals (`Jobs::machine_goals`), and voice lines' timed
 //!   records: targets 0, 1, 2, 4, 5 set goals on the speaker's machines 1548, 1549, 1550, 1551 and 1552 (5 is the
 //!   mouth), target 3 how far the speaker's eyes are closed ([`Sly2Anim::eyes`]).
@@ -48,11 +53,12 @@ pub mod opt {
     pub const APPLY_CLIP: u16 = 106;
     /// Machine: apply to (target, goal, flags).
     pub const APPLY_MACHINE: u16 = 368;
-    /// Clip playback: the clip, target, time, speed; remove.
+    /// Clip playback: the clip, target, time, speed; seek; remove.
     pub const CLIP: u16 = 116;
     pub const CLIP_TARGET: u16 = 117;
     pub const CLIP_TIME: u16 = 118;
     pub const CLIP_SPEED: u16 = 119;
+    pub const CLIP_SEEK: u16 = 123;
     pub const CLIP_REMOVE: u16 = 124;
     /// Machine playback: target, goal, state, goal read back, speed, clip playing; jump to a state; remove.
     pub const TARGET: u16 = 371;
@@ -69,8 +75,50 @@ pub mod opt {
 pub const SPEAKER_MACHINES: [i32; 6] = [1548, 1549, 1550, -1, 1551, 1552];
 /// Target 3: the eyes.
 pub const TARGET_EYES: i16 = 3;
-/// Flag of option 106: loop the clip [inference].
-pub const CLIP_LOOP: i32 = 8;
+/// Flags of option 106 (animation.md 7).
+pub mod flag {
+    pub const EASE: i32 = 1;
+    pub const START_EVENTS: i32 = 2;
+    pub const SNAP: i32 = 4;
+    pub const LOOP: i32 = 8;
+    pub const PING_PONG: i32 = 16;
+    pub const HOLD: i32 = 32;
+}
+
+/// Script events of playbacks.
+pub mod event {
+    /// Applied.
+    pub const APPLIED: u32 = 2;
+    /// Removed.
+    pub const REMOVED: u32 = 3;
+    /// A machine playback changed state: (from, to).
+    pub const STATE: u32 = 8;
+}
+
+/// How a clip playback ends (option 106's flags).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wrap {
+    /// Ends at the clip's end and is removed.
+    Once,
+    Loop,
+    PingPong,
+    Hold,
+}
+
+impl Wrap {
+    /// From option 106's flags: 8 wins over 16, 16 over 32.
+    pub fn of(flags: i32) -> Wrap {
+        if flags & flag::LOOP != 0 {
+            Wrap::Loop
+        } else if flags & flag::PING_PONG != 0 {
+            Wrap::PingPong
+        } else if flags & flag::HOLD != 0 {
+            Wrap::Hold
+        } else {
+            Wrap::Once
+        }
+    }
+}
 
 /// A machine playback.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,7 +141,7 @@ pub struct ClipPlayback {
     pub time: f32,
     pub speed: f32,
     pub length: f32,
-    pub looping: bool,
+    pub wrap: Wrap,
 }
 
 /// Something playing on a target: (target, clip object, local time in seconds).
@@ -114,12 +162,26 @@ pub struct Sly2Anim {
     pub eyes: BTreeMap<u32, f32>,
     /// State entries, oldest first: (playback, from, to), for the curious (tests, debug views).
     pub entered: Vec<(Handle, i32, i32)>,
+    /// Playbacks removed: destroyed on the next step, after their event 3 has run.
+    doomed: Vec<Handle>,
     rng: u32,
 }
 
-fn new_object(world: &mut World, class: i16) -> Option<Handle> {
-    let s = world.create(class, -1, u32::MAX, -1, Affine::IDENTITY, NONE, u64::MAX, 0);
+/// A run-time playback object running `module` (its clip's or machine's).
+fn new_object(world: &mut World, class: i16, module: i16) -> Option<Handle> {
+    let s = world.create(class, -1, u32::MAX, module, Affine::IDENTITY, NONE, u64::MAX, 0);
     world.handle(s)
+}
+
+fn next_random(rng: &mut u32) -> f32 {
+    *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (*rng >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// Raises a machine playback's state-change event.
+fn entered(world: &mut World, log: &mut Vec<(Handle, i32, i32)>, playback: Handle, from: i32, to: i32) {
+    world.raise(playback, event::STATE, alloc::vec![script::Value::Int(from), script::Value::Int(to)]);
+    log.push((playback, from, to));
 }
 
 impl Sly2Anim {
@@ -150,8 +212,12 @@ impl Sly2Anim {
             return Some(p.object);
         }
         let run = MachineRun::new(self.def(world, machine)?);
-        let object = new_object(world, MACHINE_PLAYBACK_CLASS)?;
+        let module = world.module(machine);
+        let object = new_object(world, MACHINE_PLAYBACK_CLASS, module)?;
+        let first = run.state;
         self.machines.insert(object.index(), MachinePlayback { object, machine, target, run });
+        world.raise(object, event::APPLIED, Vec::new());
+        entered(world, &mut self.entered, object, -1, first);
         Some(object)
     }
 
@@ -169,19 +235,32 @@ impl Sly2Anim {
     /// Sets a goal on machine `id` of `target`.
     pub fn set_goal(&mut self, world: &mut World, target: Handle, id: i32, goal: i32, instant: bool) -> bool {
         let Some(p) = self.find_machine(world, target, id) else { return false };
-        self.goal(p, goal, instant)
+        if instant { self.jump(world, p, goal) } else { self.goal(p, goal) }
     }
 
-    /// Sets a machine playback's goal.
-    pub fn goal(&mut self, playback: Handle, goal: i32, instant: bool) -> bool {
+    /// Sets a machine playback's goal (the run walks there over the next frames).
+    pub fn goal(&mut self, playback: Handle, goal: i32) -> bool {
         let Some(p) = self.machines.get_mut(&playback.index()) else { return false };
+        p.run.goal = Some(goal);
+        true
+    }
+
+    /// Jumps a machine playback to a state (method 379): the route is walked at once, every state entered raising
+    /// event 8.
+    pub fn jump(&mut self, world: &mut World, playback: Handle, goal: i32) -> bool {
+        let Some(mut p) = self.machines.remove(&playback.index()) else { return false };
         let mut ev = Vec::new();
-        p.run.set_goal(goal, instant, &mut ev);
+        if let Some(def) = self.defs.get(&p.machine.index()) {
+            let rng = &mut self.rng;
+            p.run.walk(def, goal, &mut || next_random(rng), &mut ev);
+        }
         let obj = p.object;
-        self.entered.extend(ev.into_iter().filter_map(|e| match e {
-            RunEvent::Entered { from, to } => Some((obj, from, to)),
-            _ => None,
-        }));
+        self.machines.insert(playback.index(), p);
+        for e in ev {
+            if let RunEvent::Entered { from, to } = e {
+                entered(world, &mut self.entered, obj, from, to);
+            }
+        }
         true
     }
 
@@ -196,10 +275,28 @@ impl Sly2Anim {
         flags: i32,
     ) -> Option<Handle> {
         let length = self.length(world, clip).unwrap_or(0.0);
-        let object = new_object(world, CLIP_PLAYBACK_CLASS)?;
-        let looping = flags & CLIP_LOOP != 0;
-        self.clips.insert(object.index(), ClipPlayback { object, clip, target, time, speed, length, looping });
+        let module = world.module(clip);
+        let object = new_object(world, CLIP_PLAYBACK_CLASS, module)?;
+        let wrap = Wrap::of(flags);
+        self.clips.insert(object.index(), ClipPlayback { object, clip, target, time, speed, length, wrap });
+        world.raise(object, event::APPLIED, Vec::new());
         Some(object)
+    }
+
+    /// Seeks a clip playback (method 123): mode 0 sets the time, 1 adds to it, 2 sets it from the clip's end; the
+    /// speed is set too.
+    pub fn seek(&mut self, playback: Handle, mode: i32, time: f32, speed: Option<f32>) -> bool {
+        let Some(c) = self.clips.get_mut(&playback.index()) else { return false };
+        c.time = match mode {
+            1 => c.time + time,
+            2 => c.length - time,
+            _ => time,
+        }
+        .clamp(0.0, c.length.max(0.0));
+        if let Some(s) = speed {
+            c.speed = s;
+        }
+        true
     }
 
     /// The playback of clip `id` on `target`, if one runs.
@@ -207,15 +304,19 @@ impl Sly2Anim {
         self.clips.values().find(|c| c.target == target && world.sly2_id(c.clip) == Some(id)).map(|c| c.object)
     }
 
-    /// Removes a playback (either kind).
+    /// Removes a playback (either kind): event 3 now, the object destroyed on the next step.
     pub fn remove(&mut self, world: &mut World, playback: Handle) {
         if self.machines.remove(&playback.index()).is_some() || self.clips.remove(&playback.index()).is_some() {
-            world.destroy(playback);
+            world.raise(playback, event::REMOVED, Vec::new());
+            self.doomed.push(playback);
         }
     }
 
     /// Advances every playback by `dt` game seconds.
     pub fn step(&mut self, world: &mut World, dt: f32) {
+        for h in core::mem::take(&mut self.doomed) {
+            world.destroy(h);
+        }
         let keys: Vec<u32> = self.machines.keys().copied().collect();
         for k in keys {
             let Some(mut p) = self.machines.remove(&k) else { continue };
@@ -233,17 +334,15 @@ impl Sly2Anim {
             let mut lengths = |id: i32| -> Option<f32> { length_in(cache, w, Self::member(w, machine, id)?) };
             let mut ev = Vec::new();
             let rng = &mut self.rng;
-            let mut random = || {
-                *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                (*rng >> 8) as f32 / (1u32 << 24) as f32
-            };
+            let mut random = || next_random(rng);
             p.run.update(def, dt, &mut lengths, &mut random, &mut ev);
+            let obj = p.object;
+            self.machines.insert(k, p);
             for e in ev {
                 if let RunEvent::Entered { from, to } = e {
-                    self.entered.push((p.object, from, to));
+                    entered(world, &mut self.entered, obj, from, to);
                 }
             }
-            self.machines.insert(k, p);
         }
         if self.entered.len() > 256 {
             let n = self.entered.len() - 256;
@@ -252,10 +351,17 @@ impl Sly2Anim {
         let mut done = Vec::new();
         for c in self.clips.values_mut() {
             c.time += dt * c.speed;
-            if c.time >= c.length && !c.looping {
-                done.push(c.object);
-            } else if c.looping && c.length > 0.0 {
-                c.time = wrap(c.time, c.length);
+            let (end, start) = (c.time >= c.length, c.time < 0.0);
+            match c.wrap {
+                Wrap::Once if end || start => done.push(c.object),
+                Wrap::Loop if c.length > 0.0 => c.time = wrap(c.time, c.length),
+                Wrap::PingPong if end || start => {
+                    // Turn around at the end it passed.
+                    c.time = if end { 2.0 * c.length - c.time } else { -c.time }.clamp(0.0, c.length);
+                    c.speed = -c.speed;
+                }
+                Wrap::Hold => c.time = c.time.clamp(0.0, c.length),
+                _ => {}
             }
         }
         for o in done {
@@ -308,7 +414,7 @@ impl Sly2Anim {
             match option {
                 opt::GOAL => {
                     let g = v.as_i32().unwrap_or(-1);
-                    return self.goal(playback, g, false);
+                    return self.goal(playback, g);
                 }
                 opt::SPEED => p.run.speed = v.as_f32().unwrap_or(1.0),
                 _ => return false,
@@ -400,7 +506,11 @@ pub fn step(world: &mut World, dt: f32) {
             if let (Some(t), Some(m)) = (target, m)
                 && let Some(p) = a.machine_playback(w, m, t)
             {
-                a.goal(p, goal, instant);
+                if instant {
+                    a.jump(w, p, goal);
+                } else {
+                    a.goal(p, goal);
+                }
             }
         }
         if dt > 0.0 {
@@ -412,4 +522,18 @@ pub fn step(world: &mut World, dt: f32) {
 /// The speaker of a voice line: the world's first object of the speaker's class (dialogue-and-voice.md 4).
 pub fn speaker(world: &World, class: i16) -> Option<Handle> {
     world.slots_of_class(class).iter().filter_map(|&s| world.handle(s)).next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_106_flags() {
+        assert_eq!(Wrap::of(0), Wrap::Once);
+        assert_eq!(Wrap::of(flag::EASE | flag::SNAP), Wrap::Once);
+        assert_eq!(Wrap::of(flag::LOOP | flag::PING_PONG), Wrap::Loop, "8 wins over 16");
+        assert_eq!(Wrap::of(flag::PING_PONG | flag::HOLD), Wrap::PingPong);
+        assert_eq!(Wrap::of(flag::HOLD), Wrap::Hold);
+    }
 }

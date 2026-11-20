@@ -219,9 +219,10 @@ impl<F: FileSystem> Sly2Store<F> {
         Ok(Loaded { progress, cleared, unused, serial: file.serial, from_backup })
     }
 
-    /// Saves `progress` to `slot` with the next serial, keeping the previous good save as the backup.
+    /// Saves `progress` to `slot` with the next serial, keeping the previous good save as the backup. A serial
+    /// already at `u64::MAX` (only a damaged or forged file) stays there rather than wrapping to 0.
     pub fn save(&self, slot: Slot, progress: &Progress) -> Result<u64, FsError> {
-        let serial = self.newest().map_or(1, |(_, s)| s + 1);
+        let serial = self.newest().map_or(1, |(_, s)| s.saturating_add(1));
         if let Some(old) = self.read(&self.kind.slot_path(slot))?
             && decode_for(self.kind, &old).is_ok()
         {
@@ -310,5 +311,14 @@ mod tests {
         assert_eq!(l.progress.int(&["ccoin"]), 2);
         store.erase(s2).unwrap();
         assert!(matches!(store.load(s2, &base()), Err(LoadError::Empty)));
+    }
+
+    #[test]
+    fn the_largest_serial_does_not_wrap() {
+        let store = Sly2Store::new(MemFs::default());
+        let s1 = Slot::new(0).unwrap();
+        store.fs.write_user(&slot_path(s1), &encode(&base(), u64::MAX)).unwrap();
+        assert_eq!(store.newest(), Some((s1, u64::MAX)));
+        assert_eq!(store.save(Slot::new(1).unwrap(), &base()).unwrap(), u64::MAX);
     }
 }

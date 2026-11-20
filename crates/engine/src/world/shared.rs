@@ -7,6 +7,17 @@ use alloc::vec::Vec;
 use crate::object::Handle;
 
 /// How the player is hiding (guards.md 4.3).
+/// A task method a script called (Sly 3; specs/sly2/missions.md 3.1 for the meanings), by the task's ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskCall {
+    /// Request a state (−1 or 4: become current, 5: stop being current); `forced` skips the checks.
+    Request { task: i32, state: i32, forced: bool },
+    /// Force a state (0 to 3).
+    Force { task: i32, state: i8 },
+    /// Become current.
+    MakeCurrent(i32),
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Hiding {
     /// Not hiding.
@@ -68,6 +79,8 @@ pub mod damage {
     pub const CRUSH: u8 = 4;
     /// Falling into a pit.
     pub const PIT: u8 = 5;
+    /// Thrown.
+    pub const THROWN: u8 = 6;
 }
 
 /// Damage dealt to an object (the player, mostly), for the player system or the object's behaviour.
@@ -81,6 +94,8 @@ pub struct Damage {
     pub kind: u8,
     /// Where the target should be thrown to recover (hazards' recovery points), if anywhere.
     pub recover_to: Option<[f32; 3]>,
+    /// The velocity the hit throws the target at (guards' attack effects, guards.md 6.2), if it throws.
+    pub throw: Option<[f32; 3]>,
 }
 
 /// A guard group's shared alert level (guards.md 2).
@@ -194,12 +209,25 @@ pub struct Shared {
     pub task_items: Vec<Handle>,
     /// Sly 2 task-state requests (task, state) from props and volumes, for the job system.
     pub task_requests: Vec<(i32, i32)>,
+    /// Sly 3 hook (job system): the task methods scripts called (`TaskCall`), for the session's job system, which
+    /// lives outside the world.
+    pub task_calls: Vec<TaskCall>,
+    /// Sly 3 hook (missions.md 4.2): how many holds player 0's control has (script command 0x1F, menus), set by the
+    /// session each frame; the world object's method 1000 answers whether it is above 0.
+    pub sly3_holds: u32,
     /// Sly 2 sequence starts, stops and alarms for the game's sequence player.
     pub sequence_requests: Vec<crate::behavior::sly2_commands::SequenceRequest>,
     /// Sly 2 meshes hidden by scripts (options 44 and 45): (object slot, mesh object ID).
     pub hidden_meshes: Vec<(u32, i32)>,
     /// Sly 2 music streams scripts queued (action 146), for the game's sound.
     pub music_requests: Vec<i16>,
+    /// Sly 2 vault changes, for the session (sequences, lines, the dial's screen).
+    pub vault_events: Vec<crate::behavior::sly2_vault::VaultEvent>,
+    /// Sly 2: the safe house is the current player (no character takes damage; characters.md 2).
+    pub safe_house: bool,
+    /// Sly 2 / Sly 3: the object mask the camera's visibility volumes select (camera.md 7.1; `0xFF` in none).
+    /// Objects whose zone mask shares no bit with it are not updated.
+    pub visibility_mask: u32,
     /// Damage dealt this frame, in order.
     pub damage: Vec<Damage>,
     /// Guard groups.
@@ -239,6 +267,8 @@ pub struct Shared {
     /// Vehicles hook: the machine the player drives (`behavior::vehicles`); set by the session, read by the machines
     /// and by the gang players (which then get an idle pad).
     pub driving: Option<Handle>,
+    /// Vehicles hook: the machines' projectiles and the job they follow (`behavior::vehicles::shots`).
+    pub vehicles: crate::behavior::vehicles::shots::Shared,
     /// Live particles.
     pub particles: Vec<crate::behavior::effects::Particle>,
     /// Charms and lives, written by the game from the progress before the player decides.
@@ -251,6 +281,19 @@ pub struct Shared {
     pub camera_yaw: f32,
     /// The camera placement a cutscene enabled (animation event 12), until event 13.
     pub camera_placement: Option<Handle>,
+    /// Camera hook: a driven machine the camera follows instead of the player (`camera::CameraSystem`).
+    pub camera_follow: Option<Handle>,
+    /// Camera hook: a mount the camera rides (a turret taking over the camera): the object and the eye's offset in
+    /// its frame (forward, left, up).
+    pub camera_mount: Option<(Handle, [f32; 3])>,
+    /// Gang hook: the gadget copies out of their pools, with their carry states (`gang::pool`).
+    pub gadget_copies: Vec<crate::gang::pool::GadgetCopy>,
+    /// Camera hook: two characters to frame together (confrontations; camera.md 2, priority 6).
+    pub camera_pair: Option<(Handle, Handle)>,
+    /// Camera hook: the binocucom's focus while it is on, and whether its tilt is inverted (camera.md 6).
+    pub camera_binocucom: Option<(Handle, bool)>,
+    /// Camera hook: a timed move to run (camera.md 2); the camera starts it when this changes to a new move.
+    pub camera_move: Option<crate::camera::views::TimedMove>,
     /// Sly 3 hook: launches by bouncers for the game to apply (`behavior::sly3::devices`).
     pub launches: Vec<crate::behavior::sly3::devices::Launch>,
 }
@@ -269,9 +312,14 @@ impl Default for Shared {
             medicine: Vec::new(),
             task_items: Vec::new(),
             task_requests: Vec::new(),
+            task_calls: Vec::new(),
+            sly3_holds: 0,
             sequence_requests: Vec::new(),
             hidden_meshes: Vec::new(),
             music_requests: Vec::new(),
+            vault_events: Vec::new(),
+            safe_house: false,
+            visibility_mask: 0xFF,
             damage: Vec::new(),
             groups: Vec::new(),
             intensity: BTreeMap::new(),
@@ -290,14 +338,21 @@ impl Default for Shared {
             draw_distance_ratio: 1.0,
             difficulty: 0.0,
             basket: None,
-            driving: None, // Vehicles hook
+            driving: None,                // Vehicles hook
+            vehicles: Default::default(), // Vehicles hook
             particles: Vec::new(),
             vitals: (0, 5),
             time_scale: 1.0,
             player_events: Vec::new(),
             camera_yaw: 0.0,
             camera_placement: None,
-            launches: Vec::new(), // Sly 3 hook
+            launches: Vec::new(),      // Sly 3 hook
+            camera_follow: None,       // camera hook
+            camera_pair: None,         // camera hook
+            gadget_copies: Vec::new(), // gang hook
+            camera_binocucom: None,    // camera hook
+            camera_move: None,         // camera hook
+            camera_mount: None,        // camera hook
         }
     }
 }

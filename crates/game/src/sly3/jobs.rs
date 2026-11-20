@@ -1,31 +1,36 @@
 //! Sly 3 jobs and tasks on the Sly 2 job system (`engine::game::sly2_jobs`): the same graph, task rules, progress
 //! block and effects, read with Sly 3's classes and option IDs ([`IDS`]).
 //!
-//! The Sly 3 specs name the job's exit (1381), the task's checkpoint (1400) and exit (1406), and the save keys
-//! (saving.md 2). The other IDs below were found on the disc by what their values name, and mapped onto Sly 2's
-//! by that (working readings until a Sly 3 missions spec exists):
+//! The IDs are specs/sly3/missions.md 2 and 3:
 //!
-//! | Sly 2 | Sly 3 | What the disc shows (v_ext) |
+//! | Sly 2 | Sly 3 | Meaning |
 //! |---|---|---|
-//! | job first / last task 1243, 1244 | 1364, 1365 | a task (class 169) on every job |
-//! | job title / text 1245, 1246 | 1370, 1371 | a string ID |
-//! | job keys 1260 to 1263 | 1387 to 1390 | paths ending `time_played`, `suck_value`, `focus_count`, `is_complete` |
-//! | task's job 1264 | 1391 | a job (class 168) |
-//! | objective 1265 | 1392 | a string ID |
-//! | auto-current 1272, resume 1273 | 1398, 1399 | a byte |
-//! | checkpoint 1274, row 1275, character 1276 | 1400, 1401, 1402 | a class-40 point; a world slot (3 in v_ext); (24, −1) |
-//! | marker 1279 | 1407 | a placement (class 8) |
-//! | switches 1287, goals 1288 | 1416, 1417 | Sly 2's lists with one more flag at the end |
-//! | task keys 1295 to 1299 | 1423 to 1427 | `focus_count`, `complete_count`, `is_complete`, `state`, `from_memcard` |
-//! | — | 1408 | a command script (class 135): started when the task becomes current [I] |
+//! | job keep-open 1242 | 1361 | the job does not close its last task or autosave |
+//! | job first / last task 1243, 1244 | 1364, 1365 | |
+//! | job title / text 1245, 1246 | 1370, 1371 | string IDs |
+//! | job exit 1259 | 1381 | fired when the job ends with no next task |
+//! | job keys 1260 to 1263 | 1387 to 1390 | `time_played`, `suck_value`, `focus_count`, `is_complete` |
+//! | task's job 1264, objective 1265 | 1391, 1392 | |
+//! | counts as done 1271, current when available 1272 | 1398, 1399 | |
+//! | checkpoint 1274, world 1275, character 1276 | 1400, 1401, 1402 | (1402 is a two-argument method) |
+//! | task exit 1278, waypoint 1279 | 1406, 1407 | 1407 names the class-120 mission waypoint |
+//! | switches 1287, goals 1288 | 1416, 1417 | Sly 2's arguments plus one more value |
+//! | task keys 1295 to 1299 | 1423 to 1427 | |
+//! | — | 1408 | a command script started when the task becomes current (missions.md 4) |
+//! | — | 1405 | the task is done as soon as it becomes current |
 //!
-//! Not found: the job's keep-open flag, ending and closing events, "job complete" screen and load-time switches,
-//! and the task's counts-as-done flag (0 below: no record has option 0).
+//! Sly 3 has no "resume after loading" (Sly 2's 1273), no job switches (1255) and no ending or closing event lists
+//! (0 below: no record has option 0). On completion (missions.md 4.1): 1367 = 2 sends the first task back to 0,
+//! 1385 grants an item, and a following job's resume task (1366) becomes the forced checkpoint; 1368's task-event
+//! list is kept on the job. 1362 makes a job ignore the player's defeat ([`defeat`]). Not read yet: the job's state-machine goal 1379 (Sly 2's 1256), 1372 and 1386.
 
 use engine::game::sly2_jobs::graph::Ids;
 use engine::game::sly2_jobs::{Carry, Jobs, state};
 use engine::world::World;
 use save::sly2::{Progress, SaveValue};
+
+/// The macro-package listener class: its objects in the world hear every task event (missions.md 4.2).
+pub const MACRO_LISTENER_CLASS: i16 = 147;
 
 /// Sly 3's classes and option IDs for the job system.
 pub const IDS: Ids = Ids {
@@ -33,7 +38,7 @@ pub const IDS: Ids = Ids {
     task_class: 169,
     end_events: 0,
     close_events: 0,
-    keep_open: 0,
+    keep_open: 1361,
     first: 1364,
     last: 1365,
     title: 1370,
@@ -44,9 +49,9 @@ pub const IDS: Ids = Ids {
     job_keys: [1387, 1388, 1389, 1390],
     job: 1391,
     objective: 1392,
-    counts_done: 0,
-    auto_current: 1398,
-    resume: 1399,
+    counts_done: 1398,
+    auto_current: 1399,
+    resume: 0,
     checkpoint: 1400,
     row: 1401,
     character: 1402,
@@ -56,13 +61,34 @@ pub const IDS: Ids = Ids {
     goal: 1417,
     task_keys: [1423, 1424, 1425, 1426, 1427],
     task_script: 1408,
+    done_when_current: 1405,
+    completion_mode: 1367,
+    item: 1385,
+    resume_task: 1366,
+    event_list: 1368,
+    ignore_defeat: 1362,
     switch_trailing: 1,
 };
+
+/// Sly 3's script events for the job system's (scripts.md 6, missions.md 4): a task event is event 20 (Sly 2's 17),
+/// becoming current or a job beginning event 22 (Sly 2's 19). The others' Sly 3 numbers are not established and
+/// are not raised (Sly 3's 21 to 24 mean other things than Sly 2's).
+pub fn script_events(e: u32) -> Option<u32> {
+    use engine::game::sly2_jobs::script_event;
+    match e {
+        script_event::TASK_EVENT => Some(20),
+        script_event::BEGIN => Some(22),
+        _ => None,
+    }
+}
 
 /// The job system of a freshly loaded Sly 3 world with `progress`, restored: `carry` from the previous world (none
 /// after a new game or a load), `queued` a task requested, forced (an episode start's task).
 pub fn attach(world: &mut World, progress: Progress, carry: Option<Carry>, queued: Option<i32>) -> Jobs {
     let mut j = Jobs::new_with(world, progress, &IDS);
+    j.script_events = script_events;
+    // The macro packages (class 147) hear every task event too (missions.md 4.2).
+    j.listener_class = Some(MACRO_LISTENER_CLASS);
     j.restore(queued, carry);
     j.apply(world);
     j
@@ -85,6 +111,27 @@ pub fn step(j: &mut Jobs, world: &mut World, dt: f32, touched: bool) {
             j.request(t, s as i8, false);
         }
     }
+    // The task methods scripts called (engine::game::script_host::sly3: 1409, 1410, 1418 to 1422).
+    for call in core::mem::take(&mut world.shared.task_calls) {
+        use engine::world::shared::TaskCall;
+        match call {
+            TaskCall::Request { task, state, forced } => {
+                if let Some(&t) = j.graph.task_ids.get(&task) {
+                    j.request(t, state as i8, forced);
+                }
+            }
+            TaskCall::Force { task, state } => {
+                if let Some(&t) = j.graph.task_ids.get(&task) {
+                    j.force_state(t, state);
+                }
+            }
+            TaskCall::MakeCurrent(task) => {
+                if let Some(&t) = j.graph.task_ids.get(&task) {
+                    j.request_current(t, false);
+                }
+            }
+        }
+    }
     j.apply(world);
 }
 
@@ -97,4 +144,15 @@ pub fn set_task(j: &mut Jobs, world: &mut World, task: i32, s: i32) {
         j.force_state(t, s as i8);
     }
     j.apply(world);
+}
+
+/// The player's defeat (game event 12; missions.md 2, option 1362): `true` when the job reacts, counting a failure
+/// (the difficulty help) so that the caller reloads the checkpoint; `false` when the current job ignores it.
+pub fn defeat(j: &mut Jobs, world: &mut World) -> bool {
+    if j.job.is_some_and(|k| j.graph.jobs[k].ignore_defeat) {
+        return false;
+    }
+    j.task_event(engine::game::sly2_jobs::event::DEFEAT, None);
+    j.apply(world);
+    true
 }

@@ -309,7 +309,12 @@ pub struct Walk<'a, 't> {
     pub bodies: u64,
     /// Effect component bodies read.
     pub components: u64,
+    /// Object lists entered and not yet left.
+    depth: u32,
 }
+
+/// Deepest nesting of object lists read (the disc's are a few levels deep).
+pub const MAX_OBJECT_DEPTH: u32 = 64;
 
 fn header(r: &mut Reader<'_>) -> Result<Header> {
     let parent = r.i16()?;
@@ -562,7 +567,7 @@ impl<'a, 't> Walk<'a, 't> {
         streaming: &'t BTreeMap<i32, bool>,
         multipliers: [f32; 3],
     ) -> Walk<'a, 't> {
-        Walk { data, table, streaming, multipliers, errors: Vec::new(), bodies: 0, components: 0 }
+        Walk { data, table, streaming, multipliers, errors: Vec::new(), bodies: 0, components: 0, depth: 0 }
     }
 
     fn options(&self, r: &mut Reader<'_>) -> Result<OptionList> {
@@ -575,7 +580,14 @@ impl<'a, 't> Walk<'a, 't> {
         if n < 0 {
             return Err(r.corrupt("negative object count"));
         }
-        (0..n).map(|_| self.record(r)).collect()
+        // Lists nest through bodies; corrupt data must not recurse without bound.
+        if self.depth >= MAX_OBJECT_DEPTH {
+            return Err(r.corrupt("object lists nested too deeply"));
+        }
+        self.depth += 1;
+        let list = (0..n).map(|_| self.record(r)).collect();
+        self.depth -= 1;
+        list
     }
 
     /// Reads a record header (2.2): mode, filter, class, ID, script, size; returns the body's end.
@@ -596,7 +608,7 @@ impl<'a, 't> Walk<'a, 't> {
             return Err(r.corrupt("negative body size"));
         }
         let start = r.pos();
-        let end = start + size as usize;
+        let end = start.saturating_add(size as usize);
         if end > r.data().len() {
             return Err(r.corrupt("body runs past its container"));
         }
@@ -900,7 +912,7 @@ impl<'a, 't> Walk<'a, 't> {
                 return Err(r.corrupt("negative fresh-placement size"));
             }
             let start = r.pos();
-            let end = start + word as usize;
+            let end = start.saturating_add(word as usize);
             if end > r.data().len() {
                 return Err(r.corrupt("fresh-placement data runs past the body"));
             }
@@ -1015,5 +1027,17 @@ mod tests {
         assert!(!p.fresh);
         assert_eq!((p.group_id, p.matrix.t, p.objects.len()), (77, [10.0, 20.0, 30.0], 1));
         assert_eq!(w.bodies, 2);
+    }
+
+    #[test]
+    fn nesting_is_capped() {
+        let table = OptionTable::default();
+        let streaming = BTreeMap::new();
+        let d = 0i16.to_le_bytes();
+        let mut w = Walk::new(&d, &table, &streaming, crate::anim::DEFAULT_MULTIPLIERS);
+        w.depth = MAX_OBJECT_DEPTH - 1;
+        assert!(w.object_list(&mut Reader::new(&d)).is_ok());
+        w.depth = MAX_OBJECT_DEPTH;
+        assert!(w.object_list(&mut Reader::new(&d)).is_err());
     }
 }

@@ -347,6 +347,69 @@ pub fn two_colours(
     VertexWeights { shadow: byte(b[3]), mid: a, high: bb, alpha: byte(beta) }
 }
 
+/// Rows of a shader light block (`render::Renderer::set_shader_light`).
+pub const LIGHT_BLOCK_ROWS: usize = 15;
+
+/// The light block of a moving object at `centre` (rendering.md 2.3: the four strongest lights there, their
+/// distance factors taken at the centre), for a submesh with material colour `color`, self-illumination `illum`, and
+/// colour A alone when `one_pass`. The vertex shader computes [`two_colours`] (`LightMode::Moving`) from it per
+/// vertex; [`block_two_colours`] is the same computation on the CPU.
+pub fn light_block(
+    l: &WorldLighting,
+    centre: Vec3,
+    color: [u8; 4],
+    illum: u16,
+    one_pass: bool,
+) -> [[f32; 4]; LIGHT_BLOCK_ROWS] {
+    let mut rows = [[0.0f32; 4]; LIGHT_BLOCK_ROWS];
+    rows[0] = [l.shadow[0], l.shadow[1], l.shadow[2], illum as f32 / 4096.0 + l.shadow[3]];
+    rows[1] = color.map(|c| c as f32);
+    rows[2] = [if one_pass { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+    for (k, (r, d)) in l.strongest(centre).into_iter().enumerate().take(4) {
+        let at = 3 + 3 * k;
+        rows[at] = [r.at.x, r.at.y, r.at.z, if r.point { 1.0 } else { 0.0 }];
+        rows[at + 1] = r.color;
+        rows[at + 2] = [r.offset, r.scale, d, 1.0];
+    }
+    rows
+}
+
+/// The vertex shader's two colours from a light block (CPU reference for the shader, and for tests): vertex colour
+/// `v`, world position `p`, unit world normal `n`.
+pub fn block_two_colours(rows: &[[f32; 4]; LIGHT_BLOCK_ROWS], v: [u8; 4], p: Vec3, n: Vec3) -> VertexWeights {
+    let mc = rows[1];
+    let base = [0, 1, 2].map(|k| floor((v[k] as f32 * mc[k] + 255.0) / 512.0));
+    let ba = floor((v[3] as f32 * mc[3] + 255.0) / 510.0);
+    let mut l = [0.0, 0.0, 0.0, rows[0][3]];
+    for k in 0..4 {
+        let (pp, c, q) = (rows[3 + 3 * k], rows[4 + 3 * k], rows[5 + 3 * k]);
+        if q[3] < 0.5 {
+            continue;
+        }
+        let dir = if pp[3] > 0.5 {
+            let d = p - Vec3::new(pp[0], pp[1], pp[2]);
+            if d.dot(d) > 1e-12 { d.normalize() } else { Vec3::ZERO }
+        } else {
+            Vec3::new(pp[0], pp[1], pp[2])
+        };
+        let d = n.dot(dir);
+        let f = 2.0 * ((q[0] + (d + d * d * d) * q[1]) * q[2]).max(0.0);
+        for j in 0..4 {
+            l[j] += c[j] * f;
+        }
+    }
+    let big = l[0].max(l[1]).max(l[2]);
+    let r = (2.0 - big).max(0.0);
+    let mu = l[3].clamp(0.0, r);
+    let sh = r - mu;
+    let beta = (2.0 + 2.0 / 127.0 - sh) * 63.5;
+    let i = floor(base[0].max(base[1]).max(base[2]) / 255.0 * 127.0);
+    let byte = |x: f32| floor(x).clamp(0.0, 255.0) as u8;
+    let a = [0, 1, 2].map(|k| byte((l[k].clamp(0.0, 2.0) + rows[0][k] * sh) * i));
+    let b = if rows[2][0] > 0.5 { [0; 3] } else { [0, 1, 2].map(|k| byte(base[k] * mu * (ba / beta.max(1e-6)))) };
+    VertexWeights { shadow: byte(ba), mid: a, high: b, alpha: byte(beta) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +514,33 @@ mod tests {
         assert_eq!(r.distance(Vec3::new(100.0, 0.0, 0.0)), 1.0);
         assert!((r.distance(Vec3::new(1100.0, 0.0, 0.0)) - 0.5).abs() < 1e-5);
         assert_eq!(r.distance(Vec3::new(3000.0, 0.0, 0.0)), 0.0);
+    }
+
+    #[test]
+    fn the_shader_block_matches_the_moving_path() {
+        // Two lights near a vertex: the block computation equals two_colours (moving), normals unquantised.
+        let mut a = light([0.0, 0.0, 255.0], 255.0, 240.0);
+        a.not_baked = false;
+        let mut b = light([30.0, 200.0, 200.0], 150.0, 200.0);
+        b.kind = 1;
+        b.matrix.t = [100.0, 0.0, 0.0];
+        let lit = WorldLighting {
+            lights: [a, b].iter().filter_map(LightRecord::new).collect(),
+            shadow: [0.2, 0.1, 0.3, 0.05],
+            fog: render::Fog { near: 1.0, far: 2.0, cap: 0.0, color: [0.0; 4] },
+            clear: [0.0; 4],
+        };
+        let centre = Vec3::new(10.0, 0.0, 0.0);
+        let rows = light_block(&lit, centre, [255, 200, 180, 255], 300, false);
+        let lights: Vec<(LightRecord, Option<f32>)> =
+            lit.strongest(centre).into_iter().map(|(r, d)| (r, Some(d))).collect();
+        for n in [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(0.0, 0.6, 0.8), Vec3::Z] {
+            for v in [[255u8, 255, 255, 255], [128, 64, 200, 128]] {
+                let p = Vec3::new(12.0, 3.0, 1.0);
+                let want = two_colours(LightMode::Moving, v, [255, 200, 180, 255], 300, lit.shadow, &lights, p, n);
+                let got = block_two_colours(&rows, v, p, n);
+                assert_eq!(got, want, "normal {n:?} colour {v:?}");
+            }
+        }
     }
 }

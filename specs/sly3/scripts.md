@@ -421,11 +421,11 @@ in section 9.
 | `0x0E` | 2,737 | wait until an alarm is set |
 | `0x0F`, `0x10` | 411, 206 | set, clear an alarm of this script or of another script |
 | `0x11`, `0x17` | 758, 1,691 | stop, start another script |
-| `0x12` | 868 | activate objects of a class |
+| `0x12` | 868 | activate one object, by its class (7.3) [X] |
 | `0x13` | 1,331 | a job command |
 | `0x14` | 674 | set the default target object |
 | `0x15` | 6,171 | call this script's module with message 4 and a value (script hook) |
-| `0x16` | 2,134 | play an animation on a character, or apply a clip to an object (waits for its end) |
+| `0x16` | 2,134 | play an animation on a character, or apply an animation-segment object to an object (7.3) |
 | `0x18` | 5,390 | set the runner's context object |
 | `0x19` | 5,248 | drive an object's state machine to a goal (snapping when the byte is set) |
 | `0x1A`, `0x1B` | 314, 226 | show, hide a screen object |
@@ -462,12 +462,73 @@ in section 9.
 | `0x60`, `0x61` | 1,133, 424 | show, clear a hint |
 | `0x62`, `0x63` | 2,441, 353 | give a guard commands |
 | `0x68` | 472 | fire an exit |
-| `0x69` to `0x6C` | 360, 79, 95, 172 | (meaning not established) |
+| `0x69` | 360 | put the player back at the nearest mission waypoint (7.3) [X, partly I] |
+| `0x6A` to `0x6C` | 79, 95, 172 | (meaning not established) |
 | `0x6E` | 41 | close the target character's binocucom |
 | `0x6F`, `0x70` | 955, 878 | take, release an instance of a placement |
 | `0x75`, `0x76`, `0x77` | 378, 1,331, 1,476 | (meaning not established); (meaning not established); turn a character to face an object |
 
 The example dialogue command of section 8 shows the arguments of `0x52`.
+
+### 7.3 Commands traced in the executable
+
+The runner's command switch is at `0x00226EA0`. It reads the command byte and jumps through a 120-entry table at
+`0x00326650`. The handlers below are `0x002271C8` (`0x12`), `0x00227454` (`0x16`) and `0x00228CC8` (`0x69`) [X].
+"The run's target" is the object that `0x14` / `0x18` set.
+
+**`0x12`, one argument `w`: an object ID, not a class** [X]. The handler finds the object and tests its class in
+this order, using the first match:
+
+| Class | What activating does |
+|---:|---|
+| 93 (contact trigger) | calls a method of its sub-object at +0x21C |
+| 21 | calls a method of its sub-object at +0x20C |
+| 39, 40 | applies the checkpoint (`0x00280010`) |
+| 24 (exit) | fires the exit |
+| **138** | **starts the screen fade** (`0x0017D7D0`), below |
+| 77, 113 | each has its own start routine (`0x0019E1F8`, `0x002775B8`) |
+| 33, 71, 80 | act together with the run's target, and only when that is a character (class 51): a method of the object with the character (33), `0x001E8E40` (71), `0x001716F8` (80, the safe) |
+| any other | raises script event 5 on the object (`0x0013BC80`) |
+
+Script 2061's argument 2062 is a class-138 object, so that command **starts a screen fade**. Class 138 (863 bodies,
+group `h_macro` and others) is the Sly 3 form of Sly 2's fade object [R]. It holds three colours and three times:
+
+| Option | Field | Meaning [R] | Commonest values [D] |
+|---:|---|---|---|
+| 1074, 1075, 1076 | +0x40, +0x44, +0x48 | start, middle and end colours (packed RGBA) | 0x01000000 ×764; 0x80000000 ×494; 0x01000000 ×780 |
+| 1077, 1079, 1078 | +0x4C, +0x50, +0x54 | the fade-in, hold and fade-out times in seconds (in field order) [I for the order] | 0.02 ×295; 0.05 ×295; 0 ×305 |
+| 1080 | +0x5C | a kind (1 ×835, 2 ×27, 0 once) | |
+
+Starting does nothing while the fade's in-world flag (bit 0 of byte +0x2F) is set. Otherwise it writes the game
+time (`0x0036BB98`) to +0x58 and adds the object to the world through its vtable [X]. While in the world, the fade
+covers the screen. Over the first time it blends from the start colour to the middle colour, then holds the middle
+colour, then blends to the end colour over the third time. When all three times have passed, it removes itself
+[R: Sly 2's behaviour].
+
+**`0x16`, arguments `wwb`: animation, object, flags; the command's flag byte makes the run wait** [R], with the
+dispatch [X]. If the second argument is a character (class 51), the first argument is a **clip ID**. The clip plays
+on that character as its script animation, with flags `b | 1` and priority 5. With the wait flag, the run waits for
+the clip to end. Otherwise the first argument is an **animation-segment object** (class 130). It is applied to the
+second argument when that is a class-47 object, or applied on its own when it is not. With the wait flag, the run
+waits until the segment retracts.
+
+**`0x69`, no arguments: acts on the run's target** [X]:
+
+- If the target is a character (class 51), `0x001528E0` runs. It does nothing in two cases: one particular game
+  mode (mode 1 with sub-state 35), or when the character's test at `0x001569B8` is set. Otherwise it looks up
+  entry 42 with `0x002459F8` and starts it (`0x00244F08`) [I: a sound or screen effect]. Then it does the same as
+  for a job.
+- If the target is a job or the player record's owner (class 49), the player record is found (`0x001F4A80`,
+  records of 4,544 bytes from `0x0036E740`), and `0x00168670(record, 0)` runs.
+- `0x00168670` stores the game time in the game state and in the record (+0x444). In mode 1 it also counts (+0x440)
+  and broadcasts task event 79. It then gathers up to 16 class-120 waypoints in the world. It keeps those that are
+  active (`0x00282750`) and whose mask +0x1A0 shares a bit with the player's mask (default 255). Kinds 0 and 1 are
+  candidates. Kind 2 is skipped. Kind −1 is kept as a fall-back, used only when no other candidate is found. It
+  then takes the nearest one. It hands that waypoint, and a point 300 × a returned scale above it, to
+  `0x00222C50`.
+
+*Interpretation:* `0x69` **returns the player to the nearest suitable mission waypoint**. It is a reset used after
+falls and failed sections [I]. The record field names are not established.
 
 ## 8. Test vectors
 

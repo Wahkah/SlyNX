@@ -126,6 +126,7 @@ fn task(t: &VarTree, i: usize, job: Option<usize>, prereq: Vec<usize>, succ: Vec
         auto_current: false,
         resume: i == 1,
         script: None,
+        done_on_current: false,
         prereq,
         succ,
         switches: vec![Switch { object: 7000 + i as i32, states: vec![1], owner: -1, row: -1 }],
@@ -149,6 +150,11 @@ fn jobs() -> Jobs {
         end_events: Vec::new(),
         close_events: vec![77],
         switches: Vec::new(),
+        replay: false,
+        item: None,
+        resume: None,
+        events: Vec::new(),
+        ignore_defeat: false,
         keys: keys(&t, &alloc::format!("m{i}"), &["focus_count", "is_complete", "time_played", "suck_value"]),
     };
     let mut g = Graph {
@@ -185,6 +191,8 @@ fn jobs() -> Jobs {
         respawn: flow::DEFAULT_POINT,
         exits: Vec::new(),
         fired_elsewhere: Vec::new(),
+        script_events: Some,
+        listener_class: None,
         load: None,
         place: None,
         notices: Vec::new(),
@@ -214,6 +222,29 @@ fn restore_opens_tasks_without_prerequisites() {
     // The switches of every task's state were applied: t0's object is present, the others' not.
     let p = presents(&mut j);
     assert!(p.contains(&(7000, true)) && p.contains(&(7001, false)));
+}
+
+#[test]
+fn restore_keeps_saved_locked_tasks_locked() {
+    // Task 0 counts as done while available (option 1271): live play does not re-evaluate task 1 then (successors
+    // are re-evaluated when a task becomes done or closed), so it stays locked; a save and restore must agree.
+    let mut j = jobs();
+    j.graph.tasks[0].counts_done = true;
+    assert!(j.prereqs_met(1));
+    assert_eq!(j.states[1], state::LOCKED);
+    j.restore(None, None);
+    assert_eq!(j.states, vec![1, 0, 0, 0, 0], "the restore does not open task 1");
+}
+
+#[test]
+fn a_request_for_minus_one_or_four_makes_current() {
+    // Method 1280 (Sly 3 1409): −1 or 4 as the state makes the task current (missions.md 3.1).
+    let mut j = jobs();
+    assert!(j.request(0, -1, false));
+    assert_eq!(j.current, Some(0));
+    j.request(0, state::DONE, false);
+    assert!(j.request(1, 4, false));
+    assert_eq!(j.current, Some(1));
 }
 
 #[test]

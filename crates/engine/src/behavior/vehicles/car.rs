@@ -157,6 +157,15 @@ impl ClassBehavior for Car {
     }
 }
 
+/// A combat-car shot's gravity (the shot's own is not read: the world's 1,750 [I]) and its speed limits [I].
+pub const SHOT_GRAVITY: f32 = 1750.0;
+pub const SHOT_SPEEDS: [f32; 2] = [200.0, 2000.0];
+
+/// The launch speed of a 45° arc reaching `distance` under `gravity`, clamped to [`SHOT_SPEEDS`] (10.4).
+pub fn shot_speed(distance: f32, gravity: f32) -> f32 {
+    crate::math::sqrt(distance.max(0.0) * gravity).clamp(SHOT_SPEEDS[0], SHOT_SPEEDS[1])
+}
+
 /// Combat car ammunition: three kinds of up to 30.
 pub const AMMO_MAX: i32 = 30;
 /// The combat car's maximum speed (default).
@@ -173,6 +182,8 @@ pub struct CombatCar {
     pub heading: f32,
     pub speed: f32,
     pub shots: u32,
+    /// Shots fired this step, sent as projectiles at the end of it.
+    pending: u32,
     attack_wait: f32,
     chosen_pickup: Option<Handle>,
 }
@@ -188,6 +199,7 @@ impl CombatCar {
             heading: world.world_transform(me).map_or(0.0, |w| super::heading_of(&w.cols).0),
             speed: 0.0,
             shots: 0,
+            pending: 0,
             attack_wait: 0.0,
             chosen_pickup: None,
         }
@@ -197,6 +209,7 @@ impl CombatCar {
         if self.ammo[weapon] >= 1 {
             self.ammo[weapon] -= 1;
             self.shots += 1;
+            self.pending += 1;
             true
         } else {
             false
@@ -329,6 +342,29 @@ impl ClassBehavior for CombatCar {
                     want_speed = 0.85 * COMBAT_SPEED;
                 }
             }
+        }
+        // Shots along the car's heading, their speed solved from the target's distance under the shot's gravity
+        // (10.4): a 45° arc reaching the target, clamped to the weapon's limits (not read: 200 to 2,000 [I]); with no
+        // target, 1,000 units ahead [I].
+        let target = cx.world.shared.driving.filter(|&d| d != cx.me);
+        let reach = target
+            .and_then(|t| cx.world.position(t))
+            .map_or(1000.0, |t| crate::math::length([t[0] - p[0], t[1] - p[1], 0.0]));
+        for _ in 0..core::mem::take(&mut self.pending) {
+            let fwd = [cos(self.heading), sin(self.heading), 0.0];
+            let v = shot_speed(reach, SHOT_GRAVITY);
+            let k = core::f32::consts::FRAC_1_SQRT_2 * v;
+            super::shots::fire(
+                cx.world,
+                super::shots::Projectile {
+                    position: crate::math::madd([p[0], p[1], p[2] + 50.0], fwd, 80.0),
+                    velocity: [fwd[0] * k, fwd[1] * k, k],
+                    life: 4.0,
+                    owner: cx.me,
+                    damage: super::shots::DAMAGE,
+                    gravity: SHOT_GRAVITY,
+                },
+            );
         }
         self.speed += (want_speed - self.speed) * (5.0 * dt).min(1.0);
         if self.speed.abs() < 0.5 {

@@ -41,16 +41,26 @@ use crate::sly2::level::{StaticLevel, upload_stage};
 pub mod commands;
 pub mod crew;
 pub mod flow;
+pub mod front; // Sly 3 hook: the title, the save slots, the episode menu and the movies.
+pub mod grid; // Sly 3 hook: the gadget assignment screen.
 pub mod jobs;
+pub mod layer; // Sly 3 hook: the 2D layer (fonts, HUD, pause menu, job screens; `ui::sly2`).
 pub mod safehouse;
+pub mod waypoints;
 
 /// Class 40 and every class derived from it (the class table's base links, object-stream.md 3.1).
 pub fn checkpoint_classes(classes: &[formats_sly3::exe::ClassEntry]) -> Vec<i16> {
+    derived_classes(classes, crew::CHECKPOINT_CLASS)
+}
+
+/// Class `root` and every class derived from it, by the executable's class table (each entry's base pointer).
+pub fn derived_classes(classes: &[formats_sly3::exe::ClassEntry], root: i16) -> Vec<i16> {
     let (va, _) = formats_sly3::exe::CLASS_TABLE;
     let address = |i: usize| va + (i * formats_sly3::exe::CLASS_ENTRY_SIZE) as u32;
-    let Some(root) = classes.iter().position(|c| c.class == crew::CHECKPOINT_CLASS as i32).map(address) else {
-        return alloc::vec![crew::CHECKPOINT_CLASS];
+    let Some(root_at) = classes.iter().position(|c| c.class == root as i32).map(address) else {
+        return alloc::vec![root];
     };
+    let root = root_at;
     let mut out = Vec::new();
     for (i, c) in classes.iter().enumerate() {
         let mut at = address(i);
@@ -79,16 +89,106 @@ pub fn save_tree(world: &World) -> Option<save::sly2::VarTree> {
     save::sly2::VarTree::parse(world.level.bytes.get(at..)?).map(|t| t.0)
 }
 
-/// Carries out one script request (commands.rs) on the world, the job system and the level flow. Dialogue,
-/// screens, goals and music are not run by the session yet.
+/// What a script request asks of the session itself.
+enum SessionAction {
+    /// Switch to a crew member (`0x13` on a playable character).
+    TakeOut(engine::gang::sly3::Member),
+    /// A script holds (true) or releases the pad (`0x1F`).
+    Pause(i32, bool),
+}
+
+/// Carries out one script request (commands.rs) on the world, the job system, the level flow and the player.
+/// Dialogue, screens (the 2D layer takes those), goals and music are not run by the session yet.
 fn apply_request(
     r: commands::Request,
     world: &mut World,
+    player: &mut dyn engine::game::systems::PlayerSystem,
     jobs: Option<&mut engine::game::sly2_jobs::Jobs>,
     flow: Option<&mut flow::Flow>,
-) {
+    waypoints: &[waypoints::Waypoint],
+) -> Option<SessionAction> {
     use commands::Request;
+    use engine::gang::sly3::Member;
     match r {
+        Request::Place { target, at } => {
+            let to = world.find_sly3_id(at, None).and_then(|h| world.world_transform(h))?;
+            let h = world.find_sly3_id(target, None)?;
+            if world.player == Some(h) {
+                player.place(world, to);
+            } else {
+                world.set_world_transform(h, to);
+            }
+        }
+        Request::Control { object, .. } => {
+            // The object with that ID; a placement (class 8; its ID names its copy's root) stands for the object
+            // it placed.
+            let slots = world.slots_with_sly3_id(object);
+            let handles: Vec<_> = slots.iter().filter_map(|&k| world.handle(k)).collect();
+            let h = handles
+                .iter()
+                .copied()
+                .find(|&h| world.class(h) != Some(formats_sly3::stream::PLACEMENT))
+                .or_else(|| handles.first().and_then(|&p| world.children(p).next()))?;
+            match world.class(h).and_then(Member::from_class) {
+                Some(m) if m.core().is_some() => return Some(SessionAction::TakeOut(m)),
+                _ => {
+                    // Control brings the object (and what holds it) into the world.
+                    let chain: Vec<_> = core::iter::successors(Some(h), |&q| world.parent(q)).collect();
+                    for q in chain {
+                        if !world.in_world(q) {
+                            world.set_in_world(q, true);
+                        }
+                    }
+                    world.shared.driving = Some(h);
+                }
+            }
+        }
+        Request::Activate { object } => {
+            // scripts.md 7.3: by the object's class. Exits fire, points become the checkpoint, a screen fade (138)
+            // comes into the world (the 2D layer draws it); the classes with routines of their own (21, 33, 71,
+            // 77, 80, 93, 113) are not modelled; any other gets script event 5.
+            let h = world.find_sly3_id(object, None)?;
+            match world.class(h)? {
+                24 => {
+                    if let Some(f) = flow {
+                        f.fire(object, -1);
+                    }
+                }
+                39 | 40 => {
+                    if let Some(f) = flow {
+                        f.checkpoint = object;
+                    }
+                }
+                138 => world.set_in_world(h, true),
+                21 | 33 | 71 | 77 | 80 | 93 | 113 => {}
+                _ => world.raise(h, 5, Vec::new()),
+            }
+        }
+        Request::ReturnToWaypoint => {
+            // scripts.md 7.3 (interpretation): the nearest active waypoint of kind 0 or 1, else of kind −1; the
+            // player is put 300 units above it.
+            let at = world.player.and_then(|p| world.position(p))?;
+            let near = |kinds: &[i32]| {
+                waypoints
+                    .iter()
+                    .filter(|w| kinds.contains(&w.kind) && world.is_active(w.handle))
+                    .filter_map(|w| world.world_transform(w.handle))
+                    .min_by(|a, b| {
+                        let d = |t: &formats::geometry::Affine| {
+                            (0..3).map(|k| (t.t[k] - at[k]) * (t.t[k] - at[k])).sum::<f32>()
+                        };
+                        d(a).total_cmp(&d(b))
+                    })
+            };
+            let mut to = near(&[0, 1]).or_else(|| near(&[-1]))?;
+            to.t[2] += 300.0;
+            player.place(world, to);
+        }
+        Request::Module { script, value } => {
+            let h = world.find_sly3_id(script, None)?;
+            world.raise(h, 4, alloc::vec![script::Value::Int(value)]);
+        }
+        Request::Pause { script, on } => return Some(SessionAction::Pause(script, on)),
         Request::FireExit { exit, point } => {
             if let Some(f) = flow {
                 f.fire(exit, point);
@@ -106,6 +206,7 @@ fn apply_request(
         }
         _ => {}
     }
+    None
 }
 
 /// The world the session starts in when none is named.
@@ -172,6 +273,20 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     rng: audio::rng::Rng,
     wipes: flow::WipeOrder,
     take_out: Option<engine::gang::sly3::Member>,
+    /// Vehicles hook: the projectiles' streaks (`crate::shot_marks`).
+    shot_marks: Option<crate::shot_marks::ShotMarks>,
+    /// The last frame's interval (texture animations advance by it when the frame is drawn).
+    frame_dt: f32,
+    /// A script paused the run (`0x1F`): the game gets no pad input while one of these scripts runs.
+    pub script_paused: bool,
+    paused_by: alloc::collections::BTreeSet<i32>,
+    /// The world's mission waypoints (class 120) and, by base class, the classes deriving from it.
+    pub waypoints: Vec<waypoints::Waypoint>,
+    derived: alloc::collections::BTreeMap<i16, Vec<i16>>,
+    /// Sly 3 hook (2D layer): the fonts, the layer and the screens.
+    pub ui: layer::Sly3Ui,
+    /// Sly 3 hook (front end): the title, the slots, the episode menu, the movies.
+    front: front::Front,
 }
 
 /// Where to look from: the middle of the drawn meshes' centres with the outer tenth on each side left out
@@ -210,6 +325,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             Ok(d) => (Some(d), None),
             Err(e) => (None, Some(e)),
         };
+        let grid = Self::grid_state(disc.as_ref().map(|d| &d.executable)); // Sly 3 hook (gadget grids)
         Sly3Session {
             renderer: Renderer::new(backend),
             game: None,
@@ -238,6 +354,14 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             rng: audio::rng::Rng::new(seed ^ 0x5133_F10E),
             wipes: flow::WipeOrder::default(),
             take_out: None,
+            shot_marks: None,
+            ui: layer::Sly3Ui::with_grid(grid), // Sly 3 hook (gadget grids)
+            front: front::Front::default(),
+            frame_dt: 0.0,
+            script_paused: false,
+            paused_by: alloc::collections::BTreeSet::new(),
+            waypoints: Vec::new(),
+            derived: alloc::collections::BTreeMap::new(),
         }
     }
 
@@ -263,6 +387,16 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         self.disc.as_ref()?.find_world(name)
     }
 
+    /// Vehicles hook: makes the task named `name` current, forced (testing and the smoke run start a job's machine
+    /// this way). Returns whether the task exists.
+    pub fn start_task(&mut self, name: &str) -> bool {
+        let (Some(g), Some(j)) = (self.game.as_mut(), self.jobs.as_mut()) else { return false };
+        let Some(t) = j.graph.tasks.iter().position(|t| t.name == name) else { return false };
+        j.request_current(t, true);
+        j.apply(&mut g.world);
+        true
+    }
+
     /// Vehicles hook: the player drives the first object of `class` in the running world (`behavior::vehicles`);
     /// `None` hands control back to the characters. Returns whether a machine was found.
     pub fn drive(&mut self, class: Option<i16>) -> bool {
@@ -273,6 +407,8 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let all: Vec<_> = class.map_or_else(Vec::new, |c| w.handles().filter(|&h| w.class(h) == Some(c)).collect());
         let machine = all.iter().copied().find(|&h| w.is_active(h)).or_else(|| all.first().copied());
         g.world.shared.driving = machine;
+        // The camera follows the driven machine (`camera::sly2`'s follow target), the characters again without one.
+        g.world.shared.camera_follow = machine;
         machine.is_some() || class.is_none()
     }
 
@@ -291,24 +427,59 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let label = format!("{} (slot {slot})", entry.name);
         let id = entry.world_id();
         let bytes = disc.read_world(slot).map_err(|e| format!("{label}: {e}"))?;
-        let (build, lighting) = {
+        let (build, lighting, glyphs, strings, set, context, grid_files) = {
             let fw = formats_sly3::World::parse_with(&bytes, &disc.options, disc.tangent_multipliers)
                 .map_err(|e| format!("{label}: {e}"))?;
+            // The option set from the task progress (conditions.md 3), the first one on a fresh load.
+            let progress = self.jobs.as_ref().map(|j| &j.progress).or(self.progress.as_ref());
+            let set = flow::choose_option_set(&fw.option_sets, progress);
+            let context = fw.context_for_set(Some(slot as i16), set);
+            // Sly 3 hook (2D layer): the fonts (read once) and the world's strings.
+            let glyphs = if self.ui.font.is_none() { layer::font_glyphs(&fw) } else { None };
+            // Sly 3 hook (gadget grids): the grid screens' files, read with the fonts for their icons.
+            let grid_files = if glyphs.is_some() { grid::screen_files(&fw) } else { Vec::new() };
+            let strings = layer::strings_of(&fw);
             let opts = formats_sly3::scene::SceneOptions {
-                context: fw.fresh_context(Some(slot as i16)),
+                context: context.clone(),
                 lights: formats_sly3::scene::light_classes(&disc.classes),
+                // The default passes plus the shadow hulls (6), projected volumes (10, 14) and kind 5's pass 15
+                // (rendering.md 5), as the viewer draws them.
+                passes: formats_sly3::scene::SceneOptions::default().passes
+                    | (1 << 6)
+                    | (1 << 10)
+                    | (1 << 14)
+                    | (1 << 15),
                 ..Default::default()
             };
             let build = formats_sly3::scene::build(&fw, opts);
-            // Option set 0's fog and shadow colour, and the lights (rendering.md 2 and 6), as the viewer draws them.
-            let sets: Vec<_> = fw.option_sets.sets.first().into_iter().collect();
+            // The chosen option set's fog and shadow colour, and the lights (rendering.md 2 and 6).
+            let sets: Vec<_> = fw.option_sets.sets.get(set).into_iter().collect();
             let lighting =
                 stage::light::WorldLighting::with(&build.lights, &sets, fw.data, &stage::light::WorldOptions::SLY3);
-            (build, lighting)
+            (build, lighting, glyphs, strings, set, context, grid_files)
         };
+        if let Some(mut g) = glyphs {
+            // Sly 3 hook (gadget grids): the grids' icons as a third font of the sheet.
+            let screens: Vec<(i32, formats_sly2::screen::Screen)> = grid_files
+                .into_iter()
+                .filter_map(|(id, f)| {
+                    let file = formats::compress::decompress(&disc.read_file(&f).ok()?).ok()?;
+                    Some((id, formats_sly3::screen::read_file(&file).ok()?))
+                })
+                .collect();
+            let (icons, art) = grid::bake(&self.ui.grid.grids, &screens);
+            self.ui.grid.art = art;
+            g.truncate(2);
+            g.push(icons);
+            self.ui.font = Some(ui::sly2::font::FontSheet::build(&g));
+        }
+        self.ui.strings = strings;
+        self.ui.subtitle = None;
         let scene = &build.scene;
         let opts = Sly3Options {
             slot: Some(slot as i16),
+            context: Some(context),
+            set,
             info: WorldInfo { index: slot as u32, id, task_mask: 0, identity: id },
             multipliers: disc.tangent_multipliers,
             ..Sly3Options::default()
@@ -324,12 +495,51 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let cfg = GameConfig { seed: self.seed, option_map, no_scripts: false };
         let mut systems = Systems::null();
         systems.camera = alloc::boxed::Box::new(FreeCamera::default());
-        systems.player =
-            alloc::boxed::Box::new(crew::CrewPlayer::new(self.arrival_id, checkpoint_classes(&disc.classes)));
+        systems.player = {
+            let mut crew = crew::CrewPlayer::new(self.arrival_id, checkpoint_classes(&disc.classes));
+            // Sly 3 hook (gadget grids): the crew's item table.
+            crew.items = self.ui.grid.items.as_ref().map(engine::gang::sly3::Sly3ItemTable::to_item_table);
+            alloc::boxed::Box::new(crew)
+        };
         let mut game = Game::new(world, Progress::new_game(), systems, cfg);
-        let input = stage::prep::SceneInput::sly3(&build, Some(&lighting));
-        self.gpu =
-            upload_stage(&mut self.renderer, input, None, &[], |_| Ok(())).map_err(|e| format!("{label}: {e}"))?;
+        // The crew's skinned meshes (`crate::sly2::skin::crew_draws`), posed every frame; their scene draws are left
+        // out.
+        let skinned = crate::sly2::skin::crew_draws(&game.world, &build.material_base);
+        let crew_records: Vec<(u32, u32)> = if skinned.is_empty() {
+            Vec::new()
+        } else {
+            let w = &game.world;
+            w.handles()
+                .filter(|&h| w.class(h).is_some_and(|c| engine::gang::sly3::Member::from_class(c).is_some()))
+                .filter_map(|h| w.sly3_record(h))
+                .map(|r| (r.header_offset, r.body_offset + r.body_size))
+                .collect()
+        };
+        let input =
+            stage::prep::SceneInput { skip: &crew_records, ..stage::prep::SceneInput::sly3(&build, Some(&lighting)) };
+        let sheet = self.ui.font.as_ref().map(|f| (f.width, f.height, f.pixels.clone()));
+        let mut ui_layer = None;
+        let mut marks = None;
+        let mut video = None;
+        let made = upload_stage(&mut self.renderer, input, Some(&game.world), &skinned, |r| {
+            ui_layer = Some(crate::ui_layer::UiLayer::new(r, sheet)?); // Sly 3 hook: the 2D layer.
+            video = Some(render::video::VideoLayer::new(r)?); // Sly 3 hook: the movies' picture.
+            marks = Some(crate::shot_marks::ShotMarks::upload(r)?); // Vehicles hook: the projectiles' streaks.
+            Ok(())
+        });
+        self.shot_marks = marks;
+        self.ui.layer = ui_layer;
+        self.front.movies.set_layer(video);
+        self.gpu = match made {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                // The renderer holds an empty level now: nothing may keep handles into the old one.
+                self.gpu = StaticLevel::default();
+                self.game = None;
+                self.current = None;
+                return Err(format!("{label}: {e}"));
+            }
+        };
         // A fresh free camera: `Game::new` configured the first one's lens from the world options by their Sly 1
         // meanings, which Sly 3 options do not have. It flies on its own: with `follow` off it must not track the
         // played character either.
@@ -339,6 +549,9 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 engine::camera::CameraConstants::SPEC,
                 Default::default(),
             ));
+            // Configured here, with the load, not on the first frame: it builds the camera's collision world from
+            // every solid (up to about 30 ms in m_ext), which would otherwise land on one frame.
+            game.systems.camera.configure(&game.world);
             let p = game.world.player.and_then(|h| game.world.position(h)).unwrap_or([0.0; 3]);
             game.systems.camera.cut([p[0], p[1] - 450.0, p[2] + 250.0], p);
         } else {
@@ -354,6 +567,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let wipes = self.flow.as_ref().map_or_else(|| self.wipes.clone(), flow::Flow::wipes);
         self.flow = Some(flow::Flow::new(&game.world, &ids, slot, self.arrival_id, wipes));
         self.safe_house = safehouse::SafeHouse::from_world(&game.world);
+        self.waypoints = waypoints::waypoints(&game.world);
+        for w in &self.waypoints {
+            self.derived.entry(w.player_class).or_insert_with(|| derived_classes(&disc.classes, w.player_class));
+        }
         self.in_safe_house = false;
         self.shop = None;
         // The job system: the progress block goes on from the previous world (with what it carried, unless this
@@ -382,6 +599,9 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         self.current = Some(Sly3Current { slot, name: entry.name, id, objects: game.world.len() });
         self.game = Some(game);
         self.message = None;
+        self.ui.grid.open = None;
+        self.sync_crew(); // Sly 3 hook (gadget grids): owned items and slots from the progress block.
+        self.front_world_loaded(slot); // Sly 3 hook: the menu world shows the episode menu.
         Ok(())
     }
 
@@ -466,6 +686,19 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         true
     }
 
+    /// The player's defeat (game event 12): unless the current job ignores it (option 1362), the job counts a
+    /// failure and the world restarts at the stored checkpoint. Returns whether it restarts.
+    pub fn defeat(&mut self) -> bool {
+        let reacts = match (self.jobs.as_mut(), self.game.as_mut()) {
+            (Some(j), Some(g)) => jobs::defeat(j, &mut g.world),
+            _ => true,
+        };
+        if reacts {
+            self.restart();
+        }
+        reacts
+    }
+
     /// The restart (game event 12): the current world at the stored checkpoint, with wipe 875.
     pub fn restart(&mut self) {
         if let Some(f) = self.flow.as_mut() {
@@ -542,26 +775,82 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
 
     /// Runs one frame for a measured interval (seconds). Returns false when the session should end.
     pub fn update(&mut self, input: &FrameInput, measured: f32) -> bool {
+        self.frame_dt = measured;
         self.perform_load();
-        let input = &self.safe_house_input(input);
+        // Sly 3 hook (front end): a movie holds everything; the title and the episode menu take the input.
+        let front = self.front_open();
+        let Some(input) = self.update_front(input, measured).or_else(|| (!self.movie_playing()).then_some(*input))
+        else {
+            return !self.ui.quit;
+        };
+        let input = &input;
+        // Sly 3 hook (2D layer): the lines and screens scripts ask for; the game gets no input while a screen holds.
+        let mut lines: Vec<Option<(i32, i32)>> = Vec::new();
+        let mut screens: Vec<(i32, bool)> = Vec::new();
+        let raw = *input;
+        // Player 0's holds (missions.md 4.2): one per pausing script, one while a screen holds the pad.
+        let holds = self.paused_by.len() as u32 + u32::from(self.screens_hold());
+        let input = &if self.screens_hold() || self.script_paused {
+            FrameInput::default()
+        } else {
+            self.safe_house_input(input)
+        };
         if let Some(g) = self.game.as_mut() {
+            g.world.shared.sly3_holds = holds;
             g.frame(input, measured);
             let touched = input.buttons != 0 || input.left != [0.0; 2] || input.right != [0.0; 2];
             if let Some(j) = self.jobs.as_mut() {
                 jobs::step(j, &mut g.world, measured, touched);
+                // Vehicles hook: a job's machine is handed to the player while the job runs.
+                let (job, task) = engine::behavior::vehicles::shots::job_of(j);
+                engine::behavior::vehicles::shots::follow_job(&mut g.world, job, task.as_deref());
             }
+            // Mission waypoints (missions.md 4.2): walking in raises the events that start a job.
+            let derived = &self.derived;
+            let derives = |c: i16, b: i16| derived.get(&b).is_some_and(|v| v.contains(&c));
+            waypoints::update(&mut self.waypoints, &mut g.world, self.jobs.as_mut(), &derives);
             // Scripts, then what they asked.
             let view = commands::View { line_playing: false };
             self.scripts.update(Some(&g.world), &view, measured);
             for r in core::mem::take(&mut self.scripts.requests) {
-                apply_request(r, &mut g.world, self.jobs.as_mut(), self.flow.as_mut());
+                // Sly 3 hook (2D layer): the lines' subtitles.
+                match &r {
+                    commands::Request::PlayLine { line, object, .. } => lines.push(Some((*line, *object))),
+                    commands::Request::ClearSubtitle => lines.push(None),
+                    commands::Request::Screen { screen, on } => screens.push((*screen, *on)),
+                    _ => {}
+                }
+                match apply_request(
+                    r,
+                    &mut g.world,
+                    &mut *g.systems.player,
+                    self.jobs.as_mut(),
+                    self.flow.as_mut(),
+                    &self.waypoints,
+                ) {
+                    Some(SessionAction::TakeOut(m)) => self.take_out = Some(m),
+                    Some(SessionAction::Pause(script, on)) => {
+                        if on {
+                            self.paused_by.insert(script);
+                        } else {
+                            self.paused_by.remove(&script);
+                        }
+                    }
+                    None => {}
+                }
             }
+            // A script's pause lasts while it runs.
+            let scripts = &self.scripts;
+            self.paused_by.retain(|o| scripts.is_running(*o));
+            self.script_paused = !self.paused_by.is_empty();
             // The current task's script (option 1408) starts when the task becomes current.
             if let Some(j) = self.jobs.as_mut() {
                 if j.current != self.last_task
                     && let Some(script) = j.current.and_then(|t| j.graph.tasks[t].script)
                 {
-                    self.scripts.start(&g.world, script, -1);
+                    // With player 0's controlled object as its context (missions.md 4).
+                    let me = g.world.player.and_then(|h| g.world.sly3_id(h)).unwrap_or(-1);
+                    self.scripts.start(&g.world, script, me);
                 }
                 self.last_task = j.current;
                 // Exits fired by jobs (option 1381) and tasks (1406).
@@ -588,16 +877,40 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 s.update(measured);
             }
         }
-        true
+        // Sly 3 hook (2D layer): subtitles, then the screens' frame.
+        for l in lines {
+            match l {
+                Some((line, object)) => self.show_line(line, object),
+                None => self.ui.subtitle = None,
+            }
+        }
+        for (screen, on) in screens {
+            self.screen_request(screen, on);
+        }
+        if !front && !self.front_open() {
+            self.update_ui(&raw, engine::game::clock::frame_step(measured));
+        }
+        !self.ui.quit
     }
 
     /// Draws the frame.
     pub fn render(&mut self) -> Result<FrameStats, RenderError> {
+        if self.game.is_none() {
+            return Ok(FrameStats::default());
+        }
+        // The world's texture animations, once per rendered frame.
+        self.gpu.animate(&mut self.renderer, self.frame_dt)?;
         let Some(g) = self.game.as_ref() else { return Ok(FrameStats::default()) };
+        // The crew's bones follow their objects.
+        self.gpu.characters.update(&mut self.renderer, &g.world)?;
         let c = g.render.camera;
         let v = |a: [f32; 3]| Vec3::new(a[0], a[1], a[2]);
         let camera =
             Camera { eye: v(c.eye), target: v(c.target), up: v(c.up), fov_y: c.fov_y, near: c.near, far: c.far };
+        if let Some(m) = self.shot_marks.as_mut() {
+            m.draw(&mut self.renderer, &g.world)?; // Vehicles hook: the projectiles' streaks.
+        }
+        self.draw_ui()?; // Sly 3 hook: the 2D layer.
         self.renderer.render(&camera, self.gpu.clear)
     }
 

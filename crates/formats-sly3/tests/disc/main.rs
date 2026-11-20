@@ -980,3 +980,58 @@ fn collision_meshes_and_trees() {
     // A converted tree passes the engine's check: every child after its parent, with one parent.
     p.tree.validate(p.mesh.triangles.len()).unwrap();
 }
+
+#[test]
+fn scene_record_budget() {
+    need_disc!();
+    let w = apt();
+    let ctx = w.fresh_context(Some(APT as i16));
+    let full =
+        scene::build(w, SceneOptions { context: ctx.clone(), decode_textures: false, ..SceneOptions::default() });
+    assert_eq!(full.over_budget, 0, "v_apt fits the default budget");
+    // A small budget stops the walk: fewer instances, the rest counted.
+    let small = scene::build(
+        w,
+        SceneOptions { context: ctx, decode_textures: false, record_budget: 50, ..SceneOptions::default() },
+    );
+    assert!(small.over_budget > 0 && small.scene.instances.len() < full.scene.instances.len());
+}
+
+#[test]
+fn the_v_apt_floor_is_a_polygon_surface() {
+    need_disc!();
+    // worlds.md, the collision test vector: the level object (class 48, object 1) has one collision mesh of 1,390
+    // positions and 1,356 surfaces in world coordinates; the coffee-shop area holds 302 positions.
+    let w = apt();
+    let r = find_record(w, 0x6C4C93);
+    assert_eq!((r.class, r.id), (48, 1));
+    let Body::Solid(s) = &r.body else { panic!() };
+    let m = &s.collision[0].mesh;
+    assert_eq!((m.positions.len(), m.triangles.len()), (1390, 1356));
+    let near = |p: [f32; 3], q: [f32; 3]| (0..3).all(|k| (p[k] - q[k]).abs() < 0.1);
+    assert!(near(m.positions[476], [-2873.5, 4495.9, -39.4]));
+    assert!(near(m.positions[480], [-1974.7, 3344.9, -39.4]));
+    let shop = |q: &[f32; 3]| (-3700.0..=-1300.0).contains(&q[0]) && (2800.0..=7100.0).contains(&q[1]);
+    assert_eq!(m.positions.iter().filter(|q| shop(q)).count(), 302);
+    // Surface 281 is the floor at z −33: its corners (173, 177, 172) are three of the ten positions its edges
+    // reach (171 to 180), all in its plane. As triangles it covers the point Sly walked off.
+    let t = m.triangles[281];
+    assert_eq!((t.corners, t.edge_count), ([173, 177, 172], 9));
+    let ring: std::collections::BTreeSet<u16> =
+        m.edges[t.first_edge as usize..][..9].iter().flat_map(|e| e.ends).collect();
+    assert_eq!(ring, (171..=180).collect());
+    assert!(ring.iter().all(|&v| (m.positions[v as usize][2] + 32.98).abs() < 0.01));
+    let full = formats_sly3::collision::with_polygons(m);
+    assert_eq!(full.triangles[..1356], m.triangles[..], "stored surfaces keep their indices");
+    let covers = |mesh: &formats_sly3::collision::Mesh, x: f32, y: f32| {
+        (0..mesh.triangles.len()).any(|t| {
+            let c = mesh.corners(t);
+            let s = |a: [f32; 3], b: [f32; 3]| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+            let d = [s(c[0], c[1]), s(c[1], c[2]), s(c[2], c[0])];
+            c.iter().all(|q| (q[2] + 32.98).abs() < 0.01)
+                && (d.iter().all(|&v| v >= 0.0) || d.iter().all(|&v| v <= 0.0))
+        })
+    };
+    assert!(!covers(m, -2848.0, 5579.0), "the stored triangles leave a hole");
+    assert!(covers(&full, -2848.0, 5579.0), "the polygon covers it");
+}

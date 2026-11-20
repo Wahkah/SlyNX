@@ -390,6 +390,43 @@ pub fn behaviour_of(n: u8) -> u8 {
 
 /// The gadget slot table (L1, L2, R2 as pad bits 4, 1, 2) [X 0x349040].
 pub const SLOT_TABLE_VA: u32 = 0x0034_9040;
+/// The gadget grids of the assignment screen (safehouse-and-shop.md 4): three tables of 32-byte cells in Sly 2's
+/// layout (`super::gadgets::GridCell`: item record, three screen-part labels, −1, x, y, flags) just before the slot
+/// table, one per grid screen (1062, 1063, 1064) with its cell count [D: found by the cells' labels, which are the
+/// labels of the grid screens' cell groups]. Each grid's character is the owner of its items.
+pub const GRIDS: [(i32, u32, usize); 3] = [(1062, 0x0034_8BE0, 15), (1063, 0x0034_8DC0, 11), (1064, 0x0034_8F20, 8)];
+
+/// The three gadget grids: (screen object, character, cells), the character from the item table's owners.
+pub fn grids_from_executable(
+    exe: &Executable,
+    items: &Sly3ItemTable,
+) -> formats::Result<Vec<(i32, Member, Vec<super::gadgets::GridCell>)>> {
+    if !formats_sly3::exe::is_supported(exe) {
+        return Err(formats::Error::UnknownExecutable);
+    }
+    let mut out = Vec::new();
+    for (screen, va, n) in GRIDS {
+        let cells: Vec<super::gadgets::GridCell> = exe
+            .bytes_at(va, n * 32)?
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .map(|c| {
+                let i = |k: usize| i32::from_le_bytes([c[k * 4], c[k * 4 + 1], c[k * 4 + 2], c[k * 4 + 3]]);
+                let f = |k: usize| f32::from_le_bytes([c[k * 4], c[k * 4 + 1], c[k * 4 + 2], c[k * 4 + 3]]);
+                super::gadgets::GridCell { item: i(0), parts: [i(1), i(2), i(3)], position: [f(5), f(6)], flags: i(7) }
+            })
+            .collect();
+        let owner = cells
+            .iter()
+            .find_map(|c| usize::try_from(c.item).ok().and_then(|n| items.items.get(n)).and_then(Sly3Item::owner));
+        if let Some(m) = owner {
+            out.push((screen, m, cells));
+        }
+    }
+    Ok(out)
+}
+
 /// The other givers' pocket table [X].
 pub const OTHER_POCKETS_VA: u32 = 0x0034_6BA8;
 /// The guards' pocket table [X].
@@ -469,8 +506,23 @@ pub enum GrappleCamCue {
 }
 
 impl GrappleCam {
-    /// Starts the grab (phase 3); the button is `GangTunables::grapple_grab` (not found yet).
-    pub fn grab(&mut self) {
+    /// Deploys the camera: the item's own button puts it straight in phase 4, where the player controls it
+    /// (gadgets.md 6.10).
+    pub fn deploy(&mut self) {
+        self.phase = 4;
+    }
+
+    /// The item's button pressed again: in phases 4 to 6 it goes to phase 7. Returns whether it did.
+    pub fn item_pressed(&mut self) -> bool {
+        let to_end = matches!(self.phase, 4..=6);
+        if to_end {
+            self.phase = 7;
+        }
+        to_end
+    }
+
+    /// Phase 3, set by another user of the same controller (Sly's own; its Cross check is that user's).
+    pub fn enter_phase_3(&mut self) {
         self.phase = 3;
     }
 
@@ -547,6 +599,25 @@ pub const POCKET_ROWS: usize = 6;
 pub const LOOT_TABLE_VA: u32 = 0x0034_9070;
 /// Sly 3's first prize kind: kind 1255 + i is loot record i (i = 0 to 29).
 pub const FIRST_PRIZE_KIND: i32 = 1255;
+/// Gravity (specs/sly3/physics.md): option 35's vector times the gravity ratio, option 254. The core three (and the
+/// Guru, Panda King and Penelope) carry (0, 0, −1,750) × 1.3 = −2,275, Sly 2's value; Carmelita −2,275 directly;
+/// Dimitri −4,000.
+pub fn gravity_of(member: Member) -> f32 {
+    match member {
+        Member::Dimitri => -4000.0,
+        _ => -1750.0 * 1.3,
+    }
+}
+
+/// An object's gravity from its options: the z of option 35 (default −1,750) times option 254 (default 1).
+pub fn gravity_from_options(o: &crate::object::OptionStore) -> f32 {
+    let g = match o.get(35) {
+        Some(crate::object::OptionValue::Vector(v)) => v[2],
+        _ => -1750.0,
+    };
+    g * o.f32(254).unwrap_or(1.0)
+}
+
 /// The pickups' gravity vector (0, 0, −2250, 0) [X 0x346FD0].
 pub const PICKUP_GRAVITY_VA: u32 = 0x0034_6FD0;
 
@@ -768,6 +839,7 @@ mod move_tests {
             (7usize, [2i32, 25, 0, 0, 0]),
             (11, [-1, 25, 300, 0, 0]),
             (12, [2, 25, 0, 10, 0]),
+            (13, [2, 25, 0, 0, 0]),
             (14, [2, 25, 0, 5, 0]),
             (36, [1, 24, 0, 0, 0]),
             (17, [2, 26, 0, 0, 0]),
@@ -882,6 +954,73 @@ mod move_tests {
     }
 
     #[test]
+    fn ball_spin_and_grapple_cam_buttons() {
+        let cw = floor();
+        let mut s = sly3_shared();
+        for n in [13, 17] {
+            s.owned.add(n);
+        }
+        let world = GangWorld {
+            cw: &cw,
+            filter: QueryFilter::default(),
+            targets: &[],
+            help: 0.0,
+            safehouse: false,
+            pools: &[],
+        };
+        let dt = 1.0 / 60.0;
+        let press = |b: u32| GangInput { pressed: b, held: b, ..GangInput::default() };
+        let mut out = Vec::new();
+        // Be The Ball (gadgets.md 6.10): each Square moves the spin by at most 4 toward 14 × the stick about the
+        // sideways axis; at full stick four presses roll at about 14 × 75 = 1,050/s.
+        let mut m = Character::new(Who::Murray, [0.0; 3], 0.0);
+        m.slots.0 = [Some(17), None, None];
+        for _ in 0..20 {
+            m.update(dt, &GangInput::default(), &world, &s, &mut out);
+        }
+        m.update(dt, &press(button::L1), &world, &s, &mut out);
+        let tumble = crate::math::length(m.ball_spin);
+        assert!((1.5..=2.5).contains(&tumble), "{tumble}");
+        let fwd = |b: u32| GangInput { stick: [0.0, 1.0], pressed: b, held: b, ..GangInput::default() };
+        for _ in 0..5 {
+            m.update(dt, &fwd(button::SQUARE), &world, &s, &mut out);
+            for _ in 0..10 {
+                m.update(dt, &fwd(0), &world, &s, &mut out);
+            }
+        }
+        let speed = crate::math::length([m.velocity[0], m.velocity[1], 0.0]);
+        assert!((speed - 1050.0).abs() < 5.0, "{speed} {:?}", m.ball_spin);
+        // Grapple-Cam: the item's button deploys it in phase 4; Triangle releases and puts it away.
+        let mut b = Character::new(Who::Bentley, [0.0; 3], 0.0);
+        b.slots.0 = [Some(13), None, None];
+        out.clear();
+        b.update(dt, &press(button::L1), &world, &s, &mut out);
+        assert!(out.contains(&GangEvent::GrappleCam));
+        assert_eq!(b.grapple.map(|g| g.0.phase), Some(4));
+        // Cross is the camera's while it is out: no jump.
+        b.update(dt, &GangInput::default(), &world, &s, &mut out);
+        b.update(dt, &press(button::TRIANGLE), &world, &s, &mut out);
+        assert!(b.grapple.is_none() && out.contains(&GangEvent::GrappleCamEnded { grabbed: false }));
+        // Deployed again, the item's button sends it to phase 7, which ends after its animation.
+        b.update(dt, &GangInput::default(), &world, &s, &mut out);
+        b.update(dt, &press(button::L1), &world, &s, &mut out);
+        b.update(dt, &GangInput::default(), &world, &s, &mut out);
+        b.update(dt, &press(button::L1), &world, &s, &mut out);
+        assert_eq!(b.grapple.map(|g| g.0.phase), Some(7));
+        out.clear();
+        for _ in 0..30 {
+            b.update(dt, &GangInput::default(), &world, &s, &mut out);
+        }
+        assert!(b.grapple.is_none() && out.contains(&GangEvent::GrappleCamEnded { grabbed: true }), "{out:?}");
+        // Cross or Square in control is the grab too.
+        b.update(dt, &press(button::L1), &world, &s, &mut out);
+        b.update(dt, &GangInput::default(), &world, &s, &mut out);
+        b.update(dt, &press(button::CROSS), &world, &s, &mut out);
+        assert_eq!(b.grapple.map(|g| g.0.phase), Some(7));
+        assert_eq!(b.state, crate::gang::character::bentley::STAND);
+    }
+
+    #[test]
     fn grapple_cam_phases() {
         let mut g = GrappleCam::default();
         let base = GrappleCamInput { thresholds: [0.5, 0.5], ..GrappleCamInput::default() };
@@ -893,7 +1032,7 @@ mod move_tests {
         g.step(&GrappleCamInput { playback_done: true, ..base });
         assert_eq!(g.phase, 0);
         // The grab on the player in state 10 holds; Cross or Square continues to the end.
-        g.grab();
+        g.enter_phase_3();
         g.step(&GrappleCamInput { playback_done: true, target_player_ready: true, ..base });
         assert_eq!(g.phase, 4);
         assert_eq!(g.step(&GrappleCamInput { target_exits: true, ..base }), Some(GrappleCamCue::Exit));
@@ -903,7 +1042,7 @@ mod move_tests {
         assert_eq!(g.step(&GrappleCamInput { playback_done: true, ..base }), Some(GrappleCamCue::Exit));
         // A grab on anything else releases.
         let mut g = GrappleCam::default();
-        g.grab();
+        g.enter_phase_3();
         assert_eq!(g.step(&GrappleCamInput { playback_done: true, ..base }), Some(GrappleCamCue::Release));
         assert_eq!(g.phase, 0);
     }

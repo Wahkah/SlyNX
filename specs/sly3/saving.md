@@ -103,8 +103,9 @@ It also caches per-world and per-episode handles (`episode/<name>`, `…/dt`, `�
 
 **`oidCheckpointForce` / `widCheckpointForce`** [X] hold a **task's object ID and its world**, not an arrival point:
 
-- Three routines write the pair: `0x00164228`, `0x00186338` and `0x00187270`. They write an object's ID (its field
-  +0x18) and a world index (field +0xAC of that object or of its owner); the object is a task [I]. `0x00186338` also clears the pair to (0, 0).
+- Three routines write the pair: `0x00164228`, `0x00186338` and `0x00187270`. They write a task's ID (its field
+  +0x18) and its world (field +0xAC). `0x00187270` is the job-completion routine: it takes the **resume task
+  (option 1366) of the job that follows** ([missions.md](missions.md) 4.1) [X]. `0x00186338` also clears the pair to (0, 0).
 - The episode start routine (`0x00289198`, [level-flow.md](level-flow.md) 3) reads the pair when starting
   **episode 8**. If the saved task is 0 or −1 it starts task 1841; otherwise it starts the saved task in the saved
   world.

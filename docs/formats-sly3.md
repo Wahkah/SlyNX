@@ -118,6 +118,14 @@ player's image (and passes, skipping, otherwise); run it with `--release`:
   objects and element kinds;
 - a scene for v_apt (textures decode without error) and for every world.
 
+## Collision surfaces
+
+`collision::with_polygons(mesh)` is the shared `formats::collision::CollisionMesh::with_polygons`: a stored
+surface is a convex polygon in the plane of its corners, the convex hull of its corners and the ends of every edge
+naming it (its own and its neighbours'). The stored surfaces stay first, at their indices; the hull's fan
+triangles are appended. The v_apt floor vector of `specs/sly3/worlds.md` is a disc test. Spec question: 2.1 calls
+the surfaces triangles.
+
 ## Exits
 
 `stream::exit_body(data, body_offset, table)` reads a class-24 body: the header, the options, the trigger volume
