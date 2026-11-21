@@ -127,7 +127,7 @@ pub mod opt {
     pub const FORCE_GIVE_UP: u16 = 850;
 }
 
-/// Sight test points in the player's frame (executable 0x274660 and 0x274620; guards.md 4.2).
+/// Sight test points in the player's frame (guards.md 4.2 and 9).
 pub const SIGHT_PATROL: [[f32; 3]; 4] = [[0.0, 0.0, -20.0], [0.0, 0.0, 70.0], [0.0, -30.0, 30.0], [0.0, 30.0, 30.0]];
 /// Sight test points while the group attacks.
 pub const SIGHT_ATTACK: [[f32; 3]; 4] = [[0.0, 0.0, -80.0], [0.0, 0.0, 100.0], [0.0, -70.0, 40.0], [0.0, 70.0, 40.0]];

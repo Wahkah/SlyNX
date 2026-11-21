@@ -79,6 +79,8 @@ pub fn script_events(e: u32) -> Option<u32> {
     match e {
         script_event::TASK_EVENT => Some(20),
         script_event::BEGIN => Some(22),
+        // After a state change of a live task (missions.md 4.1a): event 24 on the task.
+        script_event::STATE => Some(24),
         _ => None,
     }
 }
@@ -94,7 +96,15 @@ pub fn attach(world: &mut World, progress: Progress, carry: Option<Carry>, queue
     j.restore(queued, carry);
     current_when_available(&mut j);
     j.apply(world);
+    mirror(&j, world);
     j
+}
+
+/// Sly 3 hook: the task states, mirrored into the world for scripts (task option 1415; missions.md 4.1a).
+pub fn mirror(j: &Jobs, world: &mut World) {
+    let m = &mut world.shared.sly3_task_states;
+    m.clear();
+    m.extend(j.graph.tasks.iter().zip(&j.states).map(|(t, &s)| (t.id, s)));
 }
 
 /// The world start's "current when available" pass (missions.md 4.1a step 3): the last available task with 1399
@@ -114,9 +124,9 @@ pub fn current_when_available(j: &mut Jobs) {
     }
 }
 
-/// The restore's visit order (missions.md 4.1a), which is also the order the restore fills the available list. The
-/// walk starts at the roots and reaches a task once all its prerequisites are visited, recording its depth (+0x108,
-/// the longest path from a root) and its job-change depth (+0x10C: along that path, one more at each step from a
+/// The restore's visit order (missions.md 4.1a, "Visit order"), which is also the order the restore fills the
+/// available list. The walk starts at the roots and reaches a task once all its prerequisites are visited, recording
+/// its depth (the longest path from a root) and its job-change depth (along such a path, one more at each step from a
 /// task with a job to a task of a different job). The order is sorted by the job-change depth, the job's object ID
 /// (−1 for none), the depth, then the task's object ID.
 pub fn visit_order(j: &Jobs) -> Vec<usize> {
@@ -136,15 +146,14 @@ pub fn visit_depths(j: &Jobs) -> (Vec<u32>, Vec<u32>) {
     let g = &j.graph;
     let n = g.tasks.len();
     let (mut depth, mut changes) = (alloc::vec![0u32; n], alloc::vec![0u32; n]);
+    // From the prerequisite lists alone (each prerequisite once), in prerequisite-first order.
     for t in g.prerequisite_order() {
-        for &c in &g.tasks[t].succ {
-            if c >= n || !g.tasks[c].prereq.contains(&t) {
-                continue;
-            }
-            let from = g.tasks[t].job;
-            let step = u32::from(from.is_some() && g.tasks[c].job != from);
-            depth[c] = depth[c].max(depth[t] + 1);
-            changes[c] = changes[c].max(changes[t] + step);
+        let ps: alloc::collections::BTreeSet<usize> = g.tasks[t].prereq.iter().copied().filter(|&p| p < n).collect();
+        for p in ps {
+            let from = g.tasks[p].job;
+            let step = u32::from(from.is_some() && g.tasks[t].job != from);
+            depth[t] = depth[t].max(depth[p] + 1);
+            changes[t] = changes[t].max(changes[p] + step);
         }
     }
     (depth, changes)
@@ -195,6 +204,7 @@ pub fn step(j: &mut Jobs, world: &mut World, dt: f32, touched: bool) {
         }
     }
     j.apply(world);
+    mirror(j, world);
 }
 
 /// Command `0x1E` (scripts.md 7.2) and the exit and arrival pairs (841, 847): task `task` asked for state `s` as
@@ -207,6 +217,7 @@ pub fn set_task(j: &mut Jobs, world: &mut World, task: i32, s: i32) {
         j.request(t, s as i8, false);
     }
     j.apply(world);
+    mirror(j, world);
 }
 
 /// The player's defeat (game event 12; missions.md 2, option 1362): `true` when the job reacts, counting a failure
@@ -217,5 +228,6 @@ pub fn defeat(j: &mut Jobs, world: &mut World) -> bool {
     }
     j.task_event(engine::game::sly2_jobs::event::DEFEAT, None);
     j.apply(world);
+    mirror(j, world);
     true
 }

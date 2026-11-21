@@ -68,7 +68,7 @@ pub struct Beat {
     pub passed: bool,
 }
 
-/// The negative-score scale for difficulty help `h` [D (1.2, −0.6, 0) at 0x002BDBE0].
+/// The negative-score scale for difficulty help `h` [D (1.2, −0.6, 0), specs/sly2/vehicles-and-minigames.md 5].
 pub fn negative_scale(h: f32) -> f32 {
     (1.2 - 0.6 * h).clamp(0.0, 1.0)
 }

@@ -34,7 +34,7 @@ pub mod class {
 
 /// Script event raised when a pickup is collected.
 pub const COLLECTED: u32 = 5;
-/// Pickups farther than this from the character are not tested (`0x2C0D7C`).
+/// Pickups farther than this from the character are not tested (pickpocket-and-pickups.md 3.3).
 pub const REJECT: f32 = 300.0;
 /// The coin's collect radius when its options give none. *Placeholder*: 3.3 says "from its options".
 pub const COIN_RADIUS: f32 = 50.0;

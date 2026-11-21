@@ -348,13 +348,23 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             (0..j.states.len()).filter(|&t| j.states[t] == 1).map(|t| j.graph.tasks[t].name.clone()).collect();
         journal.push(format!("start: current {}, available {open:?}", task_name(&s, j.current)));
     }
-    // Stand-in for the episode intro (missions.md 4.1a): the macro module plays it and advances `t1_intro` (2064),
-    // which opens 2083. Its handler is not decoded yet, so the route asks for 2064's state 3 as Sly 2's intro
-    // sequence does (a checked request, command 0x1E).
-    if let (Some(j), Some(g)) = (s.jobs.as_mut(), s.game.as_mut()) {
-        game::sly3::jobs::set_task(j, &mut g.world, 2064, 3);
-        journal.push(format!("intro stand-in: 2064 state {:?}", j.task_state(2064)));
+    // The intro (missions.md 4.1a): the restore opening `t1_intro` (2064) raises event 24 on it, which starts script
+    // 2065. The route waits for it to end, pressing Cross once a second for its prompt (2048).
+    let mut started = false;
+    for f in 0..90 * FPS {
+        let running = s.scripts.is_running(2065);
+        started |= running;
+        if started && !running {
+            break;
+        }
+        let b = if f % FPS == FPS - 1 { platform_api::Buttons::B.0 } else { 0 };
+        s.update(&FrameInput { pressed: b, buttons: b, ..Default::default() }, 1.0 / FPS as f32);
     }
+    journal.push(format!(
+        "intro: script 2065 ran {started}, still running {}, 2064 state {:?}",
+        s.scripts.is_running(2065),
+        s.jobs.as_ref().and_then(|j| j.task_state(2064))
+    ));
     // The safe house: step to Sly (24) and take him out.
     if s.enter_safe_house() {
         for _ in 0..6 {
@@ -614,6 +624,8 @@ impl platform_api::FileSystem for MemFs {
 
 /// A task with no progress for this long is looked at (what would finish it) and then finished by request.
 pub const SLY2_STALL_AFTER: f32 = 12.0;
+/// While a sequence plays, a task is looked at only after this long.
+pub const SLY2_CUTSCENE_STALL: f32 = 60.0;
 /// Jobs to play through: episode 1's intro job and the first hub job.
 pub const SLY2_JOBS: usize = 2;
 
@@ -940,8 +952,12 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
             current.push(n);
             last_task = task;
             since = 0.0;
-        } else {
+        } else if s.running.is_empty() {
             since += 1.0 / FPS as f32;
+        } else {
+            // A sequence playing (a cutscene that waits for its clips) counts slowly: idle sequences that hold looping
+            // clips until something stops them play on for good.
+            since += 1.0 / FPS as f32 * SLY2_STALL_AFTER / SLY2_CUTSCENE_STALL;
         }
         if jobs_done.len() >= SLY2_JOBS {
             break;

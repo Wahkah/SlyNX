@@ -46,7 +46,7 @@ pub fn shot_speed(world: &World, me: Handle) -> f32 {
         .max(0.0)
 }
 
-/// The angular-speed decay record (5, 0, 0.5) [D 0x002C4408].
+/// The angular-speed decay record (5, 0, 0.5) [D, specs/sly2/vehicles-and-minigames.md 3.2].
 pub const DECAY: SmoothParams = SmoothParams { fast: 5.0, slow: 0.0, fast_time: 0.5, max_speed_change: None };
 
 /// Turret state.

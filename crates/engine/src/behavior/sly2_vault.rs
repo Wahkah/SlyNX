@@ -37,7 +37,7 @@ pub const CLUES: &str = "afClue";
 pub const VAULT_FLAG: &str = "fVault";
 /// How near the played character must be to use the vault. *Placeholder*.
 pub const REACH: f32 = 250.0;
-/// The dial's keys 1 to 9 by stick direction (6.1; the executable's table at `0x2C0FF0`).
+/// The dial's keys 1 to 9 by stick direction (pickpocket-and-pickups.md 6.1).
 pub const KEYS: [[f32; 2]; 9] =
     [[-0.7, 0.7], [0.0, 0.8], [0.7, 0.7], [-0.8, 0.0], [0.0, 0.0], [0.8, 0.0], [-0.7, -0.7], [0.0, -0.8], [0.7, -0.7]];
 /// The current key's distance counts this much (the selection does not flicker).

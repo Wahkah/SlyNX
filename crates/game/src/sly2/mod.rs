@@ -49,18 +49,26 @@ pub const HUB_WORLD_ID: u32 = 0x41;
 
 /// A sequence's object and script commands (missions.md 4.1): 670 adds an object to the world, 671 removes one,
 /// 634 raises script event 4 on the sequence with its value.
-fn apply_world_cue(world: &mut engine::world::World, seq: engine::object::Handle, c: talk::SeqCommand) {
+fn apply_world_cue(
+    world: &mut engine::world::World,
+    seq: engine::object::Handle,
+    c: talk::SeqCommand,
+) -> Option<engine::object::Handle> {
     match c {
         talk::SeqCommand::AddObject(id) | talk::SeqCommand::RemoveObject(id) => {
             if let Some(h) = world.find_sly2_id(id, Some(seq)) {
                 world.set_in_world(h, matches!(c, talk::SeqCommand::AddObject(_)));
             }
+            None
         }
-        talk::SeqCommand::Value(v) => world.raise(seq, SEQUENCE_VALUE, alloc::vec![script::Value::Int(v)]),
+        talk::SeqCommand::Value(v) => {
+            world.raise(seq, SEQUENCE_VALUE, alloc::vec![script::Value::Int(v)]);
+            None
+        }
         // Command 635: the clip on the object given, else on the clip's own rig (its parent), at the clip's speed
         // (option 109); its events (the add and remove of camera objects) fire as it is applied and retracted.
-        talk::SeqCommand::PlayClip { clip, object, flags } => {
-            let Some(c) = world.find_sly2_id(clip, Some(seq)) else { return };
+        talk::SeqCommand::PlayClip { clip, object, flags, .. } => {
+            let c = world.find_sly2_id(clip, Some(seq))?;
             // −1: the object its first channel animates (camera.md 7.2.1: clip 150489 on rig 150483).
             let target = if object >= 0 {
                 world.find_sly2_id(object, Some(seq))
@@ -74,12 +82,95 @@ fn apply_world_cue(world: &mut engine::world::World, seq: engine::object::Handle
                 });
                 channel.and_then(|id| world.find_sly2_id(id, Some(c))).or(world.parent(c))
             };
-            let Some(target) = target else { return };
+            let target = target?;
             let speed = world.options(c).map_or(1.0, |o| o.f32_or(CLIP_SPEED, 1.0));
-            engine::game::sly2_anim::with(world, |a, w| a.apply_clip(w, c, target, 0.0, speed, flags));
+            engine::game::sly2_anim::with(world, |a, w| a.apply_clip(w, c, target, 0.0, speed, flags)).flatten()
         }
-        _ => {}
+        _ => None,
     }
+}
+
+/// Whether clip playback `p` still plays (it is removed when retracted).
+fn clip_playing(world: &engine::world::World, p: engine::object::Handle) -> bool {
+    world.sly2.as_deref().is_some_and(|l| l.anim.get_option(world, p, engine::game::sly2_anim::opt::CLIP).is_some())
+}
+
+/// A sequence run without a sound engine: its next command, where it stops, its thread and the clip it waits for
+/// (635 with no-wait 0).
+#[derive(Clone, Copy, Debug)]
+pub struct SilentRun {
+    /// The sequence.
+    pub sequence: engine::object::Handle,
+    /// Its next command.
+    pub at: usize,
+    /// Where it stops (`usize::MAX`: the end of the list).
+    pub end: usize,
+    /// The thread (625's ID), or −1 for the main line.
+    pub thread: i32,
+    /// Where it started (with the sequence, it tells runs of the same thread ID apart).
+    pub start: usize,
+    /// The clip playback it waits for.
+    pub waiting: Option<engine::object::Handle>,
+}
+
+impl SilentRun {
+    /// The main line of `sequence`.
+    pub fn main(sequence: engine::object::Handle) -> SilentRun {
+        SilentRun { sequence, at: 0, end: usize::MAX, thread: talk::MAIN, start: 0, waiting: None }
+    }
+}
+
+/// Runs a silent sequence's commands until one waits (a clip played with no-wait 0) or they run out; returns whether
+/// it ended. Lines are not played; sub-sequences start without being waited for. Threads it opens (625) go to
+/// `spawn`, threads it stops (627) to `stop`.
+fn step_silent(
+    world: &mut engine::world::World,
+    run: &mut SilentRun,
+    spawn: &mut Vec<SilentRun>,
+    stop: &mut Vec<(engine::object::Handle, i32)>,
+) -> bool {
+    if let Some(p) = run.waiting {
+        if clip_playing(world, p) {
+            return false;
+        }
+        run.waiting = None;
+    }
+    let cmds = talk::sequence_commands(world, run.sequence);
+    while run.at < run.end
+        && let Some(&c) = cmds.get(run.at)
+    {
+        run.at += 1;
+        match c {
+            talk::SeqCommand::Thread { id, end } => {
+                spawn.push(SilentRun {
+                    sequence: run.sequence,
+                    at: run.at,
+                    end,
+                    thread: id,
+                    start: run.at,
+                    waiting: None,
+                });
+                run.at = end.saturating_add(1);
+            }
+            talk::SeqCommand::StopThread(id) => stop.push((run.sequence, id)),
+            talk::SeqCommand::Task { task, state } => world.shared.task_requests.push((task, state)),
+            talk::SeqCommand::Start { sequence, .. } => world
+                .shared
+                .sequence_requests
+                .push(engine::behavior::sly2_commands::SequenceRequest::Start { sequence, starter: None }),
+            talk::SeqCommand::PlayClip { wait, .. } => {
+                let p = apply_world_cue(world, run.sequence, c);
+                if wait && p.is_some() {
+                    run.waiting = p;
+                    return false;
+                }
+            }
+            _ => {
+                apply_world_cue(world, run.sequence, c);
+            }
+        }
+    }
+    true
 }
 
 /// A clip's playback speed (option 109; camera.md 7.2.1).
@@ -183,6 +274,10 @@ pub struct Sly2Session<B: Backend, R: ReadAt> {
     switch_to: Option<engine::gang::Who>,
     /// The sequences started and not yet ended (for their events 5 and 6).
     pub running: Vec<engine::object::Handle>,
+    /// Without a sound engine: the sequences' runs.
+    silent: Vec<SilentRun>,
+    /// With a sound engine: (sequence, clip playback) a sequence waits for.
+    clip_waits: Vec<(engine::object::Handle, i32, engine::object::Handle)>,
     items: Option<ItemTable>,
     pockets: Option<engine::gang::PocketTable>,
     disc: Option<Disc<R>>,
@@ -244,6 +339,8 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             vault_events: Vec::new(),
             switch_to: None,
             running: Vec::new(),
+            silent: Vec::new(),
+            clip_waits: Vec::new(),
             current: None,
             seed,
             pending: progress::Pending::default(),
@@ -460,6 +557,8 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         self.in_safe_house = false;
         self.switch_to = None;
         self.running.clear();
+        self.silent.clear();
+        self.clip_waits.clear();
         self.front_world_loaded(row); // Sly 2 hook: the menu world shows the episode menu.
         Ok(())
     }
@@ -474,6 +573,11 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         self.front.movies.set_layer(None);
         self.game = None;
         self.current = None;
+    }
+
+    /// The sequence runs without a sound engine (for tests and the smoke tool).
+    pub fn silent_runs(&self) -> &[SilentRun] {
+        &self.silent
     }
 
     /// Enters the hub's safe house (false when the world has none; safehouse-and-shop.md 2): it becomes the current
@@ -582,32 +686,56 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         if let Err(e) = self.follow_load_request(measured) {
             self.message = Some(e);
         }
-        // Sequences that ended (their commands run out; at once without a sound engine) raise script event 6, which
-        // their modules answer (often by asking the current task for its next state; vehicles-and-minigames.md 10.3).
+        // Sequences that ended raise script event 6, which their modules answer (often by asking the current task for
+        // its next state; vehicles-and-minigames.md 10.3). Without a sound engine the commands run here in order
+        // ([`SilentRun`]): lines are skipped, a clip played with no-wait 0 is waited for.
         if let Some(g) = self.game.as_mut() {
-            let sound = self.sound.as_ref();
-            let ended: Vec<engine::object::Handle> = self
-                .running
-                .iter()
-                .copied()
-                .filter(|h| sound.is_none_or(|s| !s.sequences().iter().any(|q| q.object == *h)))
-                .collect();
-            self.running.retain(|h| !ended.contains(h));
-            for h in ended {
-                // Without a sound engine the commands are not played: their task requests and sub-sequence starts
-                // apply as it ends, in order.
-                if sound.is_none() {
-                    for c in talk::sequence_commands(&g.world, h) {
-                        apply_world_cue(&mut g.world, h, c);
-                        match c {
-                            talk::SeqCommand::Task { task, state } => g.world.shared.task_requests.push((task, state)),
-                            talk::SeqCommand::Start { sequence, .. } => g.world.shared.sequence_requests.push(
-                                engine::behavior::sly2_commands::SequenceRequest::Start { sequence, starter: None },
-                            ),
-                            _ => {}
-                        }
+            let mut ended: Vec<engine::object::Handle> = Vec::new();
+            // Runs stopped (627, a stopped sequence, a line that ended) retract the playback they wait for; a looping,
+            // back-and-forth or holding playback is retracted only this way (animation.md 2).
+            let mut retract: Vec<engine::object::Handle> = Vec::new();
+            if let Some(s) = self.sound.as_mut() {
+                for (h, t) in s.take_stopped() {
+                    retract.extend(self.clip_waits.iter().filter(|w| (w.0, w.1) == (h, t)).map(|w| w.2));
+                    self.clip_waits.retain(|w| (w.0, w.1) != (h, t));
+                }
+                // Clips the runs wait for: released once retracted.
+                self.clip_waits.retain(|&(seq, t, p)| {
+                    let alive = clip_playing(&g.world, p);
+                    if !alive {
+                        s.release(seq, t);
+                    }
+                    alive
+                });
+                ended.extend(self.running.iter().copied().filter(|h| !s.sequences().iter().any(|q| q.object == *h)));
+            } else {
+                let (mut spawn, mut stop) = (Vec::new(), Vec::new());
+                let mut finished: Vec<(engine::object::Handle, usize)> = Vec::new();
+                for run in &mut self.silent {
+                    if step_silent(&mut g.world, run, &mut spawn, &mut stop) {
+                        finished.push((run.sequence, run.start));
                     }
                 }
+                // A sequence ends when none of its runs is left (its threads may outlast its main line).
+                self.silent.retain(|r| {
+                    let gone = finished.contains(&(r.sequence, r.start)) || stop.contains(&(r.sequence, r.thread));
+                    if gone && let Some(p) = r.waiting {
+                        retract.push(p);
+                    }
+                    !gone
+                });
+                // Threads stopped in the frame they were opened never start.
+                spawn.retain(|r| !stop.contains(&(r.sequence, r.thread)));
+                self.silent.extend(spawn);
+                ended.extend(self.running.iter().copied().filter(|h| !self.silent.iter().any(|r| r.sequence == *h)));
+                ended.sort_unstable();
+                ended.dedup();
+            }
+            for p in retract {
+                engine::game::sly2_anim::with(&mut g.world, |a, w| a.remove(w, p));
+            }
+            self.running.retain(|h| !ended.contains(h));
+            for h in ended {
                 g.world.raise(h, SEQUENCE_ENDED, Vec::new());
             }
         }
@@ -625,14 +753,30 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                         if !self.running.contains(&sequence) {
                             self.running.push(sequence);
                         }
+                        if self.sound.is_none() {
+                            self.silent.retain(|r| r.sequence != sequence);
+                            self.silent.push(SilentRun::main(sequence));
+                        }
                         g.world.raise(sequence, SEQUENCE_STARTED, Vec::new());
                         self.sequences_started += 1;
                     }
                     Q::Stop(sequence) => {
                         if let Some(s) = self.sound.as_mut() {
                             s.stop_sequence(sequence);
+                            for w in self.clip_waits.iter().filter(|w| w.0 == sequence) {
+                                s.release(sequence, w.1);
+                            }
                         }
                         self.running.retain(|&h| h != sequence);
+                        // A stopped run retracts the playback it waits for (animation.md 2).
+                        let mut waited: Vec<engine::object::Handle> =
+                            self.silent.iter().filter(|r| r.sequence == sequence).filter_map(|r| r.waiting).collect();
+                        waited.extend(self.clip_waits.iter().filter(|w| w.0 == sequence).map(|w| w.2));
+                        self.silent.retain(|r| r.sequence != sequence);
+                        self.clip_waits.retain(|w| w.0 != sequence);
+                        for p in waited {
+                            engine::game::sly2_anim::with(&mut g.world, |a, w| a.remove(w, p));
+                        }
                     }
                     Q::Alarm(..) => {}
                 }
@@ -650,8 +794,13 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             // Task states the running sequences asked for (option 642), and their camera blocks (camera.md 2.1.1).
             if let Some(g) = self.game.as_mut() {
                 g.world.shared.task_requests.extend(s.take_task_requests());
-                for (h, c) in s.take_world_cues() {
-                    apply_world_cue(&mut g.world, h, c);
+                for (h, t, c) in s.take_world_cues() {
+                    let p = apply_world_cue(&mut g.world, h, c);
+                    match (c, p) {
+                        (talk::SeqCommand::PlayClip { wait: true, .. }, Some(p)) => self.clip_waits.push((h, t, p)),
+                        (talk::SeqCommand::PlayClip { wait: true, .. }, None) => s.release(h, t),
+                        _ => {}
+                    }
                 }
                 for c in s.take_camera_cues() {
                     g.world.shared.camera_move = match c {

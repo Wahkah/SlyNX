@@ -100,12 +100,14 @@ fn walk(path: &std::path::Path, name: &str, frames: usize) -> (Vec<u64>, Vec<(i1
     let (mut s, _) = session(path, false);
     let slot = s.find_world(name).unwrap();
     s.load_slot(slot).unwrap_or_else(|e| panic!("{name}: {e}"));
-    // The arrival's scripts may hold the pad for a cutscene (command 0x1F; v_apt's 2360 does for 2.5 s): wait
-    // them out.
+    // The arrival's scripts may hold the pad for a cutscene (command 0x1F; v_apt's 2360 does for 2.5 s), and a new
+    // game in v_ext plays the intro (2065, missions.md 4.1a), whose prompt waits for Cross: wait them out, pressing
+    // Cross once a second.
     s.update(&FrameInput::default(), 1.0 / 60.0);
     let mut held = 0;
-    while s.script_paused && held < 1200 {
-        s.update(&FrameInput::default(), 1.0 / 60.0);
+    while (s.script_paused || s.scripts.is_running(2065)) && held < 90 * 60 {
+        let b = if held % 60 == 59 { platform_api::Buttons::B.0 } else { 0 };
+        s.update(&FrameInput { pressed: b, buttons: b, ..Default::default() }, 1.0 / 60.0);
         held += 1;
     }
     eprintln!("{name}: the pad was held {held} frames on arrival");

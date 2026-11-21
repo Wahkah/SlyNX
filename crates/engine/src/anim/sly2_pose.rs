@@ -85,6 +85,8 @@ pub struct Sly2Poser {
     pub fired: Vec<PoseEvent>,
     /// Object slots posed this frame.
     pub posed: Vec<u32>,
+    /// Object-model hook: the loaded local transforms of objects whose transform 0 clips move (missions.md 4.1).
+    pub bases: BTreeMap<u32, Affine>,
     /// How many times each object's pose has changed (for caches of what is drawn).
     pub version: BTreeMap<u32, u32>,
     /// Driven playbacks for the next step (consumed by it).
@@ -259,9 +261,21 @@ pub fn step(world: &mut World) {
             }
         }
     }
+    // Object-model hook (missions.md 4.1): objects whose transform 0 a script clip drives are moved as a whole.
+    let mut moved: BTreeSet<u32> = BTreeSet::new();
     for &(target, clip, t) in &playing {
         let Some(c) = Sly2Poser::clip(clips, world, clip) else { continue };
         lens_of(world, target, c, t, lens);
+        for ch in c.channels.iter().filter(|ch| ch.transform == 0) {
+            let object = if world.sly2_id(target) == Some(ch.target) {
+                Some(target)
+            } else {
+                world.find_sly2_id(ch.target, Some(target))
+            };
+            if let Some(s) = object.and_then(|o| world.slot(o)) {
+                moved.insert(s);
+            }
+        }
         let mut ids: Vec<i32> = c.channels.iter().map(|ch| ch.target).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -277,6 +291,15 @@ pub fn step(world: &mut World) {
             rig.apply_clip(c, id, t);
         }
     }
+    // The loaded local transform of every moved object, kept once.
+    for &s in &moved {
+        if !p.bases.contains_key(&s)
+            && let Some(l) = world.handle(s).and_then(|h| world.local(h))
+        {
+            p.bases.insert(s, l);
+        }
+    }
+    let mut moves: Vec<(u32, Affine)> = Vec::new();
     let Some(level) = world.sly2.as_deref_mut() else { return };
     for slot in reset {
         let Some(rig) = p.rigs.get_mut(&slot) else { continue };
@@ -286,8 +309,18 @@ pub fn step(world: &mut World) {
         if b - a != rig.world.len() || b > level.pose.len() {
             continue;
         }
-        // Relative to transform 0's loaded matrix, as the loader keeps the list.
-        let base = rig.nodes.first().and_then(|n| affine_inverse(&n.bind)).unwrap_or(Affine::IDENTITY);
+        // Relative to transform 0's loaded matrix, as the loader keeps the list. A moved object takes transform 0's
+        // new matrix as its own (its loaded local transform times the change), carrying what is placed under it, and
+        // the list is kept relative to the new transform 0.
+        let bind0 = rig.nodes.first().and_then(|n| affine_inverse(&n.bind)).unwrap_or(Affine::IDENTITY);
+        let base = if moved.contains(&slot)
+            && let (Some(w0), Some(load)) = (rig.world.first(), p.bases.get(&slot))
+        {
+            moves.push((slot, load.mul(&bind0.mul(w0))));
+            affine_inverse(w0).unwrap_or(Affine::IDENTITY)
+        } else {
+            bind0
+        };
         let mut changed = false;
         for (dst, w) in level.pose[a..b].iter_mut().zip(&rig.world) {
             let m = base.mul(w);
@@ -302,6 +335,12 @@ pub fn step(world: &mut World) {
         p.posed.push(slot);
     }
     level.poser = p;
+    // The moved objects keep their last place when their clips end (missions.md 4.1: the van's carrier).
+    for (s, local) in moves {
+        if let Some(h) = world.handle(s) {
+            world.set_local(h, local);
+        }
+    }
 }
 
 #[cfg(test)]

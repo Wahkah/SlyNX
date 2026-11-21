@@ -608,10 +608,10 @@ pub const SWING_BACK: f32 = 2.0 * core::f32::consts::FRAC_PI_3;
 /// Coasting after the stick is released this long, or held ahead or back longer than the other.
 pub const SWING_RELEASE: f32 = 0.25;
 pub const SWING_HOLD: f32 = 1.4;
-/// The easings of activity (`0x002BF570`) and pump (`0x002BF580`): (fast, slow, fast time).
+/// The easings of activity and pump (characters.md 9.1.1): (fast, slow, fast time).
 pub const SWING_ACTIVITY_EASE: [f32; 3] = [1.0, 0.0, 0.1];
 pub const SWING_PUMP_EASE: [f32; 3] = [4.0, 0.0, 0.1];
-/// The swing angle mapped onto the blend's time (`0x002BF58C`), and the time's rate limit (`0x002BF590`).
+/// The swing angle mapped onto the blend's time and the time's rate limit (characters.md 9.1.1).
 pub const SWING_ANGLE_RANGE: f32 = 1.7;
 pub const SWING_TIME_RATE: f32 = 3.0;
 

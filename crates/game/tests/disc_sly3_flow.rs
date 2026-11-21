@@ -36,6 +36,22 @@ fn expected_place(s: &Session, point: i32) -> Option<[f32; 3]> {
     w.world_transform(h).map(|t| t.t)
 }
 
+/// The Venice intro (missions.md 4.1a): script 2065, started by event 24 when the restore opens `t1_intro` (2064), run
+/// to its end with Cross pressed once a second for its prompt. Returns whether it ran.
+fn play_intro(s: &mut Session) -> bool {
+    let mut started = false;
+    for f in 0..90 * 60 {
+        let running = s.scripts.is_running(2065);
+        started |= running;
+        if started && !running {
+            break;
+        }
+        let b = if f % 60 == 59 { platform_api::Buttons::B.0 } else { 0 };
+        s.update(&FrameInput { pressed: b, buttons: b, ..Default::default() }, 1.0 / 60.0);
+    }
+    started && !s.scripts.is_running(2065)
+}
+
 fn player_at(s: &Session, p: [f32; 3]) -> bool {
     let w = &s.game.as_ref().unwrap().world;
     let Some(q) = w.player.and_then(|h| w.position(h)) else { return false };
@@ -391,6 +407,12 @@ fn the_jobs_graph_of_venice() {
     assert_eq!(open, [2064]);
     assert!(j.states.iter().all(|&s| s == 0 || s == 1), "{:?}", j.states);
     assert_eq!((j.current, j.job), (None, None));
+    // The intro: 2064 opening raised event 24, which started 2065; its request (2064, 3) closes `t1_intro` and
+    // opens 2083 and 2408.
+    assert!(play_intro(&mut s), "the intro script ran to its end");
+    let j = s.jobs.as_ref().unwrap();
+    let state = |id: i32| j.task_state(id);
+    assert_eq!((state(2064), state(2083), state(2408)), (Some(3), Some(1), Some(1)));
 }
 
 #[test]
@@ -403,6 +425,7 @@ fn the_take_out_script_runs() {
         w.find_sly3_id(15152, None).map(|h| w.in_world(h))
     };
     assert_eq!(use_point(&s), Some(true));
+    assert!(play_intro(&mut s), "the intro script ran to its end");
     // In the safe house, Cross on the first state (Bentley): script 44602, which starts 2061 with Bentley.
     assert!(s.enter_safe_house());
     let press = |b: platform_api::Buttons| FrameInput { pressed: b.0, buttons: b.0, ..Default::default() };
@@ -419,12 +442,10 @@ fn the_take_out_script_runs() {
     assert_eq!(use_point(&s), Some(false), "the use point is removed while the character walks out");
     let j = s.jobs.as_ref().unwrap();
     let state = |id: i32| j.graph.task_ids.get(&id).map(|&t| j.states[t]);
-    // Its requests (2083 current, 2138, 2227, 2418 and 2083 closed) are checked (command 0x1E, missions.md 4.1a). On a
-    // new game without the intro all five tasks are locked, so each is refused: 2083 waits for 2064 `t1_intro`,
-    // which the intro advances (not run here; the Venice route stands in for it).
-    assert_eq!((state(2138), state(2227), state(2418), state(2083)), (Some(0), Some(0), Some(0), Some(0)));
-    assert_eq!(state(2064), Some(1));
-    assert_eq!(j.current, None, "no task made current");
+    // Its requests are checked (command 0x1E, missions.md 4.1a). After the intro, 2083 is available and is made
+    // current; 2138, 2227 and 2418 are locked on a new game, so closing them is refused.
+    assert_eq!((state(2138), state(2227), state(2418)), (Some(0), Some(0), Some(0)));
+    assert_eq!(j.current.map(|t| j.graph.tasks[t].id), Some(2083), "task 2083 made current");
     // ...and its finish block puts the use point back when it ends.
     for _ in 0..600 {
         if !s.scripts.is_running(2061) {
@@ -434,6 +455,9 @@ fn the_take_out_script_runs() {
     }
     assert!(!s.scripts.is_running(2061), "the script ended");
     assert_eq!(use_point(&s), Some(true), "the use point is back");
+    // Its last request closes 2083, which opens `t1_recon_intro` (2086).
+    let j = s.jobs.as_ref().unwrap();
+    assert_eq!((j.task_state(2083), j.task_state(2086)), (Some(3), Some(1)));
     eprintln!("commands not run: {:?}", s.scripts.unhandled);
 }
 

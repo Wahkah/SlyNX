@@ -1809,7 +1809,16 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   (command 0x11) sets a task's state through `World::shared.task_requests`; 670 adds an object to the world and 671
   removes one; 634 raises script event 4 on the sequence with its value (missions.md 4.1: task 1696 is finished
   this way, by sequence 1697's module); 635 plays a clip (on the object given, else the object its first channel
-  animates) at the clip's speed (option 109). The runner does not wait for the clip yet.
+  animates) at the clip's speed (option 109); with the no-wait flag 0 the sequence goes on only after the clip is
+  retracted (animation.md 2: a looping, back-and-forth or holding clip only when its run stops). Threads (625 … 626)
+  run beside the line that opens them; 627 stops a thread, and a stopped run retracts the playback it waits for; a
+  sequence ends when none of its runs is left. Without a sound engine the session runs the commands itself
+  (`SilentRun`): lines are skipped, clips are waited for.
+- **Clips that move objects** (missions.md 4.1, a marked hook in `anim::sly2_pose`): a script clip's channel on an
+  object's transform 0 moves the object itself (its loaded local transform times the change), carrying what is placed
+  under it, and the object keeps its last place when the clip ends (the van's carrier 150849 along the street).
+- **Trigger volumes that watch objects**: the objects a volume's option 432 names are tested by their positions as
+  well as the characters (150658 waits for 150849).
 - **Clip add and remove events** (camera.md 7.2.1): a clip's events of kind 7 add an object to the world and kind 8
   remove it, as they fire (apply list on applying, retract list when a non-looping, non-holding playback ends;
   `sly2_commands::clip_object_events`). This is what ends cutscene camera objects' views (row 0: clip 150489
@@ -1843,9 +1852,8 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   characters' lookup tables mark with flag `0x200` (the second cane 318, the throw marker 586, object 685, the
   target-ring placements) are taken out of the world when the world loads, each only below its own character. The
   cane swap, the marker while aiming and the ring copies on targets are the gang's and the prompts'.
-- **The route's limits**: task 1709 (`t0_van_rescue_attempt`) is finished when object 150849 (not a character)
-  enters volume 150658 (its option 432 names the only object that counts); the route cannot bring it there and
-  finishes 1709 by request.
+- **The route** now plays episode 1's intro and first hub job with no task finished by request: the stall timer
+  runs only while no sequence plays (cutscenes wait for their clips).
 - **Hack station** (vehicles-and-minigames.md 10.3): with the script host's recursion fixed and the job system's
   exit ordering (event 19 before the exit's load), `t4_hack_station1`'s handler starts sequence 2410 in row 14, its
   command 670 adds the ship, and the job hands it over; the vehicles stand-in in `shots::follow_job` is gone.
@@ -2699,7 +2707,8 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
     - **Broadcast fix:** a task event broadcast with no current job now goes to the available tasks that have no
       job, as Sly 2's missions.md 3 says. Before, it was dropped.
     - **The first Venice job, by input and scripts** (`smoke_run::run_sly3_job`, journalled):
-      1. Episode 3 starts in v_ext at 424, and the route stands in for the intro (2064 closed; see below).
+      1. Episode 3 starts in v_ext at 424, and the intro script 2065 runs (see below). The route presses Cross once
+         a second for its prompt.
       2. The safe house takes Sly out: 2061 makes `t1_intro_outside_safehouse` (2083) current, starting 2084,
          which holds the pad for 2 s.
       3. The route then steers toward the open job's waypoint, `t1_recon_intro`'s placement 121540 (waypoint
@@ -2721,7 +2730,8 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
          exit 2046, and v_interpol loads at point 138289. Then `t1_recon_key_intro` (2099) becomes current.
       9. The route heads for use point 138235 and presses Circle. 2105 becomes current and is done at once (1405),
          and `t1_recon_get_key` (2106) becomes current.
-      10. The 60 s run ends heading for trigger 138216, which names `t1_recon_get_to_cell` (2109).
+      10. 2106 is done and `t1_recon_get_to_cell` (2109) becomes current. The 60 s run ends heading for use point
+          138214, which names `t1_recon_open_cell_intro` (2111).
       - Use points (class 33, interactables.md 5): option 1170 holds up to 4 (task, state) pairs and 1164 is the
         command script. The use button (Circle) uses the nearest point within its radius
         (`behavior::sly3::interactables::use_point_used`, a marked session hook). In order, it applies the pairs
@@ -2737,10 +2747,11 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
       - The restore: a never-saved task reads 0, and 0 becomes available only when the task has no prerequisites
         at all. With `from_memcard` set, a job's task saved as 1 or 2 is recomputed: available when every
         prerequisite is done, else locked (`Jobs::restore`, Sly 3 branch).
-      - The visit order (`jobs::visit_order`): from the roots, a task is reached once all its prerequisites are
-        visited. Its depth (+0x108) is the longest path from a root. Its job-change depth (+0x10C) counts, along
-        that path, the steps from a task with a job into another job. The two are separate maxima over the task's
-        prerequisites, taken once all of them are visited. The sort is by job-change depth, the job's object ID
+      - The visit order (`jobs::visit_order`; missions.md 4.1a, "Visit order"): from the roots, a task is reached
+        once all its prerequisites are visited. Its depth is the longest path from a root. Its job-change depth
+        counts, along such a path, the steps from a task with a job into another job. The two are separate maxima
+        over the task's prerequisites, taken once all of them are visited. The edges come from the prerequisite
+        lists alone, each prerequisite once (`Graph::prerequisite_order` too). The sort is by job-change depth, the job's object ID
         (−1 none), the depth, then the task's object ID. The pass scans the available tasks in this order.
       - World start: after the restore (missions.md 4.1a steps 1 and 2), the pass makes the last available
         "current when available" task that is not current current (forced), whatever its job. The game repeats
@@ -2760,13 +2771,19 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
       - World-start step 2 (the carried job begun again, the carried task made current) runs in restoring mode
         (mode 1). Events fire, but a task opened there does not become current through 1399. The restore's own
         state changes broadcast their task events too (the before and after codes, heard by the macro packages).
-      - New game: 2061's requests (2083 current, 2138, 2227, 2418 and 2083 closed) are all refused, because 2083
-        waits for `t1_intro` (2064). The spec has the episode's macro module play the intro and advance 2064. Its
-        handler is not decoded yet, and no macro module answers the restore's broadcast, so nothing advances 2064
-        here (`the_take_out_script_runs` checks the refusals).
-        - The Venice route stands in for the intro with the checked request (2064, 3), as Sly 2's intro sequence
-          does. The take-out then makes 2083 current and closes it, which opens `t1_recon_intro` (2086).
-      - The job and task keys of step 2 (+0x1498, +0x149C) are not saved, so a slot load has nothing to restore
+      - The intro (missions.md 4.1a). A live task's state change raises script event 24 on the task
+        (`jobs::script_events`).
+        - The restore opening `t1_intro` (2064) does so at the world start, since mode 1 counts as live.
+        - The handler is in 2064's own module (v_macro module 8). It tests the task's state (script ID 525, task
+          option 1415) for 1, then calls method 247 (option 747) on command script 2065, which starts it.
+        - The Sly 3 host reads task states from a mirror the session keeps (`World::shared.sly3_task_states`). It
+          queues script starts in `sly3_script_starts` for the session's runner.
+        - 2065 plays the intro, then requests (2064, 3), which closes `t1_intro` and opens 2083 and 2408
+          (`the_jobs_graph_of_venice`).
+      - The take-out script 2061's requests are checked. After the intro, 2083 is made current. Closing 2138, 2227
+        and 2418 is refused, since they are locked on a new game. Closing 2083 then opens `t1_recon_intro` (2086)
+        (`the_take_out_script_runs`).
+      - The saved job and active-task keys of step 2 (missions.md 4.1a; saving.md 3) are not saved, so a slot load has nothing to restore
         there.
       - Task-state requests from props and triggers with state 4 or −1 now make the task current.
       - What it took:

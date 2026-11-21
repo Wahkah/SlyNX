@@ -139,7 +139,9 @@ fn sly2_job_run(path: &std::path::Path, row: usize, task: &str, class: i16) -> (
         let w = &s.game.as_ref().unwrap().world;
         w.shared.driving.filter(|&m| w.class(m) == Some(class) && w.is_active(m))
     };
-    for _ in 0..60 {
+    // Up to 20 s: a job's sequence may play its clips before the machine comes (the hack ship waits for Bentley's
+    // clip 7629 in sequence 2410, missions.md 4.1).
+    for _ in 0..20 * 60 {
         if handed(&s).is_some() {
             break;
         }

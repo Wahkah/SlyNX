@@ -69,7 +69,14 @@ pub mod task_method {
     pub const FORCE_LOCKED: u16 = 1418;
     pub const FORCE_CLOSED: u16 = 1421;
     pub const MAKE_CURRENT: u16 = 1422;
+    /// A task's state (script ID 525; missions.md 4.1a), read from the session's mirror.
+    pub const STATE: u16 = 1415;
 }
+
+/// Command-script method 747 (script ID 247; missions.md 4.1a): starts the script, with one argument (the object).
+const START_SCRIPT: u16 = 747;
+/// Command scripts.
+const COMMAND_SCRIPT_CLASS: i16 = 135;
 
 impl WorldHost<'_> {
     /// The root of the copy placement `slot` (class 8) made: the first object of that copy, below the placement.
@@ -165,6 +172,15 @@ impl WorldHost<'_> {
                 .then_some(Value::Method { object, option });
         }
         let h = self.obj(object)?;
+        // A task's state, from the session's job system (missions.md 4.1a).
+        if option == task_method::STATE && self.world.class(h) == Some(TASK_CLASS) {
+            let id = self.world.sly3_id(h)?;
+            return self.world.shared.sly3_task_states.get(&id).map(|&s| Value::Int(s as i32));
+        }
+        // A command script's start method.
+        if option == START_SCRIPT && self.world.class(h) == Some(COMMAND_SCRIPT_CLASS) {
+            return Some(Value::Method { object, option });
+        }
         // Value types 0x2000 + c hold the ID of an object of class c: scripts get the object (as Sly 2's read
         // does), found by Sly 3 ID from the object's copy.
         if option != OWNER_CODE {
@@ -208,6 +224,20 @@ impl WorldHost<'_> {
                 world_method::HELD => Some(Value::Bool(self.world.shared.sly3_holds > 0)),
                 _ => None,
             };
+        }
+        // A command script started by a script, queued for the session's runner (missions.md 4.1a).
+        if option == START_SCRIPT {
+            let h = self.obj(object)?;
+            if self.world.class(h)? != COMMAND_SCRIPT_CLASS {
+                return None;
+            }
+            let script = self.world.sly3_id(h)?;
+            let with = match args.first() {
+                Some(Value::Object(Some(o))) => self.obj(*o).and_then(|o| self.world.sly3_id(o)).unwrap_or(-1),
+                _ => -1,
+            };
+            self.world.shared.sly3_script_starts.push((script, with));
+            return Some(Value::Void);
         }
         if !matches!(option, REQUEST | FORCE | SIGNAL | MAKE_CURRENT)
             && !(FORCE_LOCKED..=FORCE_CLOSED).contains(&option)

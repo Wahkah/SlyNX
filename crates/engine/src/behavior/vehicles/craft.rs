@@ -3,12 +3,12 @@
 //!
 //! - **Raft** (7.3.1): with the stick beyond 0.5 the wanted heading is its camera-relative direction, else the
 //!   current heading. Cross pressed within 0.15 s gives a forward stroke, Square a backward one: an acceleration
-//!   of ±6,000 (+0x1C0) along the raft's +X for one step. Each step the raft turns toward the wanted heading at the
-//!   rate 2.5 (+0x1C4) with a smoothing time of 0.25 s. The water's drag is option 62 per second [I] (0.5 on the
+//!   of ±6,000 (7.3) along the raft's +X for one step. Each step the raft turns toward the wanted heading at the
+//!   rate 2.5 (7.3) with a smoothing time of 0.25 s. The water's drag is option 62 per second [I] (0.5 on the
 //!   disc), and the raft stays at its height (no water model) [I]. L3 plays sound 42.
 //! - **Jolly boat** (7.3.2): the raft's control, then its cannon on R1: idle → charging (charge = 600 + t·(a +
-//!   t·b) with the held time t, limited to 600 … 2,600; a = 2,000, b = 0 [I], the fields at +0x244 and +0x248 not
-//!   being in the spec) → fire on release or at the limit (a shot of that range, counted) → cooldown 0.5 s.
+//!   t·b) with the held time t, limited to 600 … 2,600; a = 2,000, b = 0 [I], the two growth fields having no values in
+//!   the spec, 7.3.2) → fire on release or at the limit (a shot of that range, counted) → cooldown 0.5 s.
 //! - **Swimmer** (7.4.1, 7.4.2): steering: the stick, scaled by the pan and tilt rates (−1.17, −1.04) and
 //!   normalised, sets target turn rates; the actual rates chase them with at most 12 rad/s²; pan and tilt integrate
 //!   them, the pan wrapping and the tilt limited to ±π/2. A stroke (state 2: Triangle with the tilt below 0, Cross
@@ -24,7 +24,7 @@
 //!   1960 are not decoded], 2.5× faster when the input opposes its swing; the turn rate is speed × sin(rudder) /
 //!   length (option 1979, default 4,000). The speed is the record's speed × the throttle factor of the 13-value
 //!   ladder ([`THROTTLE`]) at |a| / π × 12, a being the heading minus (the wind angle + π); the wind angle is 0 [I:
-//!   it is a world value at `0x47A2C8` not in the data].
+//!   it is a world value, 7.5.2, not in the data].
 
 use super::{Pad, Presses, button, camera_heading, orientation, pad_for, place, wrap};
 use crate::behavior::{ClassBehavior, Cx};
@@ -43,11 +43,11 @@ pub fn direction(yaw: f32, pitch: f32) -> Vec3 {
     [cos(yaw) * cos(pitch), sin(yaw) * cos(pitch), sin(pitch)]
 }
 
-/// Raft and jolly boat stroke acceleration (+0x1C0), turn rate (+0x1C4) and smoothing time.
+/// Raft and jolly boat stroke acceleration, turn rate and smoothing time (7.3, 7.3.1).
 pub const STROKE: f32 = 6000.0;
 pub const RAFT_TURN: f32 = 2.5;
 pub const RAFT_TURN_TIME: f32 = 0.25;
-/// Jolly boat cannon charge limits (+0x250, +0x254) and cooldown (+0x22C).
+/// Jolly boat cannon charge limits and cooldown (7.3.2).
 pub const CHARGE: [f32; 2] = [600.0, 2600.0];
 pub const COOLDOWN: f32 = 0.5;
 
@@ -160,7 +160,7 @@ impl ClassBehavior for Raft {
     }
 }
 
-/// The swimmer's pan and tilt rate scales (+0x1EC, +0x1F0), turn acceleration limit and tilt limit.
+/// The swimmer's pan and tilt rate scales, turn acceleration limit and tilt limit (7.4, 7.4.1).
 pub const SWIM_RATES: [f32; 2] = [-1.17, -1.04];
 pub const SWIM_ACCEL: f32 = 12.0;
 pub const SWIM_TILT: f32 = core::f32::consts::FRAC_PI_2;

@@ -841,6 +841,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             let derived = &self.derived;
             let derives = |c: i16, b: i16| derived.get(&b).is_some_and(|v| v.contains(&c));
             waypoints::update(&mut self.waypoints, &mut g.world, self.jobs.as_mut(), &derives);
+            // Sly 3 hook: command scripts other scripts started (method 747, missions.md 4.1a).
+            for (script, with) in core::mem::take(&mut g.world.shared.sly3_script_starts) {
+                self.scripts.start(&g.world, script, with);
+            }
             // Scripts, then what they asked.
             let view = commands::View { line_playing: false };
             self.scripts.update(Some(&g.world), &view, measured);

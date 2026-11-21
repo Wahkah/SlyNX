@@ -19,7 +19,7 @@
 //!   axis); the speed blends from the cruise toward the fast speed by distance × 0.0001. Evading picks one of 8
 //!   manoeuvres every 2 s (1 s with probability 1/3, [`evasion`]). The bank target is the heading error limited to
 //!   65°. Avoidance of other planes and the world's height limits are not applied (their records are not read) [I].
-//! - **To a point** (mode 2): toward option 1699's object [I: the point at +0x3A0 is not optioned]; speed unchanged.
+//! - **To a point** (mode 2): toward option 1699's object [I: the plane's own point (7.2.2) is not optioned]; speed unchanged.
 //!
 //! **Shots** (7.2.2): guns are the option-1701 entries (template, effect), used in turn; a shot leaves the nose at
 //! the forward axis × the shot speed (1703, default 15,000) plus the plane's velocity, at most the rate (1702, default
@@ -37,18 +37,18 @@ use crate::world::World;
 
 /// One degree in radians (the spec gives the angles as exact degrees).
 const DEGREE: f32 = core::f32::consts::PI / 180.0;
-/// Cruise speed (+0x19C), Cross and Square factors (+0x1A0, +0x1A4).
+/// Cruise speed, Cross and Square factors (7.2).
 pub const CRUISE: f32 = 1800.0;
 pub const BOOST: f32 = 1.6;
 pub const BRAKE: f32 = 0.7;
-/// Bank (+0x1B0, 65°), pitch step (+0x1B4, 15°), pitch limit (+0x1AC, 70°), turn angle (+0x1B8, 30°).
+/// Bank (65°), pitch step (15°), pitch limit (70°), turn angle (30°) (7.2).
 pub const BANK: f32 = 65.0 * DEGREE;
 pub const PITCH_STEP: f32 = 15.0 * DEGREE;
 pub const PITCH_LIMIT: f32 = 70.0 * DEGREE;
 pub const TURN_ANGLE: f32 = core::f32::consts::FRAC_PI_6;
 /// Stick dead zone.
 pub const DEAD_ZONE: f32 = 0.2;
-/// Shot speed (+0x280) and rate (+0x27C) defaults.
+/// Shot speed and rate defaults (7.2; option 1703 sets the speed).
 pub const SHOT_SPEED: f32 = 15_000.0;
 pub const SHOT_RATE: f32 = 10.0;
 

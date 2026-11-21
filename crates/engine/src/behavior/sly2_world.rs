@@ -420,7 +420,7 @@ pub mod thrown {
     pub const CONTACT: u16 = 395;
     /// Noise at impact (default 1).
     pub const NOISE: u16 = 396;
-    /// Defaults: radius, push away from the impact (`0x2BC9E0`), contact value, the impact noise template.
+    /// Defaults: radius, push away from the impact (interactables.md 8), contact value, the impact noise template.
     pub const DEFAULTS: (f32, f32, f32, i32) = (200.0, 500.0, -10.0, 709);
     /// Contact sphere of a thrown object in flight. *Placeholder*: the object's own collision is not used yet.
     pub const FLIGHT_RADIUS: f32 = 20.0;

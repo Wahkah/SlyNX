@@ -68,7 +68,7 @@ pub const CHARACTER_CENTRE: f32 = 60.0;
 pub const LASER_HIT: (f32, u32) = (10.0, 0x1000);
 /// Beams per laser (more are ignored).
 pub const MAX_BEAMS: usize = 64;
-/// Turn radius of a back-and-forth end (`0x2C3610`).
+/// Turn radius of a back-and-forth end (alarms-sensors.md 2.1).
 pub const TURN_RADIUS: f32 = 100.0;
 
 /// A hit on one of the gang, for the game's gang system to apply (characters.md 2).

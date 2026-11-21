@@ -350,6 +350,8 @@ pub struct TriggerVolume {
     pub hold: f32,
     /// Members inside (tracking).
     pub members: Vec<Handle>,
+    /// The objects option 432 names, resolved on the first update.
+    pub named: Option<Vec<Handle>>,
     /// The played character counts as inside next frame (a route standing in for the player walking in; the smoke
     /// tool's job route).
     pub visit: bool,
@@ -381,11 +383,32 @@ impl ClassBehavior for TriggerVolume {
             return;
         }
         let mut inside: Vec<Handle> = match &shape {
-            Some(shape) => characters(cx.world)
-                .into_iter()
-                .filter(|&(h, c)| in_volume(shape, c) && Self::counts(cx.world, cx.me, h))
-                .map(|(h, _)| h)
-                .collect(),
+            Some(shape) => {
+                // The characters, and the objects option 432 names (missions.md 4.1: 150658 waits for the van's
+                // carrier 150849), by their position.
+                let mut candidates = characters(cx.world);
+                if self.named.is_none() {
+                    let ids: Vec<i32> = cx
+                        .world
+                        .options(cx.me)
+                        .map(|o| o.all(432).filter_map(|v| v.as_i32()).collect())
+                        .unwrap_or_default();
+                    self.named =
+                        Some(ids.into_iter().filter_map(|id| cx.world.find_sly2_id(id, Some(cx.me))).collect());
+                }
+                for &h in self.named.as_deref().unwrap_or_default() {
+                    if !candidates.iter().any(|c| c.0 == h)
+                        && let Some(p) = cx.world.position(h)
+                    {
+                        candidates.push((h, p));
+                    }
+                }
+                candidates
+                    .into_iter()
+                    .filter(|&(h, c)| in_volume(shape, c) && Self::counts(cx.world, cx.me, h))
+                    .map(|(h, _)| h)
+                    .collect()
+            }
             None => Vec::new(),
         };
         if core::mem::take(&mut self.visit)

@@ -432,7 +432,8 @@ impl Jobs {
                 // Object-model hook (level-flow.md 4.1): the change raises the task's "after state change" event, which
                 // the episodes' macro modules answer by starting the opening sequence. Not for a new game, whose
                 // queued task (1583) lies past the intro's attract-mode tasks that would answer it.
-                if queued.is_none() {
+                // Sly 3 raises it whatever is queued (mode 1 counts as live, sly3/missions.md 4.1a).
+                if queued.is_none() || self.sly3_rules {
                     let slot = self.graph.tasks[t].slot;
                     self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
                     // Sly 3 hook: the restore's state setter runs in mode 1, which still raises the state change's

@@ -246,6 +246,41 @@ macro group is therefore present in every world of the episode.
   other-world tasks). Each opens through the ordinary propagation when its prerequisite is done, and not at load.
   The earlier "in-world prerequisites only" reading was wrong.
 
+**What advances `t1_intro` (2064): the Venice intro script 2065, started by the task's own module** [D] [X]:
+
+- **The handler** is in v_macro module **8** (at `0xB7D855` in `03_v_ext`), which **task 2064 itself** names (its
+  record's module index is 8). Decoded [D]:
+  `(define s24 (lambda (s1240) (if (op7 (op117 s1240 525) 1) ((op117 (op118 2065 obj0) 247) obj0))))`.
+  - Correction: an earlier count skipped modules whose `begin` holds several `define`s, which put it three too low.
+    Walking the block in order gives 144 modules: module 4 is 2058's (an `s20` handler), module 5 is 2059's
+    (defines s1587 and s0, then the safe house 15065), module 8 is 2064's, module 9 is 2065's.
+  - It handles **script event 24**. The task's state setter (`0x0018A3E8`) raises event 24 on the task after each
+    state change of a live task (vtable slot 3, which first runs the object's own module). It also raises it
+    through slot 4 (`0x0013BE38`), which forwards it to the objects linked at +0x8 [X].
+  - s1240 is the task. Its script ID 525 is stream option 1415 (+0x44, the state), so the condition is **"the new
+    state is 1 (available)"**. The action is script method 247 on command script **2065**, which starts it (stream
+    option 747, handler `0x00108918`).
+- **When it fires.** On a new game the restore makes 2064 available (state 0 → 1) in mode 1. Mode 1 still counts
+  as live (`0x001880F0` blocks only mode 3 and other-world tasks), so event 24 is raised and the intro starts at
+  the world start.
+- **What 2065 does** [D, from its 120 commands]:
+  - a pause (`0x1F` (1, 3));
+  - the intro scene: Bentley (runner 24) and Murray (runner 25) are added and walked through it, guard commands
+    `0x62`, animations `0x16` / `0x30`, camera and state-machine goals;
+  - a button prompt (`0x4E` 2048) on its own runner (15067);
+  - command `0x12` 2062 (the screen fade, scripts.md 7.3);
+  - **`0x1E` (2064, 3)**, a checked request 1 → 3 that closes `t1_intro`;
+  - command `0x12` 424, which activates object 424, the default arrival point (`v_ext_rig`);
+  - finally the cast is released and removed, and object 15152 is added back.
+- **The effect.** Closing 2064 opens its successors **2083** `t1_intro_outside_safehouse` and **2408**
+  `t1_cops_robbers_sentinel`, whose prerequisites are now done. 2064 has no prerequisites, so nothing is
+  back-filled. After that, script 2061's requests for 2083 can succeed.
+- **Expected new game in v_ext:** 2064 available → event 24 → 2065 runs the intro → 2064 closed → 2083 and 2408
+  available. **Option 1399 defaults to 0**: the task's load-time setup (`0x00187E90`) does not write +0x60, so a task without the option keeps 0 [X; I that the object starts zeroed]. 2083 does not list 1399, so it does **not** become current by the 1399 rule. The setup does set the state (+0x44), +0x4C, +0xA8 to +0xB4, +0xC0 and the pending state (+0xF8) to −1, and the mode (+0xFC) to 0.
+- A second module also names 2064: in `v_ext_rig`, module `0xAF50B0` handles event 5,
+  `(if (op117 (op118 2064 obj0) 1278) …)`, using task script ID 1278 (stream 1395, read by `0x00188A38`). It then
+  calls the game object's method 983 with (0, safe house 15065). That is the safe-house arrival, not the intro.
+
 **Back-filling prerequisites: on every request, not on the restore** [X]:
 
 - Every state change made by a request goes through `0x00189B08`. That routine first collects the affected tasks

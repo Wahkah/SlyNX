@@ -26,13 +26,13 @@ use crate::object::Handle;
 use crate::physics::spring::{SmoothParams, Smoother};
 use crate::world::{Notice, World};
 
-/// Ship turn smoothing (25, 0, 0.25) [D 0x002BE800].
+/// Ship turn smoothing (25, 0, 0.25) [D, specs/sly2/vehicles-and-minigames.md 4.2].
 pub const TURN: SmoothParams = SmoothParams { fast: 25.0, slow: 0.0, fast_time: 0.25, max_speed_change: None };
-/// Ship acceleration gain per second [D 0x002BE810].
+/// Ship acceleration gain per second [D, 4.2].
 pub const ACCEL_GAIN: f32 = 5.0;
-/// Ship speed at full deflection [D 0x002BE7E8].
+/// Ship speed at full deflection [D, 4.2].
 pub const SPEED: f32 = 1000.0;
-/// Docking distance [D 0x002BE880].
+/// Docking distance [D, 4.4].
 pub const DOCK_RANGE: f32 = 50.0;
 
 /// Option numbers per game.

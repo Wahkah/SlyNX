@@ -6,7 +6,7 @@
 //! Square the reverse force (1816, default 700; the truck has no reverse option and uses the default). On the cars
 //! a press of L3 (within 0.15 s) plays sound 42. Not driven: mode 0, steering and force 0 (computer driving along a
 //! curve needs the curve, which no option names [I]). Gravity is option 35 (truck −4,500, cars −900 or −2,000).
-//! Working assumptions [I]: the steering smoothing record at `0x003292E8` is not in the spec, so (4, 0, 0.25) rad/s;
+//! Working assumptions [I]: the steering smoothing record (7.1) has no values in the spec, so (4, 0, 0.25) rad/s;
 //! the force acts as an acceleration along the machine's forward axis against a drag of 1.5 per second; the turn
 //! follows a bicycle model, rate = speed × tan(steer) / wheelbase, the wheelbase being the distance between the
 //! front and back wheel pairs (options 1618 to 1621 / 1810 to 1813), else 300.
@@ -28,7 +28,7 @@ use crate::object::Handle;
 use crate::physics::spring::{SmoothParams, Smoother};
 use crate::world::{Notice, World};
 
-/// Steering smoothing (working assumption; the record at `0x003292E8` is not in the spec).
+/// Steering smoothing (working assumption; the record's values are not in the spec, 7.1).
 pub const STEER: SmoothParams = SmoothParams { fast: 4.0, slow: 0.0, fast_time: 0.25, max_speed_change: None };
 /// Drag per second on the drive speed [I].
 pub const DRAG: f32 = 1.5;
@@ -230,7 +230,7 @@ impl CombatCar {
         false
     }
 
-    /// The ammunition pickup to fetch: scored by distance, the chosen one by −200 + 0.8·d [D 0x002C20C0].
+    /// The ammunition pickup to fetch: scored by distance, the chosen one by −200 + 0.8·d [D, specs/sly2/vehicles-and-minigames.md 6.2].
     fn pick(&self, cx: &Cx<'_>, p: Vec3) -> Option<Handle> {
         cx.world
             .handles()

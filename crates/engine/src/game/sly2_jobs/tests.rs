@@ -354,6 +354,19 @@ fn prerequisite_order_puts_prerequisites_first() {
 }
 
 #[test]
+fn prerequisite_order_reads_the_prerequisite_lists_alone() {
+    let mut j = jobs();
+    // The chain 0 → 1 → 2 → 3, with successor lists that no longer name it back and a prerequisite listed twice.
+    for t in &mut j.graph.tasks {
+        t.succ.clear();
+    }
+    j.graph.tasks[2].prereq = vec![1, 1];
+    let order = j.graph.prerequisite_order();
+    let at = |t: usize| order.iter().position(|&x| x == t).unwrap();
+    assert!(at(0) < at(1) && at(1) < at(2) && at(2) < at(3), "{order:?}");
+}
+
+#[test]
 fn requests_step_one_state_at_a_time() {
     let mut j = jobs();
     // Locked with prerequisites not done: refused (and announced).

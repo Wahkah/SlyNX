@@ -38,6 +38,10 @@ pub struct Sequence {
     pub at: usize,
     /// The current command is a sub-sequence start that already started it.
     pub started_sub: bool,
+    /// Where this run stops: the end of the list for the main line, a thread's closing 626.
+    pub end: usize,
+    /// The thread this run is (625's ID), or −1 for the main line.
+    pub thread: i32,
 }
 
 /// A sequence command the session runs.
@@ -60,15 +64,29 @@ pub enum SeqCommand {
     /// Option 634: raise script event 4 on the sequence's own module with this value (missions.md 4.1).
     Value(i32),
     /// Option 635: play a clip (clip, object or −1 for the clip's own rig, no-wait flag, apply flags; camera.md
-    /// 7.2.1). The runner does not wait for it yet.
+    /// 7.2.1). With the no-wait flag 0 the sequence goes on only after the clip (missions.md 4.1).
     PlayClip {
         /// The clip's object ID.
         clip: i32,
         /// The target's object ID, or −1.
         object: i32,
+        /// Wait for the clip (the no-wait flag is 0).
+        wait: bool,
         /// Apply flags (option 106's: 8 loop, 16 back and forth, 32 hold).
         flags: i32,
     },
+    /// Option 627: stop the named thread (a sequence run), retracting the playback it waits for.
+    StopThread(i32),
+    /// Option 625: a thread (its ID) runs the commands up to the matching 626 beside the line that reaches it
+    /// (animation.md 2); `end` is the index of that 626.
+    Thread {
+        /// The thread's ID.
+        id: i32,
+        /// The index of its closing 626.
+        end: usize,
+    },
+    /// Option 626: the end of a thread's commands.
+    ThreadEnd,
     /// Option 682 (command 0x38): open a camera block, a timed move from `from` to `to` (the matching 683's values)
     /// over `duration` seconds (0: the block's contents) on curve `curve` (camera.md 2.1.1).
     CameraOpen {
@@ -116,6 +134,14 @@ pub const REMOVE_OBJECT: i16 = 671;
 pub const SCRIPT_VALUE: i16 = 634;
 /// Option 635: play a clip.
 pub const PLAY_CLIP: i16 = 635;
+/// Option 627: stop a thread.
+pub const STOP_THREAD: i16 = 627;
+/// Option 625: open a thread.
+pub const THREAD: i16 = 625;
+/// Option 626: close a thread.
+pub const THREAD_END: i16 = 626;
+/// The main line's thread ID.
+pub const MAIN: i32 = -1;
 /// Camera block options (camera.md 2.1.1): open (0x38), end (0x39), end the runner's view (0x3A).
 pub const CAMERA_OPEN: i16 = 682;
 /// See [`CAMERA_OPEN`].
@@ -194,8 +220,20 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
                 return Some(SeqCommand::PlayClip {
                     clip: int_of(a.first()?.1),
                     object: a.get(1).map_or(-1, |x| int_of(x.1)),
+                    // Until the playback is retracted (animation.md 2): a looping, back-and-forth or holding clip
+                    // is retracted only when the run is stopped (627) or some other retract.
+                    wait: a.get(2).is_none_or(|x| int_of(x.1) == 0),
                     flags: a.get(3).map_or(0, |x| int_of(x.1)),
                 });
+            }
+            if o.id == THREAD {
+                return Some(SeqCommand::Thread { id: int_of(typed_args(v)?.first()?.1), end: usize::MAX });
+            }
+            if o.id == THREAD_END {
+                return Some(SeqCommand::ThreadEnd);
+            }
+            if o.id == STOP_THREAD {
+                return Some(SeqCommand::StopThread(int_of(typed_args(v)?.first()?.1)));
             }
             if o.id == ADD_OBJECT || o.id == REMOVE_OBJECT || o.id == SCRIPT_VALUE {
                 let n = int_of(typed_args(v)?.first()?.1);
@@ -236,7 +274,32 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
         })
         .collect::<Vec<_>>();
     pair_camera_blocks(&mut out);
+    pair_threads(&mut out);
     out
+}
+
+/// Gives each thread's 625 the index of its matching 626 (threads nest; an unclosed thread runs to the end).
+fn pair_threads(cmds: &mut [SeqCommand]) {
+    let mut open: Vec<usize> = Vec::new();
+    let len = cmds.len();
+    for i in 0..len {
+        match cmds[i] {
+            SeqCommand::Thread { .. } => open.push(i),
+            SeqCommand::ThreadEnd => {
+                if let Some(o) = open.pop()
+                    && let SeqCommand::Thread { end, .. } = &mut cmds[o]
+                {
+                    *end = i;
+                }
+            }
+            _ => {}
+        }
+    }
+    for o in open {
+        if let SeqCommand::Thread { end, .. } = &mut cmds[o] {
+            *end = len;
+        }
+    }
 }
 
 /// Gives each camera block's open the state of its matching end (the next end at the same nesting depth).
@@ -289,8 +352,17 @@ pub struct Sly2Sound {
     sub_starts: Vec<Handle>,
     /// Task states asked for (option 642).
     task_requests: Vec<(i32, i32)>,
-    /// Object and script commands (670, 671, 634) with their sequence, for the session.
-    world_cues: Vec<(Handle, SeqCommand)>,
+    /// Object and script commands (670, 671, 634, 635) with their run, for the session.
+    world_cues: Vec<(Handle, i32, SeqCommand)>,
+    /// Runs (sequence, thread) waiting for a clip the session plays (635 with no-wait 0); [`Sly2Sound::release`]
+    /// lets them go on.
+    held: Vec<(Handle, i32)>,
+    /// Runs stopped this frame (627, or their line ended), whose waited playbacks the session retracts.
+    stopped: Vec<(Handle, i32)>,
+    /// Threads the lines asked to stop this frame (627).
+    stop_threads: Vec<(Handle, i32)>,
+    /// Threads the lines opened this frame (625), started after this frame's runs.
+    spawned: Vec<Sequence>,
     /// Camera blocks run (options 682 to 684).
     camera_cues: Vec<CameraCue>,
     /// The world's music streams queued by scripts (action 146).
@@ -319,6 +391,10 @@ impl Sly2Sound {
             sub_starts: Vec::new(),
             task_requests: Vec::new(),
             world_cues: Vec::new(),
+            held: Vec::new(),
+            stopped: Vec::new(),
+            stop_threads: Vec::new(),
+            spawned: Vec::new(),
             camera_cues: Vec::new(),
             music: MusicQueue::new(),
             live: Vec::new(),
@@ -346,7 +422,8 @@ impl Sly2Sound {
         let any = !commands.is_empty();
         self.sequences.retain(|s| s.object != h);
         if any {
-            self.sequences.push(Sequence { object: h, commands, at: 0, started_sub: false });
+            let end = commands.len();
+            self.sequences.push(Sequence { object: h, commands, at: 0, started_sub: false, end, thread: MAIN });
         }
         any
     }
@@ -408,8 +485,19 @@ impl Sly2Sound {
         total
     }
 
+    /// Lets run (`h`, `thread`) go on after the clip it waits for (635) was retracted.
+    pub fn release(&mut self, h: Handle, thread: i32) {
+        self.held.retain(|&x| x != (h, thread));
+    }
+
+    /// The runs stopped since the last call (627, a sequence stopped or its line ended): their waited playbacks are
+    /// retracted by the session (animation.md 2).
+    pub fn take_stopped(&mut self) -> Vec<(Handle, i32)> {
+        core::mem::take(&mut self.stopped)
+    }
+
     /// Object and script commands the running sequences ran this frame (options 670, 671, 634), with their sequence.
-    pub fn take_world_cues(&mut self) -> Vec<(Handle, SeqCommand)> {
+    pub fn take_world_cues(&mut self) -> Vec<(Handle, i32, SeqCommand)> {
         core::mem::take(&mut self.world_cues)
     }
 
@@ -420,6 +508,9 @@ impl Sly2Sound {
 
     /// Stops sequence `h`.
     pub fn stop_sequence(&mut self, h: Handle) {
+        for s in self.sequences.iter().filter(|s| s.object == h) {
+            self.stopped.push((h, s.thread));
+        }
         self.sequences.retain(|s| s.object != h);
     }
 
@@ -444,15 +535,27 @@ impl Sly2Sound {
         for seq in &mut running {
             self.run(seq, confirm);
         }
-        running.retain(|s| s.at < s.commands.len());
-        // Sequences started while these ran (none here) come after them.
+        // Threads the lines stopped (627), and every thread of a sequence whose main line ended.
+        let stops = core::mem::take(&mut self.stop_threads);
+        // A sequence ends when none of its runs is left: its threads may outlast its main line.
+        for s in &running {
+            if stops.contains(&(s.object, s.thread)) || s.at >= s.end {
+                self.stopped.push((s.object, s.thread));
+            }
+        }
+        running.retain(|s| s.at < s.end && !stops.contains(&(s.object, s.thread)));
+        self.spawned.retain(|s| !stops.contains(&(s.object, s.thread)));
+        // Threads opened this frame, then sequences started while these ran, come after them.
+        running.append(&mut self.spawned);
         running.append(&mut self.sequences);
         self.sequences = running;
         self.engine.update(dt);
     }
 
     fn run(&mut self, seq: &mut Sequence, confirm: bool) {
-        while let Some(&cmd) = seq.commands.get(seq.at) {
+        while seq.at < seq.end
+            && let Some(&cmd) = seq.commands.get(seq.at)
+        {
             let cmd = match cmd {
                 SeqCommand::Start { sequence, no_wait } => {
                     // A sub-sequence: started by the session (it has the world), waited for unless `no_wait`.
@@ -474,12 +577,50 @@ impl Sly2Sound {
                     seq.at += 1;
                     continue;
                 }
+                SeqCommand::Thread { id, end } => {
+                    // The thread runs beside this line; the line goes on after its 626.
+                    self.spawned.push(Sequence {
+                        object: seq.object,
+                        commands: seq.commands.clone(),
+                        at: seq.at + 1,
+                        started_sub: false,
+                        end: end.min(seq.commands.len()),
+                        thread: id,
+                    });
+                    seq.at = end.saturating_add(1);
+                    continue;
+                }
+                SeqCommand::ThreadEnd => {
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::StopThread(id) => {
+                    self.stop_threads.push((seq.object, id));
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::PlayClip { wait: true, .. } => {
+                    // Played by the session, which holds the run until the clip is retracted.
+                    let run = (seq.object, seq.thread);
+                    if !seq.started_sub {
+                        self.world_cues.push((seq.object, seq.thread, cmd));
+                        self.held.push(run);
+                        seq.started_sub = true;
+                        break;
+                    }
+                    if self.held.contains(&run) {
+                        break;
+                    }
+                    seq.started_sub = false;
+                    seq.at += 1;
+                    continue;
+                }
                 SeqCommand::AddObject(_)
                 | SeqCommand::RemoveObject(_)
                 | SeqCommand::Value(_)
                 | SeqCommand::PlayClip { .. } => {
                     // Done by the session (it has the world), in order with the task requests.
-                    self.world_cues.push((seq.object, cmd));
+                    self.world_cues.push((seq.object, seq.thread, cmd));
                     seq.at += 1;
                     continue;
                 }

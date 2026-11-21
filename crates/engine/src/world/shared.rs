@@ -215,6 +215,12 @@ pub struct Shared {
     /// Sly 3 hook (missions.md 4.2): how many holds player 0's control has (script command 0x1F, menus), set by the
     /// session each frame; the world object's method 1000 answers whether it is above 0.
     pub sly3_holds: u32,
+    /// Sly 3 hook (job system): each task's state by object ID, mirrored by the session for scripts (task option
+    /// 1415, missions.md 4.1a).
+    pub sly3_task_states: BTreeMap<i32, i8>,
+    /// Sly 3 hook: command scripts started by scripts (method 747 on class 135): (script, object ID or −1), for the
+    /// session's runner.
+    pub sly3_script_starts: Vec<(i32, i32)>,
     /// Sly 2 sequence starts, stops and alarms for the game's sequence player.
     pub sequence_requests: Vec<crate::behavior::sly2_commands::SequenceRequest>,
     /// Sly 2 meshes hidden by scripts (options 44 and 45): (object slot, mesh object ID).
@@ -317,6 +323,8 @@ impl Default for Shared {
             task_requests: Vec::new(),
             task_calls: Vec::new(),
             sly3_holds: 0,
+            sly3_task_states: BTreeMap::new(),
+            sly3_script_starts: Vec::new(),
             sequence_requests: Vec::new(),
             hidden_meshes: Vec::new(),
             music_requests: Vec::new(),

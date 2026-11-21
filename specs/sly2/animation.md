@@ -51,8 +51,17 @@ sources:
       to 0x00130B18) and option-table entry 109 at 0x002AC880; level row 0 clip 150489's body and a byte search of
       row 0 for type-7 / type-8 events naming its camera objects (2026-11-20)
     used_for: the retract-at-end test and the camera-object clip events (section 2) [D]
+  - kind: disc
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), machine code of 0x00107018, 0x001E04E0, 0x001E02E0, 0x001E1C40,
+      0x001E3890 (jump table 0x002A7D90), 0x00131968, 0x001E5628 and 0x001E5370; level row 0 sequence 1674's
+      commands (2026-11-21)
+    used_for: how command 635 waits for a looping clip (section 2) [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9 (sequence record start, record-done test, sequence run loop)
+    used_for: what the record fields mean (section 2) [R]
 reviewed_by: pending
-date: 2026-11-19
+date: 2026-11-21
 ---
 
 # Sly 2 animation
@@ -144,6 +153,39 @@ Added 2026-11-20:
 - Camera objects are usually put in and taken out of the world this way. In level row 0 each of the eight camera
   objects is named by a type-7 and a type-8 event in a clip. For clip 150489 the type-7 event is in the apply list
   and the type-8 event in the retract list ([camera.md](camera.md) 7.2.1) [D].
+
+**Waiting on a looping clip (added 2026-11-21).** A sequence command 635 with the no-wait flag at 0 waits until the
+clip's playback has been retracted. A looping playback is never retracted at its end, so the wait **never ends on
+its own**: not at once, and not after the first cycle [D unless marked].
+
+- **The record.** Command 635 (`0x00107018`) appends a kind-10 record (`0x001E04E0`): clip, object and apply flags,
+  with the no-wait flag in the record's second field [D for the layout, R for the field's meaning].
+- **When the run moves past it.** The run loop (`0x001E1C40`) goes past a record only when its no-wait flag is set
+  or its done test (`0x001E3890`) is true. For kind 10 (jump table `0x002A7D90`, entry 7, code at `0x001E3960`) the
+  test is only "the waited playback is gone". Gone (`0x00131968`) means it is no longer in the active-playback list.
+  There is no timer and no cycle count.
+- **Why a loop never finishes it.** A playback with any of the bits `0x38` (loop, ping-pong, hold) set in its apply
+  flags is not retracted at its end (`0x00130A90`), so it stays in the list.
+- **What does end the wait.** Stopping the run that waits (`0x001E5628`), which retracts the waited playback
+  (`0x001E5370` calls `0x00130B18`). A run stops when:
+  - command 627 stops its thread (record kind 2, `0x001E02E0`);
+  - it passes its last record;
+  - the sequence or the level ends.
+
+  The playback can also be retracted some other way, such as its own type-6 event or a script call [R].
+- **Row 0's sequence 1674** [D]. Each looping clip runs in its own thread (commands 625 … 626), and the main line
+  stops that thread later with 627, which retracts the loop:
+
+| Thread | Clip | Played on | Apply flags | Stopped by the main line's |
+|---|---|---|---|---|
+| 152629 | 150395 | 150371 | 8 (loop) | 627 152629, after clip 150401 (flags 0, 4 s, waited) |
+| 152630 | 7631 | 8 (Bentley) | 8 | 627 152630, at the same point |
+| 152631 | 7627 | 8 | 8 | 627 152631, later |
+
+  The main line's own waited clips (150401, 150336) have flags 0 and end normally.
+- **For an engine.** Keep a 635 wait until the playback is retracted, and retract a looping playback when its run
+  stops. Not waiting would let the thread run to its end at once, which stops it and retracts the loop too early
+  [I].
 
 ## 3. Curves
 
