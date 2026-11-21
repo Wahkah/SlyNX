@@ -10,7 +10,7 @@ use smoke_run::{Config, run_sly3_job};
 #[test]
 fn the_first_venice_job_as_far_as_it_goes() {
     let Some(disc) = require_disc(Game::Sly3, "the_first_venice_job_as_far_as_it_goes") else { return };
-    let cfg = Config { disc, seconds: 20.0, worlds: Vec::new(), vehicles: Vec::new() };
+    let cfg = Config { disc, seconds: 60.0, worlds: Vec::new(), vehicles: Vec::new() };
     let a = run_sly3_job(&cfg);
     for line in &a.journal {
         eprintln!("{line}");
@@ -18,6 +18,8 @@ fn the_first_venice_job_as_far_as_it_goes() {
     eprintln!("stall: {}", a.stall);
     assert!(a.stage.failure.is_none(), "{:?}", a.stage.failure);
     assert_eq!(a.stage.world, Some(3), "Venice starts in v_ext");
+    // missions.md 4.2: walking into the recon waypoint begins m1_recon at t1_recon_intro (2086).
+    assert!(a.current.iter().any(|t| t.contains("(2086)")), "the job began: {:?}", a.current);
     // Deterministic: the same journal and hashes twice.
     let b = run_sly3_job(&cfg);
     assert_eq!(a.journal, b.journal);

@@ -126,7 +126,7 @@ impl Sly2Poser {
 
     /// The length of clip object `clip` in seconds (`None`: not a readable clip), read once.
     pub fn clip_length(&mut self, world: &World, clip: Handle) -> Option<f32> {
-        Sly2Poser::clip(&mut self.clips, world, clip).map(|c| c.duration)
+        Sly2Poser::clip(&mut self.clips, world, clip).map(|c| sane_length(c.duration))
     }
 
     /// The field of view a clip last gave camera object `slot` (camera.md 2.1), if any.
@@ -154,6 +154,11 @@ fn crossed(clip: &Clip, from: f32, to: f32, out: &mut Vec<(Fired, i8)>) {
             out.push((Fired::Timed(i as u16), e.kind));
         }
     }
+}
+
+/// A clip length as playback uses it: a negative or non-finite duration (bad data) is 0.
+pub fn sane_length(l: f32) -> f32 {
+    if l.is_finite() && l > 0.0 { l } else { 0.0 }
 }
 
 /// A clip already read.

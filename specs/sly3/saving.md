@@ -101,6 +101,18 @@ state (`0x00475480`):
 
 It also caches per-world and per-episode handles (`episode/<name>`, `…/dt`, `…/found_treasure`, `battle/cSunk`, …).
 
+**The current job and task keys are not saved** [X]. The game state's +0x1498 (the current job's OID) and +0x149C
+(the current task's OID), at `0x0036DB98` / `0x0036DB9C`, have **no save-tree path**. The tree's only object-ID
+entries are `oidCheckpointForce` and the nine `episode/<name>/config`.
+
+- Setting the current job (`0x0018AA48`) and the current task (`0x0018AAB8`) write the OIDs there, or −1 for none.
+- The game's initialisation (`0x00184968`) clears the 5,288-byte block and sets +0x1498, +0x149C, +0x14A0 and
+  +0x14A4 to −1.
+- `0x0025BDD0`, in the world-start path, keeps the two values across its own job and task reset and writes them
+  back afterwards.
+- So the keys carry the current job and task **across world loads within a session**. After loading a memory card
+  they start at −1, and the world start's 1399 pass ([missions.md](missions.md) 4.1a) chooses the current task.
+
 **`oidCheckpointForce` / `widCheckpointForce`** [X] hold a **task's object ID and its world**, not an arrival point:
 
 - Three routines write the pair: `0x00164228`, `0x00186338` and `0x00187270`. They write a task's ID (its field

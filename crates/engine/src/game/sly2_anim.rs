@@ -459,6 +459,8 @@ fn length_in(cache: &mut BTreeMap<u32, f32>, world: &World, clip: Handle) -> Opt
     }
     let table = &world.sly2.as_deref()?.table;
     let l = formats_sly2::anim::Clip::of_record(&world.level.bytes, world.sly2_record(clip)?, table).ok()?.duration;
+    // Review hook: a negative or non-finite duration is read as 0, so the clamps on playback times cannot panic.
+    let l = crate::anim::sly2_pose::sane_length(l);
     cache.insert(slot, l);
     Some(l)
 }

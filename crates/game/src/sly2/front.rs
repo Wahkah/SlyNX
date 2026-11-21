@@ -347,6 +347,14 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         };
         if let Err(e) = r {
             self.message = Some(e);
+            // A load that failed leaves no blank screen: the page the action came from opens again.
+            if self.front.menu.is_none() && !self.front.movies.playing() {
+                match action {
+                    FrontAction::StartEpisode(_) => self.open_episode_menu(),
+                    FrontAction::None | FrontAction::PlayMovie(_) => {}
+                    _ => self.open_title(),
+                }
+            }
         }
         // The world behind the menu runs without the player's input.
         Some(if self.front.menu.is_some() { FrameInput::default() } else { *input })

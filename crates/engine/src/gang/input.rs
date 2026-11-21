@@ -121,6 +121,8 @@ pub enum TargetKind {
     Interactable,
     /// One of the gang.
     Character(Who),
+    /// A hook Sly swings on (Sly 2 class 40; characters.md 3, state 3).
+    Hook,
 }
 
 /// A nearby thing (the object model lists them each frame).

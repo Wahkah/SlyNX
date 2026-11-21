@@ -306,3 +306,26 @@ fn every_world_runs_and_is_deterministic() {
     let (errors, calls) = totals.into_inner().unwrap();
     eprintln!("all worlds: {errors} script errors; {calls} calls of {} actions with no behaviour: {a:?}", a.len());
 }
+
+#[test]
+fn level_conditions_use_the_level_table_row() {
+    let Some(d) = disc("level_conditions_use_the_level_table_row") else { return };
+    // Row 14 (the prison hub, world 0x82): `p_prison_macro`'s hack sequences 2410 and 2411 (class 114) and 2408 list
+    // row 14 in their level conditions, so they load there (missions.md 4.1, vehicles-and-minigames.md 10.3).
+    let i = d.worlds.iter().position(|w| w.0 == 14).expect("row 14");
+    assert_eq!(d.worlds[i].1, 0x82);
+    let w = load(d, i, None);
+    for id in [2408, 2410, 2411] {
+        let h = w.find_sly2_id(id, None);
+        eprintln!(
+            "object {id}: {h:?}, class {:?}, in world {:?}, module {:?}",
+            h.and_then(|h| w.class(h)),
+            h.map(|h| w.in_world(h)),
+            h.map(|h| w.module(h))
+        );
+        assert_eq!(h.and_then(|h| w.class(h)), Some(114), "sequence {id} loads in row 14");
+    }
+    assert!(w.find_sly2_id(2409, None).is_some(), "screen 2409 (rows 14 and 15)");
+    let excluded = w.sly2.as_deref().map_or(0, |l| l.stats.excluded_by_row);
+    eprintln!("row 14: {excluded} records left out by their conditions");
+}

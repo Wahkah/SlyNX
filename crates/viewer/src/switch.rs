@@ -60,6 +60,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         Err(e) => panic!("renderer: {e}"),
     };
     session.renderer.set_clock(now);
+    // The performance overlay rides along from the first loaded world on.
+    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let first = settings.world.as_deref().unwrap_or(FIRST_WORLD);
     let names = session.world_names();
     if !names.is_empty() {
@@ -68,7 +70,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     }
 
     let mut perf = render::perf::PerfMeter::new();
-    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let mut last = now();
     let mut log_at = last + LOG_EVERY_NS;
     let mut paused = false;

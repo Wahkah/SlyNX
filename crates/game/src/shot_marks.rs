@@ -16,6 +16,8 @@ pub const LENGTH: [f32; 2] = [40.0, 400.0];
 pub const WIDTH: f32 = 10.0;
 /// The streak's colour.
 pub const COLOR: [u8; 4] = [255, 220, 120, 255];
+/// Most streaks drawn (and instances kept) at once; shots beyond it are not drawn.
+pub const MAX_STREAKS: usize = 256;
 
 /// The streaks' mesh, material and instance pool.
 pub struct ShotMarks {
@@ -108,6 +110,7 @@ impl ShotMarks {
         r: &mut Renderer<B>,
         shots: &[([f32; 3], [f32; 3])],
     ) -> Result<(), RenderError> {
+        let shots = &shots[..shots.len().min(MAX_STREAKS)];
         while self.pool.len() < shots.len() {
             let id = r.add_instance(self.mesh, self.material, Mat4::IDENTITY)?;
             self.pool.push(id);
@@ -157,5 +160,8 @@ mod tests {
         assert_eq!((marks.shown, marks.pool.len(), r.instance_count()), (3, 3, 3));
         marks.draw_shots(&mut r, &[shot]).unwrap();
         assert_eq!((marks.shown, marks.pool.len()), (1, 3), "the pool keeps its instances, hidden");
+        let many = alloc::vec![shot; MAX_STREAKS + 50];
+        marks.draw_shots(&mut r, &many).unwrap();
+        assert_eq!((marks.shown, marks.pool.len()), (MAX_STREAKS, MAX_STREAKS), "the pool is capped");
     }
 }

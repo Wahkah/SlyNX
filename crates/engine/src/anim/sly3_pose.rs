@@ -9,8 +9,7 @@
 //!     832 / 640 = 1.3);
 //!   - jump and fall: the clip of the jump's sub-kind (`sly2_gang::sub_kind`, chosen at take-off), a missing clip
 //!     falling back to sub-kind 0;
-//!   - the combat dodge (Sly 312 left, 313 right); the hook swing's still pose (213 at 0.3333 s; the swing's
-//!     sub-state and angle are not modelled by the gang); the paraglide (opening 1727, then the glide blend of 1728
+//!   - the combat dodge (Sly 312 left, 313 right); the hook swing's blend (213, 214, 215, Sly 2's `SwingBlend`); the paraglide (opening 1727, then the glide blend of 1728
 //!     neutral, 1729 left, 1730 right, 1732 forward, 1731 back, weighted by the stick, [`glide_weights`]);
 //!   - attacks: Sly's combo runner plays its definition's clip at the runner's time; Murray's punches play the five
 //!     punch clips of his lookup table's records 5 to 9 (Square first 457, second 458, Triangle first 468, second
@@ -40,6 +39,7 @@ use super::sly2_gang::{
     IdleRun, Motion, SWING_STILL_TIME, Track, facing_angle, gait_rate, sub_kind, sub_kind_fallback,
 };
 use super::sly2_machine::{MachineDef, Transition};
+use super::sly2_pose::sane_length;
 use super::xform::XformRig;
 use crate::gang::consts::Gait;
 use crate::gang::{Character, GangEvent, Who, bentley, murray, sly};
@@ -339,7 +339,10 @@ pub fn sly3_motion(c: &Character, track: &Track, idle: Option<i32>) -> Motion {
             sly::SNEAK | sly::SNEAK_RUN if moving => stick(u),
             sly::AIR | sly::AIR_SQUARE | sly::AIR_TRIANGLE => air(),
             sly::DODGE => Motion::Once(clip::DODGE[usize::from(c.dodge_side < 0.0)]),
-            sly::HOOK => Motion::At(clip::SWING[0], SWING_STILL_TIME),
+            sly::HOOK => match track.swing {
+                Some(b) => Motion::BlendAt(clip::SWING, b.weights(), b.time),
+                None => Motion::At(clip::SWING[0], SWING_STILL_TIME),
+            },
             sly::COMBO if c.combo_runner.clip > 0 => Motion::At(c.combo_runner.clip, c.combo_runner.time),
             _ if c.grounded && moving => stick(u),
             _ => still,
@@ -420,6 +423,7 @@ impl CrewClips {
             let k = c.who.index();
             let idle = poser.machine_clip(w, group, clip::IDLE[k]);
             let track = &mut self.tracks[k];
+            track.observe(c, dt);
             let mut m = sly3_motion(c, track, idle);
             let still = idle.map_or(Motion::At(clip::STICK[k][0], 0.0), Motion::Loop);
             // Standing: the idle machine's chain of clips.
@@ -428,14 +432,14 @@ impl CrewClips {
                 Some(def) => {
                     let run = self.idle[k].get_or_insert_with(|| IdleRun::new(def.first_state().unwrap_or(0)));
                     let rng = &mut self.rng;
-                    let mut len = |id: i32| poser.clip(w, group, id).map(ClipData::duration);
+                    let mut len = |id: i32| poser.clip(w, group, id).map(|c| sane_length(c.duration()));
                     if let Some((clip, t)) = run.advance(&def, dt, || crate::anim::sly2_gang::random(rng), &mut len) {
                         m = Motion::At(clip, t);
                     }
                 }
                 None => self.idle[k] = None,
             }
-            let mut len = |id: i32| poser.clip(w, group, id).map(ClipData::duration);
+            let mut len = |id: i32| poser.clip(w, group, id).map(|c| sane_length(c.duration()));
             track.advance(m, c.state, dt, &mut len, &mut self.members);
             if self.members.is_empty()
                 && let Some(f) = sub_kind_fallback(m, &[clip::FALL[k], clip::JUMP[k]])

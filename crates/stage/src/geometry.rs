@@ -327,6 +327,11 @@ pub fn check(g: GeometryRef<'_>) -> Result<(), RenderError> {
         if !piece_ok(d.mesh, d.material) {
             return bad("draw mesh or material out of range");
         }
+        // Its weights: one per vertex of its mesh, inside the level's weights.
+        let n = g.meshes[d.mesh as usize].vertex_count as usize;
+        if d.weights.is_some_and(|w| (w as usize).checked_add(n).is_none_or(|e| e > g.weights.len())) {
+            return bad("draw weights outside the level's weights");
+        }
     }
     for s in g.static_groups {
         if (s.material as usize) >= nmat || s.pieces.iter().any(|p| !piece_ok(p.mesh, p.material)) {
@@ -562,6 +567,15 @@ mod tests {
         g.draws.push(DrawItem { mesh: 9, ..draw });
         assert!(check(g.as_ref()).is_err());
         g.draws.pop();
+        // Weights past the level's: refused (three vertices, two weights).
+        g.weights = alloc::vec![VertexWeights::default(); 2];
+        g.draws[0].weights = Some(0);
+        assert!(check(g.as_ref()).is_err());
+        g.weights.push(VertexWeights::default());
+        assert!(check(g.as_ref()).is_ok());
+        g.draws[0].weights = Some(u32::MAX);
+        assert!(check(g.as_ref()).is_err());
+        g.draws[0].weights = None;
         g.meshes[0].vertex_count = 4;
         assert!(check(g.as_ref()).is_err());
         // The upload itself refuses it (no panic).

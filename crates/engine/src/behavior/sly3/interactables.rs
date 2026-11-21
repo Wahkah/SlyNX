@@ -5,9 +5,9 @@
 //!   the classes, 510 the objects (Sly 3 IDs), 513 is the mode: 0, the listed objects collide and everything else
 //!   passes; 1, the listed objects pass and everything else collides (Sly 2's rule, interactables.md 6) [R]. Each
 //!   object touching a barrier is recorded (up to 16).
-//! - **Use points** (class 33, Sly 2 class 35): the use radius (1163), the object used (1164), the animations
-//!   (1170, (animation, count) pairs) and 1168, 1175, 1178 (meanings open). The behaviour tracks which playable
-//!   character is within the radius.
+//! - **Use points** (class 33, Sly 2 class 35): the use radius (1163), the command script started on use (1164),
+//!   up to 4 (task, state) pairs (1170, a load-time method) and 1168, 1175, 1178 (meanings open). The behaviour
+//!   tracks which playable character is within the radius; [`use_point_used`] is what using the point does.
 //! - **Treasure maps** (class 153) and the **compass** (class 125): data only ([`TreasureMap`], [`Compass`]).
 //!
 //! List options (512, 510, 1170, 1905) are typed lists, which the Sly 3 loader keeps as the level's actions rather
@@ -42,12 +42,12 @@ pub mod opt {
     pub const BARRIER_MODE: u16 = 513;
     /// Use point: the use radius (Sly 2 1069).
     pub const USE_RADIUS: u16 = 1163;
-    /// Use point: the object used (Sly 2 1070).
-    pub const USE_OBJECT: u16 = 1164;
+    /// Use point: the command script started when the point is used (Sly 2 1070).
+    pub const USE_SCRIPT: u16 = 1164;
     /// Use point: 3,300 to 3,500 or a short (Sly 2 1074; meaning open).
     pub const USE_1168: u16 = 1168;
-    /// Use point: animations, (animation, count) pairs (Sly 2 1076).
-    pub const USE_ANIMATIONS: u16 = 1170;
+    /// Use point: up to 4 (task, state) pairs applied when the point is used, −1 meaning "make current" (Sly 2 1076).
+    pub const USE_TASKS: u16 = 1170;
     /// Treasure map: the overhead view's height (5,000; 4,000 in row 31).
     pub const MAP_VIEW_HEIGHT: u16 = 1901;
     /// Treasure map: its screen.
@@ -160,15 +160,19 @@ impl ClassBehavior for Barrier {
     }
 }
 
+/// The use radius of a point without option 1163 (138235, `t1_recon_go_to_key`'s point, has none). Working choice:
+/// the specs give no default; 100 is the middle of the disc's values (50, 100, 150).
+pub const USE_RADIUS_DEFAULT: f32 = 100.0;
+
 /// A Sly 3 use point (class 33).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsePoint {
     /// Use radius (1163).
     pub radius: f32,
-    /// The object used (1164), resolved from its Sly 3 ID.
-    pub object: Option<Handle>,
-    /// Animations (1170): (animation, count) pairs.
-    pub animations: Vec<(i32, i32)>,
+    /// The command script started on use (1164).
+    pub script: Option<i32>,
+    /// The (task, state) pairs applied on use (1170), at most 4.
+    pub tasks: Vec<(i32, i32)>,
     /// The playable character within the radius, if any (the nearest).
     pub user: Option<Handle>,
 }
@@ -178,13 +182,14 @@ impl UsePoint {
     pub fn new(world: &World, h: Handle) -> UsePoint {
         let o = world.options(h);
         UsePoint {
-            radius: o.and_then(|o| o.f32(opt::USE_RADIUS)).unwrap_or(0.0),
-            object: o.and_then(|o| o.i32(opt::USE_OBJECT)).and_then(|id| world.find_sly3_id(id, Some(h))),
-            animations: lists(world, h, opt::USE_ANIMATIONS)
+            radius: o.and_then(|o| o.f32(opt::USE_RADIUS)).unwrap_or(USE_RADIUS_DEFAULT),
+            script: o.and_then(|o| o.i32(opt::USE_SCRIPT)).filter(|&s| s >= 0),
+            tasks: lists(world, h, opt::USE_TASKS)
                 .map(|a| {
                     let n = |k: usize| a.get(k).and_then(arg_i32).unwrap_or(-1);
                     (n(0), n(1))
                 })
+                .take(4)
                 .collect(),
             user: None,
         }
@@ -215,6 +220,19 @@ impl ClassBehavior for UsePoint {
     fn update(&mut self, cx: &mut Cx<'_>) {
         self.user = self.user_of(cx.world, cx.me);
     }
+}
+
+/// Sly 3 hook (use button): player 0's character uses point `me` if it is within the radius. In order: the user (the
+/// one the behaviour tracks), each (task, state) pair goes to the job system as a checked request (−1 making the task current), event 5
+/// is raised on the point, and its command script (1164) is returned for the caller to start. None when the point is
+/// out of reach.
+pub fn use_point_used(world: &mut World, me: Handle) -> Option<Option<i32>> {
+    let p = UsePoint::new(world, me);
+    let player = world.player?;
+    p.user_of(world, me).filter(|&u| u == player)?;
+    world.shared.task_requests.extend(p.tasks.iter().copied());
+    world.raise(me, 5, Vec::new());
+    Some(p.script)
 }
 
 /// One pace of a treasure-map clue, in units (gadgets.md 6.10).

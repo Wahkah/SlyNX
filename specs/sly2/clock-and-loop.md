@@ -16,8 +16,16 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 (2026-11-12), the clock and world-update functions (facts only)
     used_for: cross-check of the clock constants
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 above, checked 2026-11-20), machine code of 0x00147F40, 0x00148300, 0x0014DC58, 0x0014E078,
+      0x0014E148, 0x001492F0
+    used_for: the camera's zone mask and position used by activation, and the trigger volume's activation kind (section 3.1) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/activate.cpp, loaders.cpp, alo.cpp, brx.cpp, lo.h, trigger.cpp, game.cpp
+    used_for: where an object's zone mask is loaded and how it goes down a tree; the trigger volume's update (section 3.1) [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-20
 ---
 
 # Sly 2 clocks, rate factors, activation and frame loop
@@ -72,6 +80,36 @@ New in Sly 2: whole object subtrees are switched on and off by distance [R].
   mask changed [R].
 - An inactive subtree is out of the update list (section 4) and is not drawn [R].
 
+### 3.1 The zone mask in detail (added 2026-11-20)
+
+- **The camera's side.** The camera's zone mask is the mask of the visibility volume that currently contains the
+  camera's **eye**: camera record +0x14, set from the volume's second mask. It is recomputed whenever the camera's
+  matrices are rebuilt, every frame, for any view, cutscene camera objects included. It is kept unchanged while the
+  eye is in no volume [D]. [camera.md](camera.md) section 7.1.1 has the details.
+- **The test.** Both activation tests read that mask and the camera position directly from the camera record:
+  the per-frame test `0x00147F40` and the immediate test for a newly added root `0x00148300` [D].
+  - For kinds 0 and 3, a root whose own mask (object +0x2D) shares no bit with the camera's mask is inactive. The
+    radius is not looked at [D].
+  - Kind 3 measures its radius from the player's position, or from the camera's when there is no player [D].
+  - Kind 3's zone test still uses the camera's mask, never a mask for where the player stands [D].
+- **The object's side.**
+  - For a placed object, the mask is the `u32` that follows its transform in its header (the load flags).
+  - For a solid object, it is the matching field of its own header [R].
+  - Setting a mask passes it down to every child that lacks option 32 ("keeps its own mask"), and ORs it into every
+    ancestor [R].
+  - Masks seen on the disc are single bits (1 to 0x80), small sets such as 0x7 and 0x30, and 0xFF. 0xFF is the
+    default when nothing sets one [D values; R default].
+- **Radius.** Without option 13 the radius is 1e10, so a kind-0 or kind-3 root without it is gated by the mask
+  alone [R].
+- **Trigger volumes (class 24) are not exempt.**
+  - They take kind 0 in their init (`0x001492F0`) [D].
+  - They test their watched objects (option 432, else the player) only in their own update, which runs only while
+    they are active [R].
+  - So a trigger fires only while the camera's eye is inside a visibility volume whose mask shares a bit with the
+    trigger's own mask. Where the watched object stands does not matter.
+- **Row 0 example.** [camera.md](camera.md) section 7.2.1 has row 0's trigger volumes 150620 (mask 0x7) and 150658
+  (mask 0x1), which are dormant while the cutscene eye sits in a 0x20 volume.
+
 ## 4. Update list
 
 Objects that update are kept in **one flat list** in insertion order, not walked as a tree [R]. Each entry carries
@@ -115,5 +153,7 @@ Script events can therefore be raised at three points in a frame (start, after t
 
 1. Factor 8 enters both the game product and the real step, so the pause overlay stops both clocks [R]; to confirm in
    play that menus and camera input still respond (they would then need the measured step directly).
-2. Which option holds a root's zone mask, and which classes use activation kinds 1, 2 and 3.
+2. Which option holds a root's zone mask, and which classes use activation kinds 1, 2 and 3. Partly answered
+   2026-11-20 (3.1): the mask is a header field, not an option, and trigger volumes use kind 0. The full class
+   list per kind is still open.
 3. The end-of-frame passes after the camera are not identified.

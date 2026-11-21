@@ -10,7 +10,7 @@ use super::health::{Health, Hit, Reaction};
 use super::input::{GangInput, GangWorld, PressBuffer, Target, TargetKind, button};
 use super::items::{ButtonUse, ItemTable, Owned, Power, Slots, behaviour, id};
 use super::throw::{ThrowAim, turn_toward};
-use crate::math::{Vec3, add, atan2, cos, dot, length, madd, normalize, scale, sin, sub};
+use crate::math::{Vec3, add, atan2, cos, cross, dot, length, madd, normalize, scale, sin, sub};
 use crate::physics::character::{CharacterShape, SlideParams, ground_below, move_and_slide};
 
 /// Sly's state numbers (characters.md 3).
@@ -324,6 +324,50 @@ pub const POPUP_KIND: u32 = 0x8000;
 /// Sound of a pop-up hit's second reaction.
 pub const HELD_REACTION_SOUND: i32 = 0x6A;
 
+/// The hook swing's values (characters.md 9.1.1) [D] [R].
+pub mod swing {
+    /// The catch distance from the cane tip's segments to the hook's point.
+    pub const CATCH: f32 = 15.0;
+    /// A cane-reach target is within this distance.
+    pub const REACH: f32 = 1000.0;
+    /// How far above a target Sly may be (not given) [I].
+    pub const REACH_ABOVE: f32 = 300.0;
+    /// The jump times a target must be reachable within.
+    pub const JUMP_TIME: [f32; 2] = [0.25, 3.0];
+    /// The cane tip's height and reach ahead at Sly's hands [I].
+    pub const TIP_HEIGHT: f32 = 150.0;
+    /// See [`TIP_HEIGHT`].
+    pub const TIP_AHEAD: f32 = 40.0;
+    /// The stick counts past this deflection.
+    pub const STICK: f32 = 0.3;
+    /// Within this of the heading it pumps ahead (60°), beyond [`BACK`] back (120°).
+    pub const AHEAD: f32 = core::f32::consts::FRAC_PI_3;
+    /// See [`AHEAD`].
+    pub const BACK: f32 = 2.0 * core::f32::consts::FRAC_PI_3;
+    /// A pump adds this (rad/s per second) about the swing axis for its first [`PUMP_TIME`].
+    pub const PUMP_RATE: f32 = 5.0;
+    /// See [`PUMP_RATE`].
+    pub const PUMP_TIME: f32 = 0.25;
+    /// The pump's scale clamp(0.5 − 0.01·h, 0, 1).
+    pub const PUMP_GAIN: [f32; 2] = [0.5, 0.01];
+    /// Held longer than this, the pump turns to coasting.
+    pub const COAST_AFTER: f32 = 1.4;
+    /// In-plane damping clamp(1.5 − 0.35|ω|, −5, −0.25).
+    pub const DAMP_IN: [f32; 2] = [1.5, 0.35];
+    /// Out-of-plane damping while pumping, else.
+    pub const DAMP_OUT: [f32; 2] = [-2.5, -1.0];
+    /// The rope's length and the shortest length the rescale divides by.
+    pub const ROPE: f32 = 230.0;
+    /// See [`ROPE`].
+    pub const ROPE_MIN: f32 = 75.0;
+    /// How fast the rope eases to its length, per second (not given) [I].
+    pub const ROPE_EASE: f32 = 5.0;
+    /// Cross jumps off only after this long on the hook.
+    pub const RELEASE_AFTER: f32 = 0.25;
+    /// The jump off keeps the swing's velocity with at least this upward.
+    pub const RELEASE_UP: f32 = 700.0;
+}
+
 /// Sly 3's Rocket Boots (gadgets.md 6.2): the start-up lasts at least this long.
 pub const ROCKET_START: f32 = 0.07;
 /// Rocket Boots: the start-up also lasts until Sly's heading is within this of the stick's direction.
@@ -454,6 +498,25 @@ pub struct Character {
     pub ball_spin: Vec3,
     /// Sly 3: the state of the ball's random spins (deterministic).
     pub ball_seed: u32,
+    /// The hook Sly swings on and the rope's length (state 3).
+    pub hook: Option<(u32, f32)>,
+    /// The swing angle θ: the hook direction's pitch from straight up in the heading's frame (characters.md 9.1.1;
+    /// positive with the hook ahead). 0 when not swinging.
+    pub swing_angle: f32,
+    /// The stick's angle against the heading while pushed past 0.3, for the swing blend (`SwingBlend::step`).
+    pub swing_stick: Option<f32>,
+    /// The swing's angular velocity about the hook.
+    pub swing_omega: Vec3,
+    /// Time on the hook.
+    pub swing_time: f32,
+    /// The pump: direction (1 ahead, −1 back, 0 none), time in it, and how long it has been held.
+    pub pump: (i8, f32, f32),
+    /// Cane-reach mode: the hook a jump is aimed at.
+    pub reach: Option<u32>,
+    /// The cane tip last step (its path is tested for a catch).
+    pub last_tip: Vec3,
+    /// While aiming a throw, the predicted flight's points (for the throw marker, `gang::parts`).
+    pub aim_path: Vec<Vec3>,
     /// A pop-up hit (contact kind `0x8000`, characters.md 2.2): 1 while the knock-back reaction runs, 2 during the
     /// second, held reaction that follows it; 0 otherwise.
     pub held_reaction: u8,
@@ -527,6 +590,15 @@ impl Character {
             ball_spin: [0.0; 3],
             ball_seed: 0x9E37_79B9,
             held_reaction: 0,
+            aim_path: Vec::new(),
+            hook: None,
+            swing_angle: 0.0,
+            swing_stick: None,
+            swing_omega: [0.0; 3],
+            swing_time: 0.0,
+            pump: (0, 0.0, 0.0),
+            reach: None,
+            last_tip: [0.0; 3],
             grapple: None,
             rolling: false,
             cane: (0, 0.0),
@@ -760,6 +832,7 @@ impl Character {
             }
         }
         if on {
+            self.reach = None;
             self.velocity[2] = 0.0;
             self.off_floor = 0.0;
             self.floor_z = self.position[2];
@@ -1326,6 +1399,166 @@ impl Character {
         }
     }
 
+    /// Cane reach (characters.md 9.1.1): a jump at a hook starts it when the hook is a fair target: within 1,000,
+    /// Sly not more than `REACH_ABOVE` above it, reachable by a jump of 0.25 to 3 s, and the path clear. The fit
+    /// score and the targets' enable flag and mask are not modelled [I].
+    fn reach_target(&self, world: &GangWorld<'_>) -> Option<u32> {
+        world
+            .targets
+            .iter()
+            .filter(|t| matches!(t.kind, TargetKind::Hook))
+            .filter(|t| {
+                let d = sub(t.position, self.position);
+                let h = length([d[0], d[1], 0.0]);
+                if length(d) > swing::REACH || -d[2] > swing::REACH_ABOVE {
+                    return false;
+                }
+                // Reachable by a jump of 0.25 to 3 s: the jump's vertical speed (215 up) and the 515 air steering.
+                let t_flight = h / 515.0;
+                (swing::JUMP_TIME[0]..=swing::JUMP_TIME[1]).contains(&t_flight.max(swing::JUMP_TIME[0]))
+                    && !world.cw.segment_blocked(add(self.position, [0.0, 0.0, 100.0]), t.position, &world.filter)
+            })
+            .min_by(|a, b| length(sub(a.position, self.position)).total_cmp(&length(sub(b.position, self.position))))
+            .map(|t| t.id)
+    }
+
+    /// The cane hook's tip (object 317) in the world, taken at Sly's hands [I: the tip object's pose is not read].
+    fn cane_tip(&self) -> Vec3 {
+        add(add(self.position, [0.0, 0.0, swing::TIP_HEIGHT]), scale(heading(self.yaw), swing::TIP_AHEAD))
+    }
+
+    /// In cane-reach mode, each step tests the body centre → cane tip segment and the tip's path over the step
+    /// against the hook's point: within 15 catches it (kinds 0 to 2 swing; follow-hangs, kind 3, are not told apart
+    /// yet).
+    fn try_catch(&mut self, prev_tip: Vec3, world: &GangWorld<'_>, out: &mut Vec<GangEvent>) -> bool {
+        let Some(id) = self.reach else { return false };
+        let Some(h) = world.targets.iter().find(|t| t.id == id && matches!(t.kind, TargetKind::Hook)) else {
+            return false;
+        };
+        let tip = self.cane_tip();
+        let centre = add(self.position, [0.0, 0.0, 100.0]);
+        let near = |a: Vec3, b: Vec3| {
+            let ab = sub(b, a);
+            let l2 = dot(ab, ab);
+            let t = if l2 > 0.0 { (dot(sub(h.position, a), ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            length(sub(h.position, madd(a, ab, t)))
+        };
+        if near(centre, tip).min(near(prev_tip, tip)) > swing::CATCH {
+            return false;
+        }
+        let r = sub(self.position, h.position);
+        let len = length(r).max(1.0);
+        // The swing keeps the body's motion: ω = r × v / |r|².
+        self.swing_omega = scale(cross(r, self.velocity), 1.0 / (len * len));
+        self.hook = Some((id, len));
+        self.reach = None;
+        self.swing_time = 0.0;
+        self.pump = (0, 0.0, 0.0);
+        self.set_state(sly::HOOK, out);
+        true
+    }
+
+    /// The hook swing (state 3; characters.md 9.1.1): an angular velocity ω about the hook. Gravity, the stick's
+    /// pumps (5·dt rad/s about the swing axis for the first 0.25 s of a pump, scaled by clamp(0.5 − 0.01·h, 0, 1), h
+    /// the energy height; coasting after 1.4 s held), damping in the swing plane by clamp(1.5 − 0.35|ω|, −5, −0.25)
+    /// and out of it by −2.5 while pumping, else −1.0; the rope eases to 230 and ω is rescaled by
+    /// min(230, r) / max(75, new length). Cross after 0.25 s jumps off with the swing's velocity, at least 700 up;
+    /// Square lets go (unconfirmed).
+    fn swing(&mut self, dt: f32, input: &GangInput, world: &GangWorld<'_>, s: &Shared, out: &mut Vec<GangEvent>) {
+        let pivot = self.hook.and_then(|(id, _)| world.targets.iter().find(|t| t.id == id)).map(|t| t.position);
+        let (Some(pivot), Some((id, len))) = (pivot, self.hook) else {
+            self.leave_hook(out);
+            return;
+        };
+        self.swing_time += dt;
+        if self.buffer.take(button::SQUARE, spec::WINDOW_SHORT) {
+            self.leave_hook(out);
+            return;
+        }
+        if self.swing_time >= swing::RELEASE_AFTER && self.buffer.take(button::CROSS, spec::WINDOW_JUMP) {
+            let r = sub(self.position, pivot);
+            let mut v = cross(self.swing_omega, r);
+            v[2] = v[2].max(swing::RELEASE_UP);
+            self.leave_hook(out);
+            self.velocity = v;
+            out.push(GangEvent::Jumped);
+            return;
+        }
+        let r = sub(self.position, pivot);
+        let up = [0.0, 0.0, 1.0];
+        let fwd = heading(self.yaw);
+        let axis = cross(up, fwd); // left of the heading: the swing axis
+        // Gravity's angular acceleration on a point mass: (r × g) / |r|².
+        let g = [0.0, 0.0, spec::GRAVITY];
+        let mut w = madd(self.swing_omega, cross(r, g), dt / (len * len));
+        // The stick's pumps.
+        let (dir, u) = self.stick(input, s);
+        let stick = (u > swing::STICK).then(|| {
+            let off = atan2(dir[1], dir[0]) - self.yaw;
+            atan2(sin(off), cos(off))
+        });
+        self.swing_stick = stick;
+        let want = match stick {
+            Some(a) if a.abs() <= swing::AHEAD => 1i8,
+            Some(a) if a.abs() >= swing::BACK => -1,
+            _ => 0,
+        };
+        let (mut pdir, mut ptime, mut held) = self.pump;
+        if want != pdir {
+            (pdir, ptime, held) = (want, 0.0, 0.0);
+        } else {
+            ptime += dt;
+            held += dt;
+        }
+        let coasting = held > swing::COAST_AFTER;
+        let pumping = pdir != 0 && !coasting;
+        if pumping && ptime < swing::PUMP_TIME {
+            let v = cross(w, r);
+            let h = (self.position[2] - (pivot[2] - len)) + dot(v, v) / (2.0 * -spec::GRAVITY);
+            let k = (swing::PUMP_GAIN[0] - swing::PUMP_GAIN[1] * h).clamp(0.0, 1.0);
+            // Ahead: ω about −axis (r below the hook turns toward the heading).
+            w = madd(w, axis, -f32::from(pdir) * swing::PUMP_RATE * dt * k);
+        }
+        self.pump = (pdir, ptime, held);
+        // Damping, in the swing plane (about the axis) and out of it.
+        let w_in = dot(w, axis);
+        let w_out = madd(w, axis, -w_in);
+        let k_in = 1.0 + dt * (swing::DAMP_IN[0] - swing::DAMP_IN[1] * w_in.abs()).clamp(-5.0, -0.25);
+        let k_out = 1.0 + dt * if pumping { swing::DAMP_OUT[0] } else { swing::DAMP_OUT[1] };
+        w = add(scale(axis, w_in * k_in), scale(w_out, k_out));
+        // The rope eases toward 230 (less the hook's offset, not read); ω rescaled for the new length.
+        let new_len = len + (swing::ROPE - len) * (swing::ROPE_EASE * dt).min(1.0);
+        w = scale(w, swing::ROPE.min(len) / swing::ROPE_MIN.max(new_len));
+        // Turn r by ω·dt about the hook, at the new length.
+        let angle = length(w) * dt;
+        let r1 = if angle > 1e-7 {
+            let m = crate::math::axis_angle(scale(w, dt));
+            crate::math::mat_mul_vec(&m, r)
+        } else {
+            r
+        };
+        let r1 = scale(normalize(r1), new_len);
+        self.position = add(pivot, r1);
+        self.velocity = cross(w, r1);
+        self.swing_omega = w;
+        let hv = [self.velocity[0], self.velocity[1], 0.0];
+        if length(hv) > 1.0 {
+            self.yaw = atan2(hv[1], hv[0]);
+        }
+        let d = sub(pivot, self.position);
+        self.swing_angle = atan2(dot(d, heading(self.yaw)), d[2]);
+        self.hook = Some((id, new_len));
+    }
+
+    fn leave_hook(&mut self, out: &mut Vec<GangEvent>) {
+        self.hook = None;
+        self.swing_angle = 0.0;
+        self.swing_stick = None;
+        self.swing_omega = [0.0; 3];
+        self.leave_ground();
+        self.set_state(sly::AIR, out);
+    }
+
     /// Sly 3's Fishing Pole line (gadgets.md 6.5): while the button is held the line stays out. A robbable guard
     /// within 250 of the tip (`fishing_range` ahead of Bentley) is hooked; still in reach 0.35 s later it is held
     /// and reeled in, taking a pocket item from it (`Pickpocket`, as Sly 2's pickpocketing [R]); while reeling, the
@@ -1482,6 +1715,9 @@ impl Character {
             return;
         };
         aim.steer(input.stick, s.tun.aim_speed, dt);
+        // The throw marker follows the predicted flight (characters.md 9.3.1).
+        self.aim_path =
+            aim.predict(add(self.position, [0.0, 0.0, 100.0]), spec::GRAVITY, Some(world.cw), &world.filter).points;
         self.yaw = turn_toward(self.yaw, aim.yaw, spec::THROW_TURN[1], dt);
         self.aim = Some(aim);
         self.move_body(dt, world, s, [0.0; 3], true);
@@ -1632,6 +1868,17 @@ impl Character {
         }
         match self.state {
             sly::AIR | sly::AIR_SQUARE | sly::AIR_TRIANGLE => {
+                // Cane reach: a jump aimed at a hook catches it when the cane tip passes within 15 of it.
+                if self.state == sly::AIR {
+                    if self.reach.is_none() && self.state_time <= dt + 1e-6 {
+                        self.reach = self.reach_target(world);
+                    }
+                    let prev_tip = if self.state_time <= dt + 1e-6 { self.cane_tip() } else { self.last_tip };
+                    self.last_tip = self.cane_tip();
+                    if self.reach.is_some() && self.try_catch(prev_tip, world, out) {
+                        return;
+                    }
+                }
                 if self.state == sly::AIR {
                     if self.buffer.take(button::SQUARE, spec::WINDOW_SHORT) {
                         out.push(GangEvent::AirAttack(sly::AIR_SQUARE));
@@ -1688,12 +1935,7 @@ impl Character {
                     self.set_state(sly::STAND, out);
                 }
             }
-            sly::HOOK => {
-                if self.buffer.take(button::SQUARE, spec::WINDOW_SHORT) {
-                    self.grounded = false;
-                    self.set_state(sly::AIR, out);
-                }
-            }
+            sly::HOOK => self.swing(dt, input, world, s, out),
             sly::THROW_AIM => self.throw_aim(dt, input, world, s, sly::STAND, out),
             sly::DODGE => {
                 // Combat Dodge (gadgets.md 5.1): the clip's 1,500 sideways; around a target Sly circles it, the

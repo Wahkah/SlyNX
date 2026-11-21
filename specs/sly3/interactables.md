@@ -128,7 +128,27 @@ Sly 3's water options are new numbers (925 is Sly 2's 877 [R]); 929 lists curren
 | 1162 | 1 | 1 | 24 ×1 | — |
 
 1163 (Sly 2 1069) is the use radius (50, 100, 150) [R] [D for the values]; 1164 (1070) the object used; 1168 (1074)
-3,300 to 3,500 [D]; 1170 (1076) its animations [R].
+3,300 to 3,500 [D]; 1170 (1076) is **not** an animation list; see below.
+
+**Option 1170: a task request when the point is used** [X]. It is a load-time method with two arguments, (task,
+state). Its handler (`0x0010C530` → `0x001A20C0`) appends the pair to the use point's list (count +0x16C, pairs
+from +0x170, at most 4; `0x001858D0`), so one point can carry up to four pairs. When the point is **used**
+(`0x001A20F8`), the game does the following in order:
+
+1. stores the user at +0x11C;
+2. runs `0x0025D3F8` with the point's +0x128 / +0x12C;
+3. applies the pairs through `0x00185908`. Each pair's task is found by OID and gets an ordinary (checked) request
+   for the state (`0x00189078`), with the point as the requester;
+4. raises script event 5 on the point;
+5. starts the point's command script (option 1164, +0x124) with the user, when one is set (`0x00225EE8`).
+
+The use routine is called from the character interaction code at `0x0014ECB4` (in `0x0014EB40`) and from
+`0x001A22BC`, and it sits in a vtable at `0x0035AB74`. *Interpretation:* `0x0014EB40` is the player's use-button
+interaction with the point [I].
+
+State −1 in a request means "make current", as in Sly 2 [R]. So use point 138235's (2105, −1) asks for **task 2105
+`t1_recon_go_to_key` to become current** when Sly uses the point. That task's 1405 then marks it done at once
+(missions.md 4). Disc values include (2405, 4), (2111, −1) and (2105, −1).
 
 ## 6. Other classes
 

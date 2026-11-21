@@ -16,6 +16,7 @@ pub mod gadgets;
 pub mod health;
 pub mod input;
 pub mod items;
+pub mod parts;
 pub mod pocket;
 pub mod pool;
 pub mod sly3;

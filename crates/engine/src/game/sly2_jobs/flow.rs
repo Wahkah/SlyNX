@@ -30,6 +30,8 @@ pub mod opt {
     pub const WIPE: u16 = 780;
     /// Seconds outside before the exit arms.
     pub const ARM_TIME: u16 = 781;
+    /// Seconds between an exit's firing and its load request (default 0; never set on the disc).
+    pub const LOAD_DELAY: u16 = 785;
     /// An exit's method: fire it.
     pub const FIRE: u16 = 786;
     /// (task, state) pairs applied when the exit fires.
@@ -85,6 +87,8 @@ pub struct Exit {
     pub movies: Vec<u32>,
     /// State.
     pub state: ExitState,
+    /// A task or job asked for it to fire (option 1278 or 1259): it fires as soon as it is armed (level-flow.md 5.5).
+    pub wanted: bool,
 }
 
 /// The body's destination and extra file records (classes/paths-and-volumes.md 6): after the options, the volume's
@@ -131,6 +135,7 @@ pub fn exits(world: &World) -> Vec<Exit> {
                 row: recs.as_ref().and_then(|(id, _)| row_of(world, *id)),
                 movies: recs.map(|r| r.1).unwrap_or_default(),
                 state: ExitState::Inside,
+                wanted: false,
             }
         })
         .collect()

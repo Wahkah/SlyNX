@@ -314,9 +314,14 @@ impl<B: Backend> Renderer<B> {
 
     /// Uploads the arena and texture pools in one go and frees their CPU copies.
     pub fn commit(&mut self) -> Result<(), RenderError> {
-        // The performance text rides along with every level, once enabled.
+        // The performance text rides along with every level, once enabled. It is optional: a level whose textures
+        // already use every pool (or instance) it would need is committed without it rather than failing.
         if self.perf_chars > 0 && self.perf_text.is_none() && !self.res.committed {
-            self.perf_text = Some(crate::overlay::TextOverlay::new(self, self.perf_chars)?);
+            match crate::overlay::TextOverlay::new(self, self.perf_chars) {
+                Ok(t) => self.perf_text = Some(t),
+                Err(RenderError::LimitReached(_)) => {}
+                Err(e) => return Err(e),
+            }
         }
         let backend = &mut self.backend;
         self.res.commit_with(|level| backend.upload_level(level))
@@ -485,7 +490,8 @@ impl<B: Backend> Renderer<B> {
     /// with [`Renderer::set_bones`] (rows: shadow colour RGB and the starting fourth channel; material colour RGBA
     /// on 0..255; one-pass flag; then per light, four of them: position or direction and point flag, colour, angular
     /// offset, angular scale, distance factor and in-use flag; `crate::frame` and the shader read it). `None` goes
-    /// back to the instance's weights.
+    /// back to the instance's weights. The block's index rides in the morph field, so it is ignored on a morphed
+    /// instance or one of a placed mesh (those keep their weights).
     pub fn set_shader_light(&mut self, id: InstanceId, first: Option<u32>) -> Result<(), RenderError> {
         self.rec_mut(id)?.shader_light = first;
         Ok(())
@@ -1223,6 +1229,35 @@ mod tests {
         let nb = r.backend();
         assert_eq!(nb.last_batches.len(), 4);
         assert_eq!(nb.last_draws[0].instance_count, 2);
+    }
+
+    #[test]
+    fn shader_light_never_shares_the_morph_field() {
+        use crate::frame::*;
+        use crate::types::Lighting;
+        let mut r = Renderer::new(NullBackend::new(64, 64));
+        let m = tri_mesh(&mut r, 1.0);
+        let (t, t0, t2) = (tex(&mut r, 8), tex(&mut r, 8), tex(&mut r, 8));
+        r.commit().unwrap();
+        let lit = Material { lighting: Lighting::TwoColour, palettes: Some([t0, t2]), ..Material::opaque(t) };
+        let lit = r.add_material(lit).unwrap();
+        let bones = [BoneMatrix::IDENTITY; 1 + LIGHT_BLOCK_MATRICES as usize];
+        let plain = r.add_instance(m, lit, Mat4::IDENTITY).unwrap();
+        let morphed = r.add_instance(m, lit, Mat4::IDENTITY).unwrap();
+        for id in [plain, morphed] {
+            r.set_bones(id, &bones).unwrap();
+            r.set_shader_light(id, Some(1)).unwrap();
+        }
+        r.set_morph(morphed, &[[0.0; 3]; 3], &[[0.0, 0.0, 1.0]; 3]).unwrap();
+        r.render(&cam(), [0.0; 4]).unwrap();
+        let recs = &r.backend().last_instances;
+        let light = |k: usize| recs[k].layers & LAYERS_SHADER_LIGHT != 0;
+        let morph = |k: usize| recs[k].flags() & INSTANCE_MORPHED != 0;
+        // One packed record each: the plain one lit in the shader, the morphed one keeps its morph field.
+        assert_eq!(recs.len(), 2);
+        let (p, q) = if morph(0) { (1, 0) } else { (0, 1) };
+        assert!(light(p) && !morph(p));
+        assert!(!light(q) && morph(q));
     }
 
     #[test]

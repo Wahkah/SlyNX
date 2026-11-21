@@ -454,6 +454,9 @@ impl CollisionWorld {
                     let lp = body.inverse.transform_point(point);
                     let ld = normalize(mat_mul_vec(&body.inverse.cols, [0.0, 0.0, -1.0]));
                     let scale_z = crate::math::length(mat_mul_vec(&body.inverse.cols, [0.0, 0.0, max_drop]));
+                    if !scale_z.is_finite() || scale_z <= 0.0 {
+                        continue;
+                    }
                     let Some((d_local, tri)) = mesh.tree_floor(lp, ld, scale_z) else { continue };
                     let distance = d_local * max_drop / scale_z.max(1e-6);
                     if best.as_ref().is_none_or(|b| distance < b.distance) {

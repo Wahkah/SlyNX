@@ -701,13 +701,17 @@ fn attack_of(world: &World, a: Handle) -> Option<Attack> {
     for (s, w) in strike.iter_mut().zip(&list) {
         *s = *w;
     }
+    // A pair or value that is not finite (NaN or infinite on the disc) falls back to the default: a NaN wait would
+    // stop the guard attacking for good.
+    let pair = |id: u16, d: [f32; 2]| o.pair(id).filter(|p| p.iter().all(|v| v.is_finite())).unwrap_or(d);
+    let wait = pair(opt::ACT_WAIT, d.wait);
     Some(Attack {
-        distance: o.pair(opt::ACT_DISTANCE).unwrap_or(d.distance),
-        height: o.pair(opt::ACT_HEIGHT).unwrap_or(d.height),
-        wait: o.pair(opt::ACT_WAIT).unwrap_or(d.wait),
-        half_angle: o.f32(opt::ACT_ANGLE).map_or(d.half_angle, |a| a.to_radians() * 0.5),
+        distance: pair(opt::ACT_DISTANCE, d.distance),
+        height: pair(opt::ACT_HEIGHT, d.height),
+        wait: [wait[0].max(0.0), wait[1].max(0.0)],
+        half_angle: o.f32(opt::ACT_ANGLE).filter(|a| a.is_finite()).map_or(d.half_angle, |a| a.to_radians() * 0.5),
         action: world.sly2_id(a).unwrap_or(-1),
-        length,
+        length: if length.is_finite() { length.max(0.0) } else { 0.0 },
         strike,
         windows: list.len().min(MAX_WINDOWS) as u8,
     })
@@ -812,7 +816,8 @@ impl ClassBehavior for Sly2Guard {
         if self.knocked_out() {
             return;
         }
-        self.attack_wait = (self.attack_wait - cx.dt).max(0.0);
+        // Kept finite so a bad value cannot stop the attacks for good.
+        self.attack_wait = if self.attack_wait.is_finite() { (self.attack_wait - cx.dt).max(0.0) } else { 0.0 };
         let Some(me) = cx.world.position(cx.me) else { return };
         let player = cx.world.player_target();
         let target = player.and_then(|p| cx.world.position(p));
@@ -1112,6 +1117,18 @@ mod tests {
             Some(Behavior::Sly2Guard(x)) => x,
             _ => panic!("not a Sly 2 guard"),
         }
+    }
+
+    #[test]
+    fn non_finite_attack_settings_fall_back_to_the_defaults() {
+        use crate::object::OptionValue;
+        let (mut g, gh, _) = guard_game();
+        g.world.set_option(gh, opt::ACT_WAIT, OptionValue::Pair([f32::NAN, f32::NAN]));
+        g.world.set_option(gh, opt::ACT_DISTANCE, OptionValue::Pair([0.0, f32::INFINITY]));
+        g.world.set_option(gh, opt::ACT_ANGLE, OptionValue::Float(f32::NAN));
+        let a = attack_of(&g.world, gh).expect("an attack");
+        let d = default_attack();
+        assert_eq!((a.wait, a.distance, a.half_angle), (d.wait, d.distance, d.half_angle));
     }
 
     #[test]

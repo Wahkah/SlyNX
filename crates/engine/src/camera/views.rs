@@ -4,6 +4,10 @@
 //! | View | Priority | Here |
 //! |---|---:|---|
 //! | camera object (class 44), timed move | 10 | [`camera_object_view`], [`TimedMove`] |
+//!
+//! A camera object's view lives exactly as long as the object is in the world (camera.md 7.2.1): pushed when it
+//! enters, ended only when it leaves. A push of equal priority goes beneath the views already there, so among equal
+//! priorities the earliest pushed is on top.
 //! | turret or vehicle mount | 9 | `World::shared.camera_mount` |
 //! | binocucom | 8 [I: not established] | [`Binocucom`] |
 //! | two-character framing | 6 | [`pair_view`] |
@@ -105,7 +109,8 @@ impl TimedMove {
             angles: mix(self.from.angles, self.to.angles),
             fov: self.from.fov + (self.to.fov - self.from.fov) * w,
         };
-        (s.shot(), self.time >= self.duration)
+        // A duration that is not a number ends the move at once (review hook: bad data must not hold the view).
+        (s.shot(), self.time >= self.duration || self.duration.is_nan())
     }
 }
 
@@ -202,6 +207,8 @@ impl Binocucom {
     /// view; returns the shot.
     pub fn step(&mut self, dt: f32, left: [f32; 2], right: [f32; 2], at: Vec3, normal_fov: f32) -> ViewShot {
         use binocucom::*;
+        // Review hook: a step that is not a finite, non-negative time moves nothing.
+        let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
         let fov = normal_fov * (1.0 - self.zoom * (1.0 - ZOOM_MIN));
         let rate = FOV_SCALE * fov;
         let y = if self.invert { -left[1] } else { left[1] };
@@ -225,7 +232,9 @@ impl Binocucom {
             if k == 1 || !self.character {
                 self.speed[k] = self.speed[k].clamp(-cap.max(0.0), cap.max(0.0));
             }
-            self.angles[k] = (self.angles[k] + self.speed[k] * dt).clamp(lo, hi);
+            let a = self.angles[k] + self.speed[k] * dt;
+            // Review hook: limits that are not numbers (a bad heading) leave the angle unclamped instead of panicking.
+            self.angles[k] = if lo <= hi { a.clamp(lo, hi) } else { a };
         }
         // Zoom: speed (2 − u²)·y·|y| on the right stick's vertical axis.
         let zy = right[1];
@@ -367,6 +376,17 @@ pub fn visibility_mask(volumes: &[VisibilityVolume], eye: Vec3, state: &mut Visi
     state.mask
 }
 
+/// Whether a view (priority, push order) is above another in the stack (camera.md 7.2.1): a higher priority, or an
+/// equal one pushed earlier (a push goes beneath every entry of equal or higher priority).
+pub fn above(view: (i32, u64), other: (i32, u64)) -> bool {
+    view.0 > other.0 || (view.0 == other.0 && view.1 < other.1)
+}
+
+/// The top of a stack of views (priority, push order), if any.
+pub fn top(views: &[(i32, u64)]) -> Option<usize> {
+    (0..views.len()).reduce(|best, i| if above(views[i], views[best]) { i } else { best })
+}
+
 /// The placement whose forward axis looks from `eye` to `target` (for the follow camera's placement mode).
 pub fn placement(eye: Vec3, target: Vec3) -> Affine {
     let f = normalize(sub(target, eye));
@@ -386,8 +406,14 @@ pub fn placement(eye: Vec3, target: Vec3) -> Affine {
 pub struct ViewStack {
     /// Camera objects, each with whether it was in the world last frame.
     pub objects: Vec<(Handle, bool)>,
-    /// The camera objects whose view is pushed, oldest first.
+    /// The camera objects whose view is pushed, oldest first, with the order they were pushed in.
     pub active_objects: Vec<Handle>,
+    /// See [`ViewStack::active_objects`].
+    pub pushed: Vec<u64>,
+    /// When the timed move was pushed, and the next push's number (camera.md 7.2.1: an equal-priority push goes
+    /// beneath).
+    timed_pushed: u64,
+    next_push: u64,
     /// The timed move running, and the last one started from the world.
     pub timed: Option<TimedMove>,
     seen_move: Option<TimedMove>,
@@ -437,8 +463,14 @@ impl ViewStack {
             let now = world.in_world(*h);
             if now && !*was {
                 self.active_objects.push(*h);
-            } else if !now && *was {
-                self.active_objects.retain(|a| a != h);
+                self.pushed.push(self.next_push);
+                self.next_push += 1;
+            } else if !now
+                && *was
+                && let Some(k) = self.active_objects.iter().position(|a| a == h)
+            {
+                self.active_objects.remove(k);
+                self.pushed.remove(k);
             }
             *was = now;
         }
@@ -446,6 +478,8 @@ impl ViewStack {
         if world.shared.camera_move != self.seen_move {
             self.seen_move = world.shared.camera_move;
             self.timed = self.seen_move.map(|m| TimedMove { time: 0.0, ..m });
+            self.timed_pushed = self.next_push;
+            self.next_push += 1;
         }
         // The binocucom.
         match (world.shared.camera_binocucom, &self.binocucom) {
@@ -459,38 +493,40 @@ impl ViewStack {
             (None, Some(_)) => self.binocucom = None,
             _ => {}
         }
-        let mut best: Option<(i32, ViewShot, bool)> = None;
-        let mut offer = |p: i32, s: Option<ViewShot>, cuts: bool| {
+        // The highest priority wins; among equal priorities the earliest push (a later one went beneath).
+        let mut best: Option<(i32, ViewShot, bool, u64)> = None;
+        let mut offer = |p: i32, s: Option<ViewShot>, cuts: bool, order: u64| {
             if let Some(s) = s
                 && p > floor
-                && best.as_ref().is_none_or(|b| p >= b.0)
+                && best.as_ref().is_none_or(|b| above((p, order), (b.0, b.3)))
             {
-                best = Some((p, s, cuts));
+                best = Some((p, s, cuts, order));
             }
         };
-        if let Some(&h) = self.active_objects.last() {
+        // Every camera object's view is in the stack; the earliest pushed of them is above the others.
+        if let (Some(&h), Some(&order)) = (self.active_objects.first(), self.pushed.first()) {
             let cut_option = if world.sly3.is_some() { 1158 } else { opt::CUT_AT_END };
             let cuts = world.options(h).and_then(|o| o.i32(cut_option)).is_some_and(|v| v != 0);
-            offer(priority::CAMERA_OBJECT, camera_object_view(world, h), cuts);
+            offer(priority::CAMERA_OBJECT, camera_object_view(world, h), cuts, order);
         }
         if let Some(m) = &mut self.timed {
             let (s, done) = m.step(dt);
             if done {
                 self.timed = None;
             }
-            offer(priority::CAMERA_OBJECT, Some(s), false);
+            offer(priority::CAMERA_OBJECT, Some(s), false, self.timed_pushed);
         }
         if let Some(b) = &mut self.binocucom {
             let at = world.position(b.focus).unwrap_or([0.0; 3]);
-            offer(priority::BINOCUCOM, Some(b.step(dt, input.left, input.right, at, fov)), true);
+            offer(priority::BINOCUCOM, Some(b.step(dt, input.left, input.right, at, fov)), true, 0);
         }
         if let Some((a, b)) = world.shared.camera_pair
             && let (Some(pa), Some(pb)) = (world.position(a), world.position(b))
         {
-            offer(priority::PAIR, Some(pair_view(pa, pb, eye, &self.pair)), false);
+            offer(priority::PAIR, Some(pair_view(pa, pb, eye, &self.pair)), false, 0);
         }
         match best {
-            Some((_, s, cuts)) => {
+            Some((_, s, cuts, _)) => {
                 self.last = Some((s, cuts));
                 Some(s)
             }
@@ -506,6 +542,23 @@ impl ViewStack {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn equal_priority_pushes_go_beneath() {
+        // A camera object (priority 10) pushed first; a camera block's timed view (10) pushed later goes beneath it.
+        let object = (priority::CAMERA_OBJECT, 0);
+        let block = (priority::CAMERA_OBJECT, 1);
+        assert!(above(object, block) && !above(block, object));
+        assert_eq!(top(&[object, block]), Some(0));
+        assert_eq!(top(&[block, object]), Some(1), "the order of the list does not matter, the push order does");
+        // A strictly higher priority covers whatever was pushed first; a lower one never does.
+        assert_eq!(top(&[(priority::PAIR, 0), (priority::BINOCUCOM, 5)]), Some(1));
+        assert_eq!(top(&[object, (priority::MOUNT, 0)]), Some(0));
+        // When the covering view leaves, the earliest of the equal ones is on top again.
+        assert_eq!(top(&[block, (priority::CAMERA_OBJECT, 2), object]), Some(2));
+        assert_eq!(top(&[]), None);
+    }
+
     use super::*;
 
     #[test]
@@ -521,6 +574,23 @@ mod tests {
         assert!(done && (s.eye[0] - 100.0).abs() < 1e-3);
         let lin = TimedMove { curve: 0, ..m };
         assert!((lin.weight(0.5) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bad_numbers_do_not_panic_or_hold_the_view() {
+        // A timed move with a duration that is not a number ends at once.
+        let a = CamState { position: [0.0; 3], angles: [0.0; 3], fov: 1.0 };
+        let mut m = TimedMove { from: a, to: a, duration: f32::NAN, curve: 3, time: 0.0 };
+        assert!(m.step(1.0 / 60.0).1);
+        // The binocucom with a heading that is not a number, or a bad step, does not panic.
+        let h = Handle::new(0, 0);
+        let mut b = Binocucom::new(h, false, f32::NAN, false);
+        for dt in [1.0 / 60.0, f32::NAN, -1.0, f32::INFINITY] {
+            b.step(dt, [-1.0, 1.0], [0.0, 1.0], [0.0; 3], 1.0);
+        }
+        let mut c = Binocucom::new(h, true, 0.0, false);
+        let s = c.step(f32::NAN, [1.0, 0.0], [0.0; 2], [0.0; 3], 1.0);
+        assert!(s.eye.iter().all(|v| v.is_finite()));
     }
 
     #[test]

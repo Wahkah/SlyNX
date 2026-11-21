@@ -121,6 +121,31 @@ pub fn generic_action(world: &mut World, h: Handle, id: u16, args: &[Arg]) -> bo
     }
 }
 
+/// Clip events that add and remove an object (object ID, fade; camera.md 7.2.1, animation.md 2).
+pub const EVENT_ADD: i8 = 7;
+/// See [`EVENT_ADD`].
+pub const EVENT_REMOVE: i8 = 8;
+
+/// Applies the add and remove events (kinds 7 and 8) the clips fired this frame: the named object (looked up near
+/// the playback's target) enters or leaves the world. Call after the poses are stepped.
+pub fn clip_object_events(world: &mut World) {
+    let Some(level) = world.sly2.as_deref() else { return };
+    let mut todo: Vec<(i32, Handle, bool)> = Vec::new();
+    for e in &level.poser.fired {
+        if e.kind != EVENT_ADD && e.kind != EVENT_REMOVE {
+            continue;
+        }
+        let Some(ev) = level.poser.event_of(world, e) else { continue };
+        let Some(b) = ev.payload.get(..4) else { continue };
+        todo.push((i32::from_le_bytes([b[0], b[1], b[2], b[3]]), e.target, e.kind == EVENT_ADD));
+    }
+    for (id, near, add) in todo {
+        if let Some(h) = world.find_sly2_id(id, Some(near)) {
+            world.set_in_world(h, add);
+        }
+    }
+}
+
 /// The Sly 2 sequence class.
 pub const SEQUENCE_CLASS: i16 = 114;
 

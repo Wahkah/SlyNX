@@ -238,11 +238,28 @@ pub struct Jobs {
     /// Sly 3 hook: the class whose objects in the world also hear every task event, after the tasks and before the
     /// current job (Sly 3's macro-package listeners, class 147; missions.md 4.2). `None` in Sly 2.
     pub listener_class: Option<i16>,
+    /// Sly 3 hook (option 1405): tasks made current that ask for "done" at once, finished one after another by the
+    /// outermost [`Jobs::make_current`] rather than by recursion (a chain of such tasks would nest calls).
+    pub done_queue: alloc::collections::VecDeque<usize>,
+    /// Whether the outermost [`Jobs::make_current`] is finishing [`Jobs::done_queue`].
+    pub finishing: bool,
+    /// Sly 3 hook: Sly 3's order of becoming current (the job begins after the task's events and exit). Sly 2's
+    /// (false) follows missions.md 4.2. The world start (the remembered job and task begun again) is both games'.
+    pub sly3_rules: bool,
+    /// Sly 3 hook: the tasks whose state change is being applied, which back-fill does not raise again.
+    pending: Vec<usize>,
+    /// The job a queued 1405 "done" has just completed (so that it is not begun again).
+    completed_now: Option<usize>,
     /// Sly 3 hook: exits fired that are not in [`Jobs::exits`] (a Sly 3 world's exits are run by the Sly 3
     /// session, which takes these).
     pub fired_elsewhere: Vec<i32>,
     /// A load the world asked for; the session performs it.
     pub load: Option<LoadRequest>,
+    /// An exit fired and its load not yet requested (level-flow.md 5.5): the request and the seconds left of its
+    /// option-785 delay. The game is paused meanwhile; [`Jobs::step_exit`] makes the request in a later update.
+    pub exit_pending: Option<(LoadRequest, f32)>,
+    /// The pending exit was fired in the current update (its load is requested in a later one).
+    exit_fresh: bool,
     /// Where to put the player (a warp), applied by the game.
     pub place: Option<Affine>,
     /// What the UI and the session should know, oldest first.
@@ -314,7 +331,14 @@ impl Jobs {
             fired_elsewhere: Vec::new(),
             script_events: Some,
             listener_class: None,
+            done_queue: alloc::collections::VecDeque::new(),
+            finishing: false,
+            sly3_rules: false,
+            pending: Vec::new(),
+            completed_now: None,
             load: None,
+            exit_pending: None,
+            exit_fresh: false,
             place: None,
             notices: Vec::new(),
             machine_goals: Vec::new(),
@@ -378,13 +402,21 @@ impl Jobs {
         if p.int(&["episodeBest"]) < self.episode as i32 {
             p.set_named(&["episodeBest"], None, SaveValue::Int(self.episode as i32));
         }
-        // Saved states.
-        for t in 0..self.graph.tasks.len() {
+        // Saved states, in prerequisite-first graph order (missions.md 7.1).
+        let order = self.graph.prerequisite_order();
+        for &t in &order {
             let keys = &self.graph.tasks[t].keys;
             let s = get(&self.progress, &keys.state).map_or(0, SaveValue::as_i32);
             let restarted = get(&self.progress, &keys.restarted).is_some_and(|v| v.as_i32() != 0);
             let mut s = s.clamp(0, 3) as i8;
-            if restarted && s == state::AVAILABLE && !self.prereqs_met(t) {
+            if self.sly3_rules {
+                // Sly 3 hook (missions.md 4.1a): with `from_memcard` set, a job's task saved as available or done is
+                // recomputed from its prerequisites (all at least done: available, else locked).
+                if restarted && self.graph.tasks[t].job.is_some() && (s == state::AVAILABLE || s == state::DONE) {
+                    let met = self.graph.tasks[t].prereq.iter().all(|&p| self.states[p] >= state::DONE);
+                    s = if met { state::AVAILABLE } else { state::LOCKED };
+                }
+            } else if restarted && s == state::AVAILABLE && !self.prereqs_met(t) {
                 s = state::LOCKED;
             }
             self.states[t] = s;
@@ -393,7 +425,7 @@ impl Jobs {
         // restore does not propagate: a saved locked task whose prerequisites are met stays locked, as it was in
         // live play (where successors are re-evaluated only when a task becomes done or closed, missions.md 4). An
         // earlier fixed-point pass opened such tasks (task 1776, `t1_recon_brawl`, after a save and continue).
-        for t in 0..self.states.len() {
+        for &t in &order {
             if self.states[t] == state::LOCKED && self.graph.tasks[t].prereq.is_empty() {
                 self.states[t] = state::AVAILABLE;
                 self.save_state(t);
@@ -403,6 +435,13 @@ impl Jobs {
                 if queued.is_none() {
                     let slot = self.graph.tasks[t].slot;
                     self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
+                    // Sly 3 hook: the restore's state setter runs in mode 1, which still raises the state change's
+                    // task events (sly3/missions.md 4.1a), heard by the macro packages that play the intro.
+                    if self.sly3_rules {
+                        let here = Some(slot);
+                        self.effects.push(Effect::Broadcast { event: event::STATE_BEFORE, object: here });
+                        self.effects.push(Effect::Broadcast { event: event::STATE_AFTER, object: here });
+                    }
                 }
             }
         }
@@ -410,37 +449,43 @@ impl Jobs {
             let s = self.states[t] as i32;
             self.switch(t, s, true);
         }
+        // The current job, task and checkpoint from session memory (the carry; none after a card load). A task with
+        // option 1273 restored as available replaces the remembered task, the last in graph order winning, on every
+        // world start (missions.md 7.1). Option 1272 is not applied here.
         let c = carry.unwrap_or_default();
         let mut current = self.graph.task_ids.get(&c.task).copied();
-        let mut job = self.graph.job_ids.get(&c.job).copied();
-        if carry.is_none() {
-            // After a load: a task with option 1273 restored as available is current again.
-            current =
-                (0..self.graph.tasks.len()).find(|&t| self.graph.tasks[t].resume && self.states[t] == state::AVAILABLE);
-            job = current.and_then(|t| self.graph.tasks[t].job);
+        if let Some(&t) =
+            order.iter().rev().find(|&&t| self.graph.tasks[t].resume && self.states[t] == state::AVAILABLE)
+        {
+            current = Some(t);
         }
-        self.job = job;
+        let job = self.graph.job_ids.get(&c.job).copied();
         for j in 0..self.graph.jobs.len() {
             self.job_switches(j);
         }
-        match (carry, self.job) {
-            (Some(c), Some(_)) => {
-                self.timer = c.timer;
-                self.help = c.help;
-            }
-            (None, Some(j)) => {
-                self.timer = get(&self.progress, &self.graph.jobs[j].keys.time).map_or(0.0, SaveValue::as_f32);
-                self.help = get(&self.progress, &self.graph.jobs[j].keys.help).map_or(0.0, SaveValue::as_f32);
-            }
-            _ => self.help = self.history_mean(),
-        }
         self.checkpoint = self.graph.task_ids.get(&c.checkpoint).copied();
+        // Sly 3: step 2 runs in restoring mode too (sly3/missions.md 4.1a, mode 1): events fire, but no back-fill
+        // and no follow-ups of the state setter.
+        self.restoring = self.sly3_rules;
+        // The remembered job begins again, then the task becomes current (which begins its own job when that is
+        // another one); the carried timer and help go on; then every task is saved again.
+        match job {
+            Some(j) => self.begin_job(j),
+            None => self.help = self.history_mean(),
+        }
         if let Some(t) = current {
-            self.current = Some(t);
-            self.switch(t, state::BECAME_CURRENT, false);
-            self.notices.push(Notice::Objective(self.graph.tasks[t].objective));
+            self.make_current(t);
         }
         self.restoring = false;
+        if let (Some(c), Some(j)) = (carry, self.job)
+            && self.graph.job_ids.get(&c.job) == Some(&j)
+        {
+            self.timer = c.timer;
+            self.help = c.help;
+        }
+        for t in 0..self.graph.tasks.len() {
+            self.save_state(t);
+        }
         // A queued task is forced: a new game's task 1583 lies past the attract-mode tasks [working choice].
         if let Some(t) = queued.and_then(|id| self.graph.task_ids.get(&id).copied()) {
             self.request_current(t, true);
@@ -485,6 +530,23 @@ impl Jobs {
         let s = self.states[t];
         if s == state::CLOSED || !(state::LOCKED..=state::CLOSED).contains(&want) {
             return want == s;
+        }
+        if self.sly3_rules {
+            // Sly 3 hook (sly3/missions.md 4.1a): a checked request allows 0 to 1 (prerequisites held), 1 to 2, 1 to
+            // 3 and 2 to 3; a request for 3 on a job's task asks for 2.
+            let want =
+                if !forced && want == state::CLOSED && self.graph.tasks[t].job.is_some() { state::DONE } else { want };
+            let allowed = forced
+                || match (s, want) {
+                    (state::LOCKED, state::AVAILABLE) => self.prereqs_met(t),
+                    (state::AVAILABLE, state::DONE | state::CLOSED) | (state::DONE, state::CLOSED) => true,
+                    _ => false,
+                };
+            if !allowed {
+                return want == s || self.refuse(t);
+            }
+            self.set_state(t, want);
+            return true;
         }
         if want == state::AVAILABLE {
             return self.request_current(t, forced);
@@ -595,6 +657,11 @@ impl Jobs {
         self.save_state(t);
         self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
         self.effects.push(Effect::Broadcast { event: event::STATE_AFTER, object: here });
+        if self.sly3_rules && !self.restoring {
+            self.pending.push(t);
+            self.backfill(t, s);
+            self.pending.pop();
+        }
         if s >= state::DONE {
             if s == state::DONE {
                 let keys = self.graph.tasks[t].keys.clone();
@@ -606,7 +673,9 @@ impl Jobs {
                 }
             }
             let job = self.graph.tasks[t].job;
-            for p in self.graph.tasks[t].prereq.clone() {
+            // Sly 2's back-fill (Sly 3's is `backfill`, above).
+            let prereqs = if self.sly3_rules { Vec::new() } else { self.graph.tasks[t].prereq.clone() };
+            for p in prereqs {
                 if self.states[p] < s && self.states[p] != state::UNKNOWN {
                     self.set_state(p, s);
                 } else if self.states[p] == state::DONE && self.graph.tasks[p].job != job {
@@ -632,6 +701,32 @@ impl Jobs {
         self.update_percent();
     }
 
+    /// Sly 3 hook: back-fill (sly3/missions.md 4.1a) for task `t`'s new state `s`, recursing. For 1 or 2, a
+    /// prerequisite with no job goes to 3, one of the same job to 2, one of another job to 3 (2 when that job keeps
+    /// its last task open, 1361). For 3, every prerequisite goes to 3. For 0 nothing. Only prerequisites below their
+    /// target, and not already being changed, are raised.
+    fn backfill(&mut self, t: usize, s: i8) {
+        if !(state::AVAILABLE..=state::CLOSED).contains(&s) {
+            return;
+        }
+        let job = self.graph.tasks[t].job;
+        for p in self.graph.tasks[t].prereq.clone() {
+            let target = if s == state::CLOSED {
+                state::CLOSED
+            } else {
+                match self.graph.tasks[p].job {
+                    None => state::CLOSED,
+                    Some(pj) if Some(pj) == job => state::DONE,
+                    Some(pj) if self.graph.jobs[pj].keep_open => state::DONE,
+                    Some(_) => state::CLOSED,
+                }
+            };
+            if self.states[p] != state::UNKNOWN && self.states[p] < target && !self.pending.contains(&p) {
+                self.set_state(p, target);
+            }
+        }
+    }
+
     /// Re-evaluates a successor: locked unless its prerequisites are done, available if they are.
     fn reevaluate(&mut self, c: usize) {
         let s = self.states[c];
@@ -641,7 +736,8 @@ impl Jobs {
         let want = if self.prereqs_met(c) { state::AVAILABLE } else { state::LOCKED };
         if want != s {
             self.set_state(c, want);
-            if want == state::AVAILABLE && self.graph.tasks[c].auto_current {
+            // Not in restoring mode (Sly 3's mode 1: the state setter's follow-ups are skipped).
+            if want == state::AVAILABLE && self.graph.tasks[c].auto_current && !self.restoring {
                 self.make_current(c);
             }
         }
@@ -659,25 +755,69 @@ impl Jobs {
             self.effects.push(Effect::Broadcast { event: event::TASK_NOT_CURRENT, object: None });
             self.notices.push(Notice::Objective(None));
         }
+        // missions.md 4.2: the new task is current, its checkpoint remembered and its job begun; then (its record
+        // being loaded) its play count, switch group 4, goals and prompt, and event 19 to its script; only then its
+        // exit (fired by `after_current`, after a 1405 "done").
         self.current = Some(t);
         let task = self.graph.tasks[t].clone();
-        self.switch(t, state::BECAME_CURRENT, false);
-        self.effects.push(Effect::Script { slot: task.slot, event: script_event::BEGIN, task_event: None });
-        self.effects.push(Effect::Broadcast { event: event::TASK_CURRENT, object: None });
-        add(&mut self.progress, &task.keys.focus, 1);
-        self.notices.push(Notice::Objective(task.objective));
         if task.checkpoint.is_some() {
             self.checkpoint = Some(t);
         }
-        // Sly 3 hook: option 1405 asks for "done" at once, before the task's exit fires (sly3/missions.md 4).
-        if task.done_on_current {
-            self.request(t, state::DONE, false);
-        }
-        if let Some(e) = task.exit {
-            self.effects.push(Effect::FireExit(e));
-        }
         if let Some(j) = task.job
             && task.job != self.job
+            && !self.sly3_rules
+        {
+            self.begin_job(j);
+        }
+        if self.sly3_rules {
+            // Sly 3's order as before: switch group 4, the task's event, the broadcast, the counts and prompt.
+            self.switch(t, state::BECAME_CURRENT, false);
+            self.effects.push(Effect::Script { slot: task.slot, event: script_event::BEGIN, task_event: None });
+            self.effects.push(Effect::Broadcast { event: event::TASK_CURRENT, object: None });
+            add(&mut self.progress, &task.keys.focus, 1);
+            self.notices.push(Notice::Objective(task.objective));
+        } else {
+            add(&mut self.progress, &task.keys.focus, 1);
+            self.effects.push(Effect::Broadcast { event: event::TASK_CURRENT, object: None });
+            self.switch(t, state::BECAME_CURRENT, false);
+            self.notices.push(Notice::Objective(task.objective));
+            self.effects.push(Effect::Script { slot: task.slot, event: script_event::BEGIN, task_event: None });
+        }
+        // Sly 3 hook: option 1405 asks for "done" at once, before the task's exit fires (sly3/missions.md 4). The
+        // request is queued and finished below by the outermost call, so a chain of such tasks (each done opening the
+        // next, which becomes current) runs in a loop instead of nesting calls.
+        if task.done_on_current {
+            self.done_queue.push_back(t);
+        } else {
+            self.after_current(t);
+        }
+        if self.finishing {
+            return;
+        }
+        self.finishing = true;
+        while let Some(d) = self.done_queue.pop_front() {
+            self.completed_now = None;
+            if self.states[d] < state::DONE {
+                self.request(d, state::DONE, false);
+            }
+            self.after_current(d);
+        }
+        self.completed_now = None;
+        self.finishing = false;
+    }
+
+    /// The last step of a task becoming current (and, with option 1405, of its "done"): its exit fires. Its job began
+    /// before, so a "done" that completes the job cannot begin it again.
+    fn after_current(&mut self, t: usize) {
+        let (exit, job) = (self.graph.tasks[t].exit, self.graph.tasks[t].job);
+        if let Some(e) = exit {
+            self.effects.push(Effect::FireExit(e));
+        }
+        // Sly 3: the job begins last, unless this task's 1405 "done" has just completed it (sly3/missions.md 4).
+        if self.sly3_rules
+            && let Some(j) = job
+            && job != self.job
+            && self.completed_now != Some(j)
         {
             self.begin_job(j);
         }
@@ -724,6 +864,7 @@ impl Jobs {
     /// Completes job `j`: the screen is reported, the job closes, the next task is requested or the job's exit
     /// fires (missions.md 5, "Complete").
     fn complete_job(&mut self, j: usize) {
+        self.completed_now = Some(j);
         let def = self.graph.jobs[j].clone();
         self.notices.push(Notice::JobComplete { job: def.id, screen: def.screen });
         // Sly 3 hook (sly3/missions.md 4.1): completion mode 2 sends the first task back to 0 instead.
@@ -797,7 +938,7 @@ impl Jobs {
         });
     }
 
-    /// Forces task `t` to state `s` (task methods 1290 to 1293): the request skips the checks.
+    /// Forces task `t` to state `s` (task methods 1290 to 1293; Sly 3's 1314 to 1317): the request skips the checks.
     pub fn force_state(&mut self, t: usize, s: i8) {
         // An index from another world's graph names nothing here (a stale index after a load).
         if self.states.get(t).is_some_and(|&x| x != state::CLOSED) {
@@ -954,6 +1095,7 @@ pub fn arrive(game: &mut crate::game::Game, point: i32) -> Option<Affine> {
         j.respawn = point;
         for e in &mut j.exits {
             e.state = ExitState::Inside;
+            e.wanted = false;
         }
         if let Some(h) = found {
             let acts = flow::point_actions(w, h);
@@ -1042,7 +1184,7 @@ impl Jobs {
                         }
                     }
                 }
-                Effect::FireExit(id) => self.fire_exit_id(world, id),
+                Effect::FireExit(id) => self.want_exit(world, id),
             }
         }
     }
@@ -1059,17 +1201,33 @@ impl Jobs {
     }
 
     /// Fires the exit with object ID `id` (task option 1278, job option 1259, scripts' option 786).
+    ///
+    /// Only an armed exit fires (level-flow.md 5.5): firing an exit in any other state does nothing. So a script's
+    /// 786 on an exit the world has just started in (state 0) is ignored; in row 14 that kept a script from loading
+    /// row 15 through the door 2379 at world start.
     pub fn fire_exit_id(&mut self, world: &mut World, id: i32) {
-        if let Some(i) = self.exits.iter().position(|e| e.id == id) {
-            self.fire_exit(world, i);
-        } else {
-            self.fired_elsewhere.push(id);
+        match self.exits.iter().position(|e| e.id == id) {
+            Some(i) if self.exits[i].state == ExitState::Armed => self.fire_exit(world, i),
+            Some(_) => {}
+            None => self.fired_elsewhere.push(id),
         }
     }
 
+    /// A task's or job's exit (options 1278, 1259): fired now if armed, else as soon as it arms (level-flow.md 5.5).
+    pub fn want_exit(&mut self, world: &mut World, id: i32) {
+        match self.exits.iter().position(|e| e.id == id) {
+            Some(i) if self.exits[i].state == ExitState::Armed => self.fire_exit(world, i),
+            Some(i) => self.exits[i].wanted = true,
+            None => self.fired_elsewhere.push(id),
+        }
+    }
+
+    /// Fires exit `i` (level-flow.md 5.5): its task states (788) apply and it is fired (state 4, event 5), but the
+    /// load is not requested here: it waits for the option-785 delay, in a later update ([`Jobs::step_exit`]). A
+    /// firing while a load is pending or requested is dropped.
     fn fire_exit(&mut self, world: &mut World, i: usize) {
-        if self.load.is_some() {
-            return; // A new request while one is pending is ignored (level-flow.md 9).
+        if self.load.is_some() || self.exit_pending.is_some() {
+            return;
         }
         self.exits[i].state = ExitState::Fired;
         let exit = self.exits[i].clone();
@@ -1080,8 +1238,25 @@ impl Jobs {
                     self.request(t, s as i8, true);
                 }
             }
-            self.load = Some(req);
+            let delay = world.options(exit.handle).and_then(|o| o.f32(flow::opt::LOAD_DELAY)).unwrap_or(0.0);
+            self.exit_pending = Some((req, delay.max(0.0)));
+            self.exit_fresh = true;
         }
+    }
+
+    /// The pending exit's clock (real seconds `dt`; the game is paused while an exit is pending): the load is
+    /// requested ([`Jobs::load`]) once the delay has passed, never in the update that fired the exit. Returns whether
+    /// an exit is still pending.
+    pub fn step_exit(&mut self, dt: f32) -> bool {
+        let Some((_, left)) = self.exit_pending.as_mut() else { return false };
+        if core::mem::replace(&mut self.exit_fresh, false) {
+            return true;
+        }
+        *left -= dt;
+        if *left <= 0.0 {
+            self.load = self.exit_pending.take().map(|p| p.0);
+        }
+        self.exit_pending.is_some()
     }
 
     /// The exits' state machine for the player at `p` (level-flow.md 5.2).
@@ -1091,13 +1266,25 @@ impl Jobs {
             if !world.is_active(h) {
                 continue;
             }
-            let Some(b) = crate::behavior::sly2_props::volume_box(world, h) else { continue };
-            let inside = crate::behavior::sly2_props::in_volume(&b, p);
+            // An exit whose volume is not read is never entered; one a task or job wants arms on its own updates.
+            let inside = match crate::behavior::sly2_props::volume_box(world, h) {
+                Some(b) => crate::behavior::sly2_props::in_volume(&b, p),
+                None if self.exits[i].wanted => false,
+                None => continue,
+            };
             let arm = world.options(h).and_then(|o| o.f32(flow::opt::ARM_TIME)).unwrap_or(0.0);
             self.exits[i].state = match (self.exits[i].state, inside) {
                 (ExitState::Inside, false) => ExitState::Outside(0.0),
                 (ExitState::Outside(_), true) => ExitState::Inside,
+                (ExitState::Outside(t), false) if t + dt >= arm && self.exits[i].wanted => {
+                    self.fire_exit(world, i);
+                    ExitState::Fired
+                }
                 (ExitState::Outside(t), false) if t + dt >= arm => ExitState::Armed,
+                (ExitState::Armed, false) if self.exits[i].wanted => {
+                    self.fire_exit(world, i);
+                    ExitState::Fired
+                }
                 (ExitState::Outside(t), false) => ExitState::Outside(t + dt),
                 (ExitState::Armed, true) => {
                     self.fire_exit(world, i);

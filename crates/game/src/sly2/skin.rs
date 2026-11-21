@@ -431,11 +431,15 @@ impl CharacterSkins {
             self.rows.clear();
             self.rows.extend(self.matrices.iter().map(bone_rows));
             let n = self.rows.len() as u32;
-            push_block(&mut self.rows);
-            r.set_bones(*id, &self.rows)?;
-            if block.is_some() {
-                r.set_shader_light(*id, Some(n))?;
+            // The light block rides after the bones only while both fit the renderer's bone limit; a part with
+            // more bones keeps its weights' colours.
+            let lit = block.is_some()
+                && self.rows.len() + render::frame::LIGHT_BLOCK_MATRICES as usize <= render::MAX_BONES_PER_INSTANCE;
+            if lit {
+                push_block(&mut self.rows);
             }
+            r.set_bones(*id, &self.rows)?;
+            r.set_shader_light(*id, lit.then_some(n))?;
         }
         Ok(())
     }

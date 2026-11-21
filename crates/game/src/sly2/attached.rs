@@ -4,15 +4,17 @@
 //!
 //! Their scene draws stay instances (`stage::prep::SceneInput::dynamic`); each keeps its placement relative to its
 //! object at load, and follows the object (and so the character or bone it hangs from) from then on. A part shows
-//! while its object is in the world, active and visible, with two exceptions the engine does not signal yet:
+//! while its object is in the world, active and visible, and:
 //!
-//! - a gadget object (classes 100 to 102) in a group directly under a character is its pool's template
-//!   (gadgets.md 6: copies are taken from a pool): not drawn;
-//! - a bomb's blast volumes (kinds 2 and 3 under a class-101 object) show only while the bomb is out of the
-//!   characters (placed), and only the volume whose size is the bomb's blast radius (option 1104, gadgets.md 7.1).
+//! - a gadget object (classes 100 to 102) only while a copy of it is out of its pool (`World::shared.gadget_copies`,
+//!   `engine::gang::pool`); the templates left in the pools' groups are not drawn;
+//! - a bomb's mesh groups (gadgets.md 7.1.1: a sphere and four light cards per bomb kind, all hidden at load) only
+//!   for the copy's own kind: shown while it is landed (armed, state 2), blinking over [`BLINK_TIME`] once
+//!   triggered (state 3), hidden otherwise. The other kinds' groups never show.
 
 use alloc::vec::Vec;
 
+use engine::gang::pool::{BOMB_CLASS, GADGET_CLASSES, GadgetCopy};
 use engine::object::Handle;
 use engine::world::World;
 use render::math::Mat4;
@@ -21,14 +23,10 @@ use render::{Backend, InstanceId, RenderError, Renderer};
 use super::skin::CHARACTERS;
 use crate::level::mat4;
 
-/// The gadget objects' classes (gadgets.md 6): carried objects, Bentley's bombs, the trap.
-pub const GADGET_CLASSES: core::ops::RangeInclusive<i16> = 100..=102;
-/// The bomb class (`bentley_mine`).
-pub const BOMB_CLASS: i16 = 101;
-/// The grouping class the pools' templates hang in.
-const GROUP_CLASS: i16 = 6;
-/// The bomb's kind option (stream 1104): the item it was used as.
-const BOMB_KIND: u16 = 1104;
+/// The countdown blink of a triggered bomb (gadgets.md 7.1.1: 112 frames at 60 per second).
+pub const BLINK_TIME: f32 = 112.0 / 60.0;
+/// The blink's toggles (gadgets.md 7.1.1, frames at 60 per second): hidden from each even entry to the next.
+const BLINK: [u16; 12] = [20, 30, 50, 59, 68, 75, 84, 90, 98, 103, 108, 112];
 
 /// One drawn part of an attached object.
 #[derive(Clone, Copy, Debug)]
@@ -37,10 +35,8 @@ struct Part {
     object: Handle,
     /// The draw's transform relative to its object's world transform at load.
     local: Mat4,
-    /// A stencil volume (kind 2 or 3).
-    volume: bool,
-    /// The scene mesh's bounding radius.
-    radius: f32,
+    /// For a bomb's mesh group: the bomb kind (item) it belongs to (gadgets.md 7.1.1).
+    group: Option<u8>,
     shown: bool,
 }
 
@@ -48,6 +44,8 @@ struct Part {
 #[derive(Clone, Debug, Default)]
 pub struct AttachedParts {
     parts: Vec<Part>,
+    /// Triggered bombs and the time since (their blink).
+    triggered: Vec<(Handle, f32)>,
 }
 
 /// Whether `h` has a character (class 53 to 55) among its ancestors.
@@ -71,20 +69,11 @@ pub fn attached_objects(world: &World) -> Vec<(Handle, (u32, u32))> {
         .collect()
 }
 
-/// A pool's template: a gadget object in a group directly under a character.
-pub fn pool_template(world: &World, h: Handle) -> bool {
-    if !world.class(h).is_some_and(|c| GADGET_CLASSES.contains(&c)) {
-        return false;
-    }
-    let Some(group) = world.parent(h).filter(|&p| world.class(p) == Some(GROUP_CLASS)) else { return false };
-    world.parent(group).and_then(|c| world.class(c)).is_some_and(|c| CHARACTERS.contains(&c))
-}
-
-/// The bomb `h` belongs to (itself or an ancestor of class 101).
-fn bomb_of(world: &World, h: Handle) -> Option<Handle> {
+/// The gadget object `h` belongs to (itself or its nearest ancestor of classes 100 to 102).
+fn gadget_of(world: &World, h: Handle) -> Option<Handle> {
     let mut at = Some(h);
     while let Some(x) = at {
-        if world.class(x) == Some(BOMB_CLASS) {
+        if world.class(x).is_some_and(|c| GADGET_CLASSES.contains(&c)) {
             return Some(x);
         }
         at = world.parent(x);
@@ -92,25 +81,62 @@ fn bomb_of(world: &World, h: Handle) -> Option<Handle> {
     None
 }
 
-/// Whether a blast volume of mesh radius `radius` is the one of `bomb`'s blast: the bomb's radius (300 or 600 by
-/// its kind option; the Trigger Bomb's without one), the volume a little larger (325 and 620 on the disc).
-pub fn blast_volume_matches(world: &World, bomb: Handle, radius: f32) -> bool {
-    let kind = world.options(bomb).and_then(|o| o.i32(BOMB_KIND)).unwrap_or(7);
-    let blast = engine::gang::gadgets::blast_of(kind.clamp(0, 255) as u8).map_or(300.0, |b| b.radius as f32);
-    radius >= blast && radius <= blast * 1.15
+/// The copy `gadget` is out of its pool as, if it is.
+fn copy_of(world: &World, gadget: Handle) -> Option<GadgetCopy> {
+    world.shared.gadget_copies.iter().find(|g| g.object == gadget).copied()
 }
 
-/// Whether a part of `object` shows now.
-pub fn part_shown(world: &World, object: Handle, volume: bool, radius: f32) -> bool {
+/// The bomb kind a mesh group of `bentley_mine` belongs to (gadgets.md 7.1.1), from the mesh's transform (the
+/// light cards: 15–18 Trigger, 11–14 Snooze, 7–10 Reduction, 3–6 Rage) or, for a sphere (transform 2, a kind-3
+/// volume), its radius and colour (325 red Trigger, 325 green Snooze, 620 green Reduction, 620 purple Rage).
+pub fn bomb_group(transform: i16, volume: bool, radius: f32, tint: [u8; 4]) -> Option<u8> {
+    match transform {
+        15..=18 => Some(7),
+        11..=14 => Some(9),
+        7..=10 => Some(13),
+        3..=6 => Some(37),
+        2 if volume && radius > 300.0 => {
+            let green = tint[1] > tint[0] && tint[1] > tint[2];
+            Some(match (radius < 470.0, green) {
+                (true, false) => 7,
+                (true, true) => 9,
+                (false, true) => 13,
+                (false, false) => 37,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether a triggered bomb's groups show `t` seconds into the blink.
+pub fn blink_shown(t: f32) -> bool {
+    let frame = t * 60.0;
+    let toggles = BLINK.iter().take_while(|&&f| f32::from(f) <= frame).count();
+    toggles % 2 == 0 && t < BLINK_TIME
+}
+
+/// The kind group an item's copy shows (the Trigger Bomb is item 7, its kind 5 or 7).
+fn group_of_item(item: u8) -> u8 {
+    if item == 5 { 7 } else { item }
+}
+
+/// Whether a part shows now: its object in the world, active and visible; a gadget's only while its copy is out;
+/// a bomb group's only for the copy's kind, while armed, or blinking `blink` seconds into its countdown.
+pub fn part_shown(world: &World, object: Handle, group: Option<u8>, blink: Option<f32>) -> bool {
     if !(world.in_world(object) && world.is_active(object) && world.is_visible(object)) {
         return false;
     }
-    let Some(bomb) = bomb_of(world, object) else { return !pool_template(world, object) };
-    if pool_template(world, bomb) {
+    let Some(gadget) = gadget_of(world, object) else { return true };
+    let Some(copy) = copy_of(world, gadget) else { return false };
+    let Some(group) = group else { return true };
+    if world.class(gadget) != Some(BOMB_CLASS) || group != group_of_item(copy.item) {
         return false;
     }
-    // A bomb's volumes: only while it is placed (out of the characters), and only its blast's.
-    !volume || (!under_character(world, bomb) && blast_volume_matches(world, bomb, radius))
+    match copy.state {
+        2 => true,
+        3 => blink.is_some_and(blink_shown),
+        _ => false,
+    }
 }
 
 /// A dynamic draw as placed on the renderer.
@@ -128,6 +154,10 @@ pub struct PlacedDraw {
     pub record: u32,
     pub volume: bool,
     pub radius: f32,
+    /// The scene mesh's index in its set.
+    pub mesh_index: u32,
+    /// Its material's constant colour (volumes).
+    pub tint: [u8; 4],
 }
 
 impl AttachedParts {
@@ -166,10 +196,19 @@ impl AttachedParts {
                     }
                     id
                 };
-                parts.push(Part { id, object, local, volume: d.volume, radius: d.radius, shown: true });
+                // A bomb's mesh groups, by the mesh's transform in its set.
+                let group = gadget_of(world, object)
+                    .filter(|&g| world.class(g) == Some(BOMB_CLASS))
+                    .and_then(|_| world.sly2_record(object))
+                    .and_then(|r| match &r.body {
+                        formats_sly2::stream::Body::Solid(s) => s.meshes.meshes.get(d.mesh_index as usize),
+                        _ => None,
+                    })
+                    .and_then(|m| bomb_group(m.transform, d.volume, d.radius, d.tint));
+                parts.push(Part { id, object, local, group, shown: true });
             }
         }
-        Ok(AttachedParts { parts })
+        Ok(AttachedParts { parts, triggered: Vec::new() })
     }
 
     /// Parts.
@@ -187,10 +226,24 @@ impl AttachedParts {
         self.parts.iter().filter(|p| p.shown).count()
     }
 
-    /// Moves the shown parts to their objects and shows or hides each (call once per rendered frame).
-    pub fn update<B: Backend>(&mut self, r: &mut Renderer<B>, world: &World) -> Result<(), RenderError> {
+    /// Moves the shown parts to their objects and shows or hides each (call once per rendered frame, `dt` the time
+    /// played since the last).
+    pub fn update<B: Backend>(&mut self, r: &mut Renderer<B>, world: &World, dt: f32) -> Result<(), RenderError> {
+        // The triggered bombs' blink clocks: started on state 3, dropped once the copy leaves it.
+        let copies = &world.shared.gadget_copies;
+        self.triggered.retain(|(h, _)| copies.iter().any(|g| g.object == *h && g.state == 3));
+        for (_, t) in &mut self.triggered {
+            *t += dt;
+        }
+        for g in copies.iter().filter(|g| g.state == 3) {
+            if !self.triggered.iter().any(|(h, _)| *h == g.object) {
+                self.triggered.push((g.object, 0.0));
+            }
+        }
         for p in &mut self.parts {
-            let shown = part_shown(world, p.object, p.volume, p.radius);
+            let blink =
+                gadget_of(world, p.object).and_then(|g| self.triggered.iter().find(|(h, _)| *h == g)).map(|(_, t)| *t);
+            let shown = part_shown(world, p.object, p.group, blink);
             if shown && let Some(w) = world.world_transform(p.object) {
                 r.set_transform(p.id, mat4(&w) * p.local)?;
             }
@@ -200,5 +253,33 @@ impl AttachedParts {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bomb_groups_by_transform_and_sphere() {
+        assert_eq!(bomb_group(16, false, 14.0, [255; 4]), Some(7));
+        assert_eq!(bomb_group(12, false, 14.0, [255; 4]), Some(9));
+        assert_eq!(bomb_group(8, false, 14.0, [255; 4]), Some(13));
+        assert_eq!(bomb_group(4, false, 14.0, [255; 4]), Some(37));
+        assert_eq!(bomb_group(2, true, 325.0, [255, 0, 2, 76]), Some(7));
+        assert_eq!(bomb_group(2, true, 325.0, [4, 220, 1, 76]), Some(9));
+        assert_eq!(bomb_group(2, true, 620.0, [4, 220, 1, 76]), Some(13));
+        assert_eq!(bomb_group(2, true, 620.0, [179, 0, 220, 76]), Some(37));
+        // The body and its shadow belong to no group.
+        assert_eq!(bomb_group(2, false, 15.0, [255; 4]), None);
+        assert_eq!(bomb_group(1, true, 201.0, [0, 0, 0, 52]), None);
+    }
+
+    #[test]
+    fn the_blink_quickens_and_ends() {
+        // Shown until frame 20, hidden 20..30, shown 30..50, ... hidden from 108 on; over after 112 frames.
+        let at = |f: f32| blink_shown(f / 60.0);
+        assert!(at(0.0) && at(19.0) && !at(20.0) && !at(29.0) && at(30.0) && at(49.0) && !at(50.0));
+        assert!(at(103.0) && at(107.0) && !at(108.0) && !at(111.0) && !at(112.0) && !at(200.0));
     }
 }

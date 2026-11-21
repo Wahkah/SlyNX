@@ -53,6 +53,22 @@ pub enum SeqCommand {
         /// The state asked for.
         state: i32,
     },
+    /// Option 670: add an object to the world (object, time, flag; missions.md 4.1).
+    AddObject(i32),
+    /// Option 671: remove an object from the world.
+    RemoveObject(i32),
+    /// Option 634: raise script event 4 on the sequence's own module with this value (missions.md 4.1).
+    Value(i32),
+    /// Option 635: play a clip (clip, object or −1 for the clip's own rig, no-wait flag, apply flags; camera.md
+    /// 7.2.1). The runner does not wait for it yet.
+    PlayClip {
+        /// The clip's object ID.
+        clip: i32,
+        /// The target's object ID, or −1.
+        object: i32,
+        /// Apply flags (option 106's: 8 loop, 16 back and forth, 32 hold).
+        flags: i32,
+    },
     /// Option 682 (command 0x38): open a camera block, a timed move from `from` to `to` (the matching 683's values)
     /// over `duration` seconds (0: the block's contents) on curve `curve` (camera.md 2.1.1).
     CameraOpen {
@@ -92,6 +108,14 @@ pub enum SeqCommand {
 pub const START_SUB_SEQUENCE: i16 = 636;
 /// Option 642 (command 0x11): set a task's state (task, state).
 pub const TASK_STATE: i16 = 642;
+/// Option 670: add an object (object, time, flag).
+pub const ADD_OBJECT: i16 = 670;
+/// Option 671: remove an object.
+pub const REMOVE_OBJECT: i16 = 671;
+/// Option 634: call the sequence's script with a value (event 4).
+pub const SCRIPT_VALUE: i16 = 634;
+/// Option 635: play a clip.
+pub const PLAY_CLIP: i16 = 635;
 /// Camera block options (camera.md 2.1.1): open (0x38), end (0x39), end the runner's view (0x3A).
 pub const CAMERA_OPEN: i16 = 682;
 /// See [`CAMERA_OPEN`].
@@ -165,6 +189,22 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
         .filter_map(|o| {
             let (at, len) = (o.value.0 as usize, o.value.1 as usize);
             let v = bytes.get(at..at + len)?;
+            if o.id == PLAY_CLIP {
+                let a = typed_args(v)?;
+                return Some(SeqCommand::PlayClip {
+                    clip: int_of(a.first()?.1),
+                    object: a.get(1).map_or(-1, |x| int_of(x.1)),
+                    flags: a.get(3).map_or(0, |x| int_of(x.1)),
+                });
+            }
+            if o.id == ADD_OBJECT || o.id == REMOVE_OBJECT || o.id == SCRIPT_VALUE {
+                let n = int_of(typed_args(v)?.first()?.1);
+                return Some(match o.id {
+                    ADD_OBJECT => SeqCommand::AddObject(n),
+                    REMOVE_OBJECT => SeqCommand::RemoveObject(n),
+                    _ => SeqCommand::Value(n),
+                });
+            }
             if o.id == CAMERA_OPEN {
                 let a = typed_args(v)?;
                 let from = cam_args(&a)?;
@@ -249,6 +289,8 @@ pub struct Sly2Sound {
     sub_starts: Vec<Handle>,
     /// Task states asked for (option 642).
     task_requests: Vec<(i32, i32)>,
+    /// Object and script commands (670, 671, 634) with their sequence, for the session.
+    world_cues: Vec<(Handle, SeqCommand)>,
     /// Camera blocks run (options 682 to 684).
     camera_cues: Vec<CameraCue>,
     /// The world's music streams queued by scripts (action 146).
@@ -276,6 +318,7 @@ impl Sly2Sound {
             sequences: Vec::new(),
             sub_starts: Vec::new(),
             task_requests: Vec::new(),
+            world_cues: Vec::new(),
             camera_cues: Vec::new(),
             music: MusicQueue::new(),
             live: Vec::new(),
@@ -365,6 +408,11 @@ impl Sly2Sound {
         total
     }
 
+    /// Object and script commands the running sequences ran this frame (options 670, 671, 634), with their sequence.
+    pub fn take_world_cues(&mut self) -> Vec<(Handle, SeqCommand)> {
+        core::mem::take(&mut self.world_cues)
+    }
+
     /// What the running sequences asked of the camera this frame (options 682 to 684).
     pub fn take_camera_cues(&mut self) -> Vec<CameraCue> {
         core::mem::take(&mut self.camera_cues)
@@ -423,6 +471,15 @@ impl Sly2Sound {
                 }
                 SeqCommand::Task { task, state } => {
                     self.task_requests.push((task, state));
+                    seq.at += 1;
+                    continue;
+                }
+                SeqCommand::AddObject(_)
+                | SeqCommand::RemoveObject(_)
+                | SeqCommand::Value(_)
+                | SeqCommand::PlayClip { .. } => {
+                    // Done by the session (it has the world), in order with the task requests.
+                    self.world_cues.push((seq.object, cmd));
                     seq.at += 1;
                     continue;
                 }

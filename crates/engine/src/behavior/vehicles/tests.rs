@@ -250,6 +250,12 @@ fn biplane_pilot_scores_targets_and_fires_at_its_rate() {
     assert!((9..=11).contains(&b.shots.len()), "{}", b.shots.len());
     let v = b.shots[0].velocity;
     assert!(crate::math::length(v) > air::SHOT_SPEED * 0.9);
+    // Launching sends them as projectiles and empties the list, so it never grows while flying.
+    let mut w = w;
+    let n = b.shots.len();
+    b.launch(&mut w, h);
+    assert!(b.shots.is_empty());
+    assert_eq!(w.shared.vehicles.shots.len(), n);
 }
 
 #[test]
@@ -381,4 +387,18 @@ fn hack_ship_is_destroyed_at_zero_and_ignores_hits_meanwhile() {
     assert!(ship.hit(&mut w, 6.0));
     assert_eq!((ship.hit_points, ship.state), (0.0, 4), "destroyed: lost");
     assert!(!ship.hit(&mut w, 1.0));
+}
+
+#[test]
+fn the_machine_index_is_cached_and_follows_the_world() {
+    let (mut w, h) = one(58);
+    assert_eq!(shots::candidates(&mut w), alloc::vec![h]);
+    // Cached: the same list until the object count changes or the refresh comes round.
+    let built = w.shared.vehicles.index.clone();
+    assert_eq!(shots::candidates(&mut w), alloc::vec![h]);
+    assert_eq!(w.shared.vehicles.index.handles_for_test(), built.handles_for_test());
+    for _ in 0..shots::Index::REFRESH {
+        shots::candidates(&mut w);
+    }
+    assert_eq!(shots::candidates(&mut w), alloc::vec![h], "rebuilt after the refresh");
 }

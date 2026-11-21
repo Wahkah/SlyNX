@@ -42,6 +42,23 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release smrun.cpp, update.cpp (state-change and playback script handlers)
     used_for: the playback-events paragraph in section 6 (2026-11-19)
+  - kind: disc
+    what: >-
+      executable SCUS_973.16 after the hash check: built-in table at 0x2BBB90, entries 133 (routine 0x125510, at
+      least 1 argument, fixed) and 134 (routine 0x1255C0, at least 0 arguments, any number); both routines and the
+      symbol lookup at 0x127DB8 read as machine code
+    used_for: the op133 search rule, its unfound result and operation 134 in section 4.3 (2026-11-20)
+  - kind: reference-project
+    what: >-
+      sly2-decomp @ 33e2bab9, src/splice-bif-splice-eval/fun_00125510.cpp and fun_001255c0.cpp,
+      src/splice-eval-splice-frame (symbol lookup), include/cref.h; SafeHouse @ c70803ce, Sly2-Release frame.h,
+      frame.cpp, splicemap.cpp, loaders.cpp, activate.cpp, eval.cpp, gamebif.cpp
+    used_for: >-
+      cross-check of op133 and op134; where module frames come from and when they gain a parent (section 4.3,
+      2026-11-20)
+  - kind: disc
+    what: 2026-11-20 survey of the 209 op133 calls against the placements' bind indexes in all 43 worlds
+    used_for: the survey counts in section 4.3
 reviewed_by: pending
 date: 2026-11-14
 ---
@@ -233,7 +250,7 @@ Sly 1 section 7 applies.
 | 129 | 2 | 96 | play a sound effect | 119 |
 | 130 | 2 | 265 | controller rumble | 121 |
 | 131 | 1 | 9 | read a saved progress value by a path: a quoted list of name symbols that names a save variable ([saving.md](saving.md)) [R]; counterpart of op 132, which writes one. (Not a sound operation.) | |
-| 133 | 1 | 209 | look up a symbol's value in the running procedure's defining environment (4.3) | |
+| 133 | 1 | 209 | the definition of a symbol that the running module replaced: looked up from the parent of the running procedure's module frame; unfound gives operation 134, a no-op (4.3) | |
 | 137 | 0 | 802 | the on-screen **prompt** object of the HUD ([user-interface.md](user-interface.md)); scripts call its option 979 to show a prompt; class 154's options [R] | |
 | 138, 139 | 1, 2 | 15, 18 | owned-item flags of the item table ([characters.md](characters.md) 6, [saving.md](saving.md)): 138 gives whether item n is owned (false for n = −1); 139 sets item n's flag to a boolean and, when it sets it, raises task event 59 as a purchase does [R]. Not pickpocket items | |
 
@@ -290,11 +307,33 @@ Argument forms counted on the disc [D]; behaviour [R] from the reference sources
   no extra argument, 75 with one, 40 with two, 3 with three, 1 with four.
 - **106, cancel.** Its argument is an ID returned by 105; the queued call with that ID is removed (nothing happens if
   it already ran). Gives "no value".
-- **133, symbol value.** The argument is evaluated; its 32-bit payload is used as a symbol ID without checking its
-  kind, so a quoted symbol and an integer with the same number behave alike. On the disc all 209 calls pass a quoted
-  symbol, `(op133 (quote sN))`. The lookup starts from the frame of the running procedure call and searches the
-  environment in which that procedure was defined, outward (not the caller's local bindings). If the symbol is not
-  bound, the result is **built-in operation 134** as a value (operation 134 never appears on the disc).
+- **133, the shadowed definition.** The argument is evaluated; its 32-bit payload is used as a symbol ID without
+  checking its kind, so a quoted symbol and an integer with the same number behave alike. On the disc all 209 calls
+  pass a quoted symbol, always one the same module defines, in the form `((op133 (quote sN)) …)` inside the
+  definition of sN. The call reaches the definition of sN that the running module **replaced** [D] [R]:
+  - From the frame of the running procedure call, the game walks up through enclosing frames until it reaches the
+    first **module frame** (the frame a module was evaluated in). Every frame on the way, the module frame included,
+    must have exactly one parent; a frame with none or with more than one ends the search unfound.
+  - The symbol is then looked up starting at the module frame's **parent**, not in the module frame itself, with the
+    ordinary lookup: that frame's own bindings first, then its parents' and theirs, each frame once. The running
+    module's own sN is therefore skipped because its whole frame is skipped. Nothing compares the binding with the
+    running procedure.
+  - A module frame gets a parent only from a placement that **binds** a module to an object of the copied package
+    (the `index` of a fresh block or copy patch, [classes/placement.md](classes/placement.md) 1.1, 1.2). The bound
+    module's frame takes the object's previous frame, normally the frame of the object's own module, as its parent,
+    then replaces it [R]. A copy patch does this at load. A fresh placement's bind to another target (6 is the first
+    object) does it when the object is attached, unless the placement holds its objects back. A fresh placement's
+    target-5 bind sets the module with no parent. A module bound to an object that had no frame, and every module an
+    object names as its own, has no parent, so in it op133 always comes back unfound.
+  - **Unfound gives built-in operation 134 as a value**, not "no value". Operation 134 takes any number of
+    arguments, ignores them and gives **"no value"**. So when nothing is found, the
+    handler's call of the result does nothing [D] [R]. Operation 134 never appears on the disc.
+  - Survey of the 209 calls (all worlds, against the placements' bind indexes) [D]: in 47 calls the bound object's
+    own module defines the same sN, so the call runs that handler (33 under copy patches, 14 under fresh placements'
+    attach-time binds). In 65 calls the result is operation 134: 27 where the bound object has no module, 38 where
+    its module lacks sN. In 7 calls the bind's target object was not located by the survey, and 90 calls sit in
+    modules that no placement outside solid bodies binds. Those 97 are uncounted. No module containing op133 is
+    bound by more than one placement, and none is the own module of a top-level object record.
 
 ## 5. Options from scripts
 

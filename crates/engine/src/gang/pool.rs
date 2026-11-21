@@ -25,7 +25,7 @@ pub const KIND_OPTION: u16 = 1104;
 pub const HAND: Vec3 = [30.0, 0.0, 100.0];
 
 /// One copy out of its pool.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GadgetCopy {
     /// The copy.
     pub object: Handle,
@@ -35,7 +35,12 @@ pub struct GadgetCopy {
     pub item: u8,
     /// Its carry state (0 held, 1 flying, 2 landed, 3 used, 4 fading, 5 the Health Extractor at work).
     pub state: u8,
+    /// Time left in a triggered bomb's countdown (state 3), when one runs.
+    pub countdown: Option<f32>,
 }
+
+/// A triggered bomb's countdown (the blink) before it goes off.
+pub const BOMB_COUNTDOWN: f32 = 1.87;
 
 /// The gadget class an item's copy comes from (gadgets.md 6): Bentley's Trigger Bomb (7) is a bomb; the pocket
 /// items (26, 37, 38, 41) are carryable objects.
@@ -69,7 +74,7 @@ pub fn take(world: &mut World, character: Handle, item: u8) -> Option<Handle> {
         o.set(KIND_OPTION, OptionValue::Int(i32::from(item)));
     }
     world.shared.gadget_copies.retain(|g| g.object != copy);
-    world.shared.gadget_copies.push(GadgetCopy { object: copy, pool, item, state: 0 });
+    world.shared.gadget_copies.push(GadgetCopy { object: copy, pool, item, state: 0, countdown: None });
     world.update_transforms();
     Some(copy)
 }
@@ -104,6 +109,33 @@ pub fn landing(from: Vec3, velocity: Vec3, gravity: f32, max_time: f32) -> Vec3 
     add(from, [velocity[0] * t, velocity[1] * t, 0.0])
 }
 
+/// Triggers a copy: state 3, with the bomb's countdown before it goes off ([`step`]).
+pub fn trigger(world: &mut World, copy: Handle) {
+    if let Some(g) = world.shared.gadget_copies.iter_mut().find(|g| g.object == copy) {
+        g.state = 3;
+        g.countdown = Some(BOMB_COUNTDOWN);
+    }
+}
+
+/// One step of the copies' countdowns: a bomb whose countdown ends goes off (a blast notice on the copy, which the
+/// bomb behaviour turns into its blast) and returns to its pool. Returns the copies that went off.
+pub fn step(world: &mut World, dt: f32) -> alloc::vec::Vec<Handle> {
+    let mut done = alloc::vec::Vec::new();
+    for g in &mut world.shared.gadget_copies {
+        if let Some(t) = &mut g.countdown {
+            *t -= dt;
+            if *t <= 0.0 {
+                done.push(g.object);
+            }
+        }
+    }
+    for &h in &done {
+        world.notify(h, crate::world::Notice::Blast(h, [0.0; 3]));
+        return_copy(world, h);
+    }
+    done
+}
+
 /// Returns a copy to its pool: back into the pool's group, out of the world (state 4 done).
 pub fn return_copy(world: &mut World, copy: Handle) {
     let Some(g) = world.shared.gadget_copies.iter().find(|g| g.object == copy).copied() else { return };
@@ -117,6 +149,11 @@ pub fn return_copy(world: &mut World, copy: Handle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn countdown_constant() {
+        assert_eq!(BOMB_COUNTDOWN, 1.87);
+    }
 
     #[test]
     fn items_and_landing() {

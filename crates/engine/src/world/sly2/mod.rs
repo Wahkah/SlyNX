@@ -355,6 +355,9 @@ pub enum CustomValue {
 /// for other worlds. The aim managers' properties 1314 to 1317 are among them: without them their searches find
 /// nothing and call the undefined procedure 1533.
 pub fn custom_properties(world: &World) -> Vec<CustomProperty> {
+    if world.sly3.is_some() {
+        return sly3_custom_properties(world); // Sly 3 hook
+    }
     let Some(l) = world.sly2.as_deref() else { return Vec::new() };
     let mut out = Vec::new();
     for (slot, option, args) in &l.actions {
@@ -374,6 +377,38 @@ pub fn custom_properties(world: &World) -> Vec<CustomProperty> {
         out.push(CustomProperty { object: h, placement, id, value });
     }
     out
+}
+
+/// Sly 3 hook (missions.md 4.2): stream option 8 is the custom-property setter for every class, a load-time method
+/// (property ID as tag 21, value); the value keeps its own kind. A placement's (class 8) setters apply to its placed
+/// copy's root (its first child), after the objects' own, so they override them: v_ext's placement 121540 sets
+/// waypoint 35785's property 1990 (its task) to 2086 over the waypoint's own −1.
+fn sly3_custom_properties(world: &World) -> Vec<CustomProperty> {
+    let Some(l) = world.sly3.as_deref() else { return Vec::new() };
+    let (mut own, mut placed) = (Vec::new(), Vec::new());
+    for (slot, option, args) in &l.actions {
+        if *option != 8 {
+            continue;
+        }
+        let (Some(h), [Arg::Short(21, id), value]) = (world.handle(*slot), &args[..]) else { continue };
+        let Ok(id) = u32::try_from(*id) else { continue };
+        let value = match value {
+            Arg::Bool(b) => CustomValue::Bool(*b),
+            Arg::Float(f) => CustomValue::Float(*f),
+            Arg::Int(i) => CustomValue::Int(*i),
+            Arg::Short(_, i) => CustomValue::Int(*i as i32),
+            _ => continue,
+        };
+        if world.class(h) == Some(formats_sly3::stream::PLACEMENT) {
+            if let Some(root) = world.children(h).next() {
+                placed.push(CustomProperty { object: root, placement: None, id, value });
+            }
+        } else {
+            own.push(CustomProperty { object: h, placement: None, id, value });
+        }
+    }
+    own.extend(placed);
+    own
 }
 
 /// Stores `props` in the interpreter before any script runs. A placement's properties go to its copy's root, the

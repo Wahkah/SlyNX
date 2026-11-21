@@ -18,6 +18,9 @@ use crate::object::{Handle, OptionValue};
 use crate::world::World;
 use crate::world::shared::Hiding;
 
+/// A player move longer than this in one frame is a placement, not motion: the camera starts again behind it.
+pub const TELEPORT: f32 = 1500.0;
+
 /// A mount the camera rides (a turret or a vehicle seat; camera.md 2, priority 9): the eye at `offset` in the
 /// object's frame (forward, left, up), looking along the object's forward axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +42,8 @@ pub struct CameraSystem {
     configured: bool,
     /// Sly 2 / Sly 3: the first frame placed the camera behind the player.
     started: bool,
+    /// The player's position last frame (a jump past `TELEPORT` is a placement: the camera starts again).
+    player_last: Option<crate::math::Vec3>,
     /// What the camera follows instead of the player (a driven machine): as set here, as followed this frame, and
     /// its position last frame.
     target: Option<Handle>,
@@ -77,6 +82,7 @@ impl CameraSystem {
             sly_zones: Vec::new(),
             configured: false,
             started: false,
+            player_last: None,
             target: None,
             following: None,
             target_last: None,
@@ -322,6 +328,13 @@ impl CameraSeam for CameraSystem {
             return self.finish(world, input, real_dt, collision, &subject);
         }
         let player = Self::player(world);
+        // A sudden placement of the player (`PlayerSystem::place`, a warp) starts the camera again behind it.
+        if let Some((_, t)) = player {
+            if self.player_last.is_some_and(|p| crate::math::length(crate::math::sub(t.t, p)) > TELEPORT) {
+                self.started = false;
+            }
+            self.player_last = Some(t.t);
+        }
         // Sly 2 / Sly 3: the first frame with a player starts behind it at the framing's distance and height, as a
         // cut (the view clearing and the cut search then apply), whatever the session cut to before.
         if !self.started

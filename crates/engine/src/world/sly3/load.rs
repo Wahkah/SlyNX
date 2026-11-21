@@ -19,6 +19,10 @@ use crate::math::affine_inverse;
 use crate::object::{MAX_OBJECTS, flags};
 use crate::world::{LevelData, LoadError, NONE, World};
 
+/// Jobs and tasks: loaded whatever the world filter (missions.md 4.1a).
+const JOB_CLASS: i16 = 168;
+const TASK_CLASS: i16 = 169;
+
 /// Class IDs a Sly 3 world can hold (0 to 255); the per-class index is widened to this at load.
 pub const SLY3_CLASS_SLOTS: usize = 256;
 
@@ -31,6 +35,8 @@ pub struct LoadStats {
     pub copies: u32,
     /// Mode-1 records left out by their world filter or conditions (each with its subtree).
     pub excluded: u32,
+    /// Sly 3 hook (job system): jobs and tasks of other worlds, loaded out of the world (missions.md 4.1a).
+    pub off_world: u32,
     /// Mode-2 and mode-3 records left out because their ID already existed in the group or copy.
     pub clone_skips: u32,
     /// Objects out of the world at start (option 27, a bind carrying it, or a grouper's objects).
@@ -306,7 +312,10 @@ impl<'b> Loader<'b> {
     }
 
     fn record(&mut self, w: &mut World, r: &'b Record, cx: Cx<'_>) -> Result<(), LoadError> {
-        if !r.loaded(&self.context) {
+        // Sly 3 hook (job system): jobs and tasks (classes 168, 169) of other worlds load anyway, marked off-world
+        // (missions.md 4.1a): out of the world, so they get no task events, but present for the job graph.
+        let off_world = !r.loaded(&self.context);
+        if off_world && !matches!(r.class, JOB_CLASS | TASK_CLASS) {
             self.level.stats.excluded += 1;
             return Ok(());
         }
@@ -388,7 +397,7 @@ impl<'b> Loader<'b> {
         if let Some(list) = r.options() {
             self.apply(w, slot, list);
         }
-        if cx.held {
+        if cx.held || off_world {
             w.flags[i] &= !flags::IN_WORLD;
         }
 
@@ -409,7 +418,9 @@ impl<'b> Loader<'b> {
             }
             _ => {}
         }
-        if w.flags[i] & flags::IN_WORLD == 0 {
+        if off_world {
+            self.level.stats.off_world += 1;
+        } else if w.flags[i] & flags::IN_WORLD == 0 {
             self.level.stats.removed_at_start += 1;
         }
         Ok(())

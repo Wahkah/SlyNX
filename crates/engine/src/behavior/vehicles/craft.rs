@@ -153,6 +153,8 @@ impl ClassBehavior for Raft {
             cx.world.play_sound(42, Some(cx.me));
         }
         self.paddle(&pad, h, cx.dt);
+        // The cannon's shots are not sent as projectiles yet (no rule in the spec); dropped so they do not pile up.
+        self.shots.clear();
         let Some(p) = cx.world.position(cx.me) else { return };
         place(cx.world, cx.me, crate::math::madd(p, self.velocity, cx.dt), orientation(self.heading, 0.0, 0.0));
     }

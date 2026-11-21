@@ -6,18 +6,16 @@
 //! get `Notice::Hit` from the shooter; the gang's characters (not the shooter's driver), which take the contact
 //! (kind `0x100`, 10) through `World::shared.gang_hits`; and other machines, which get `Notice::Hit`. A shot ends at
 //! its first hit or when its life runs out. The projectiles' own objects (pool templates, option 1701's templates)
-//! are not spawned; the sessions draw a streak for each (`game::shot_marks`). Speeds: turret 800 (the missiles'
-//! default; the launchers' own settings are not read), combat car solved for its target, biplane (Sly 3) option
+//! are not spawned; the sessions draw a streak for each (`game::shot_marks`). Speeds: turret its launcher's (option 1003's
+//! object, option 509; else the missiles' default, 800), combat car solved for its target, biplane (Sly 3) option
 //! 1703.
 //!
 //! **Jobs** ([`follow_job`], called with the current job after the job system's step: Sly 2 in the game loop, Sly 3
 //! in its session, each a marked hook): when a job begins, the machines already active are noted; while it runs, the
 //! first machine of a driveable class that becomes active (a task's switches or script brought it in) is driven
 //! (`World::shared.driving`, and the camera follows it); when the job ends the player gets the characters back. In
-//! a Sly 2 hacking job, a current station task brings the hacking ship's placement into the world. In the game the
-//! task's event-19 handler calls its job's property 1286 (focus, hack area) and starts sequence 2410, whose
-//! handlers call property 1285 and open the dock (10.3); until those properties' effects run here, the hook stands
-//! in [I].
+//! a Sly 2 hacking job the ship comes by script: the station task's event-19 handler starts sequence 2410, whose
+//! command 670 adds the ship's placement (vehicles-and-minigames.md 10.3).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -50,6 +48,46 @@ pub struct Shared {
     pub job: Option<(i32, Vec<Handle>, Option<Handle>)>,
     /// Hits counted (guards, characters, machines).
     pub hits: [u32; 3],
+    /// The objects the machines look for every frame (guards, machines, biplanes), so they need not scan the whole
+    /// world: see [`candidates`].
+    pub index: Index,
+}
+
+/// A cached list of the world's guards and machines, rebuilt when the object count changes and every
+/// [`Index::REFRESH`] uses (objects spawned into a freed slot are picked up within that many).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Index {
+    key: (usize, usize),
+    uses: u32,
+    built: bool,
+    handles: Vec<Handle>,
+}
+
+impl Index {
+    pub const REFRESH: u32 = 240;
+
+    #[cfg(test)]
+    pub(crate) fn handles_for_test(&self) -> &[Handle] {
+        &self.handles
+    }
+}
+
+/// The world's guards (class 58), machines and Sly 3 biplanes (82), from the cached [`Index`]; handles that no
+/// longer exist are left out.
+pub fn candidates(world: &mut World) -> Vec<Handle> {
+    let key = (world.slot_count(), world.len());
+    let ix = &world.shared.vehicles.index;
+    if !ix.built || ix.key != key || ix.uses >= Index::REFRESH {
+        let handles: Vec<Handle> = world
+            .handles()
+            .filter(|&h| world.class(h).is_some_and(|c| c == 58 || c == 82 || is_machine(world, c)))
+            .collect();
+        world.shared.vehicles.index = Index { key, uses: 0, built: true, handles };
+    }
+    let ix = &mut world.shared.vehicles.index;
+    ix.uses += 1;
+    let list = ix.handles.clone();
+    list.into_iter().filter(|&h| world.contains(h)).collect()
 }
 
 /// A projectile's blast radius (its owner's radius setting, both defaulting to 200) and its contact: kind 0x100,
@@ -82,8 +120,8 @@ pub fn step(world: &mut World, dt: f32) {
     if world.shared.vehicles.shots.is_empty() {
         return;
     }
-    let targets: Vec<(Handle, i16, Vec3)> = world
-        .handles()
+    let targets: Vec<(Handle, i16, Vec3)> = candidates(world)
+        .into_iter()
         .filter(|&h| world.is_active(h))
         .filter_map(|h| {
             let c = world.class(h)?;
@@ -128,23 +166,15 @@ pub fn step(world: &mut World, dt: f32) {
 }
 
 /// The active machines the player could drive.
-fn active_machines(world: &World) -> Vec<Handle> {
-    world.handles().filter(|&h| world.is_active(h) && world.class(h).is_some_and(|c| driveable(world, c))).collect()
-}
-
-/// Brings `h` and its ancestors into the world.
-fn bring_in(world: &mut World, h: Handle) {
-    let mut p = Some(h);
-    while let Some(q) = p {
-        if !world.in_world(q) {
-            world.set_in_world(q, true);
-        }
-        p = world.parent(q);
-    }
+fn active_machines(world: &mut World) -> Vec<Handle> {
+    candidates(world)
+        .into_iter()
+        .filter(|&h| world.is_active(h) && world.class(h).is_some_and(|c| driveable(world, c)))
+        .collect()
 }
 
 /// Follows the current job (`job` its object ID, `task` the current task's internal name): see the module.
-pub fn follow_job(world: &mut World, job: Option<i32>, task: Option<&str>) {
+pub fn follow_job(world: &mut World, job: Option<i32>, _task: Option<&str>) {
     let st = world.shared.vehicles.job.clone();
     match (job, st) {
         (None, None) => {}
@@ -168,15 +198,6 @@ pub fn follow_job(world: &mut World, job: Option<i32>, task: Option<&str>) {
                     (active_machines(world), None)
                 }
             };
-            if world.sly2.is_some() && task.is_some_and(|t| t.contains("hack_station")) {
-                let ships: Vec<Handle> = world.handles().filter(|&h| world.class(h) == Some(72)).collect();
-                if let Some(&ship) =
-                    ships.iter().find(|&&h| !world.is_active(h)).filter(|_| !ships.iter().any(|&h| world.is_active(h)))
-                {
-                    bring_in(world, ship);
-                    world.update_transforms();
-                }
-            }
             let mut handed = handed;
             if world.shared.driving.is_none() && handed.is_none() {
                 let new = active_machines(world).into_iter().find(|h| !baseline.contains(h));

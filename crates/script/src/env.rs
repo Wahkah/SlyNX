@@ -72,6 +72,17 @@ impl Heap {
         self.live
     }
 
+    /// The binding of `sym`, searched from `r` outwards, passing over bindings whose value `skip` accepts.
+    pub fn lookup_skipping(&self, mut r: EnvRef, sym: u32, skip: impl Fn(&Value) -> bool) -> Option<Value> {
+        loop {
+            let e = self.get(r)?;
+            if let Some((_, v)) = e.bindings.iter().find(|(s, v)| *s == sym && !skip(v)) {
+                return Some(v.clone());
+            }
+            r = e.parent?;
+        }
+    }
+
     /// The binding of `sym`, searched from `r` outwards.
     pub fn lookup(&self, mut r: EnvRef, sym: u32) -> Option<Value> {
         loop {

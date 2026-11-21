@@ -299,6 +299,8 @@ pub struct DynamicDraw {
     pub volume: bool,
     /// The scene mesh's bounding radius.
     pub radius: f32,
+    /// The scene mesh's index in its mesh set.
+    pub mesh: u32,
 }
 
 /// Converts a Sly 2 or Sly 3 scene: materials by shader and list, meshes once per submesh, every vertex of lit kinds
@@ -523,7 +525,7 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
                 key,
                 zone,
                 bounds: world_bounds(&transform, lo, hi),
-                dynamic: moved.then_some((inst.record, volume, m.radius)),
+                dynamic: moved.then_some((inst.record, volume, m.radius, m.mesh)),
             });
         }
         if placed && pass != 1 {
@@ -536,8 +538,8 @@ pub fn prepare(input: SceneInput<'_>) -> Result<Prepared, String> {
         .iter()
         .enumerate()
         .filter_map(|(k, e)| {
-            let (record, volume, radius) = e.dynamic?;
-            Some(DynamicDraw { draw: k as u32, record, volume, radius })
+            let (record, volume, radius, mesh) = e.dynamic?;
+            Some(DynamicDraw { draw: k as u32, record, volume, radius, mesh })
         })
         .collect();
     g.draw_zones = kept.iter().map(|e| e.zone).collect();
@@ -646,8 +648,8 @@ struct Entry {
     zone: u32,
     /// World-space bounds (min, max).
     bounds: (Vec3, Vec3),
-    /// A [`SceneInput::dynamic`] draw: its record, whether it is a volume, the mesh radius.
-    dynamic: Option<(u32, bool, f32)>,
+    /// A [`SceneInput::dynamic`] draw: its record, whether it is a volume, the mesh radius and index in its set.
+    dynamic: Option<(u32, bool, f32, u32)>,
 }
 
 /// How far apart (game units) two pieces' bounds must be for their draw order not to matter: depth values of

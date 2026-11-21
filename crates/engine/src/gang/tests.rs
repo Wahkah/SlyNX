@@ -772,3 +772,44 @@ fn popup_hits_add_a_held_second_reaction() {
     d.hit(&sim.s.consts, &Hit { kind: health::kind::KNOCKBACK, ..hit }, &world, &mut out);
     assert_eq!(d.held_reaction, 0);
 }
+
+#[test]
+fn sly_swings_on_a_hook() {
+    use super::character::swing;
+    let mut sim = Sim::new();
+    let hook = [0.0, 0.0, 600.0];
+    sim.targets.push(Target { id: 77, position: hook, yaw: 0.0, kind: TargetKind::Hook });
+    // Cane reach: in the air with the hook as target, the cane tip passing within 15 of it catches it.
+    let mut c = Character::new(Who::Sly, [0.0; 3], 0.0);
+    c.leave_ground();
+    c.set_state(sly::AIR, &mut Vec::new());
+    c.reach = Some(77);
+    c.position = [-swing::TIP_AHEAD, 0.0, 600.0 - swing::TIP_HEIGHT];
+    c.velocity = [300.0, 0.0, 0.0];
+    sim.step(&mut c, &idle());
+    assert_eq!(c.state, sly::HOOK, "caught");
+    // The swing: on the rope, easing to 230; θ crosses 0 both ways; it slows without pumping.
+    let mut angles = Vec::new();
+    for _ in 0..240 {
+        sim.step(&mut c, &idle());
+        let r = crate::math::length(crate::math::sub(c.position, hook));
+        assert!((r - c.hook.unwrap().1).abs() < 0.5);
+        angles.push(c.swing_angle);
+    }
+    assert!((c.hook.unwrap().1 - swing::ROPE).abs() < 5.0, "{}", c.hook.unwrap().1);
+    assert!(angles.iter().any(|a| *a > 0.05) && angles.iter().any(|a| *a < -0.05), "{angles:?}");
+    let early = angles[..60].iter().fold(0.0f32, |m, a| m.max(a.abs()));
+    let late = angles[180..].iter().fold(0.0f32, |m, a| m.max(a.abs()));
+    assert!(late < early, "damped: {early} then {late}");
+    // Pumping ahead adds speed.
+    let w0 = crate::math::length(c.swing_omega);
+    let ahead = GangInput { stick: [0.0, 1.0], ..idle() };
+    for _ in 0..10 {
+        sim.step(&mut c, &ahead);
+    }
+    assert!(c.pump.0 == 1 && crate::math::length(c.swing_omega) != w0);
+    // Cross after 0.25 s jumps off, at least 700 up.
+    sim.press(&mut c, button::CROSS);
+    assert!(c.state != sly::HOOK && c.hook.is_none());
+    assert!(c.velocity[2] >= 650.0, "{:?}", c.velocity);
+}

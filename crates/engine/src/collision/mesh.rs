@@ -235,14 +235,23 @@ impl TriMesh {
     /// the tree calls solid, refined to `0.01`, and the triangle whose plane decided it. `None` when `p` is already
     /// solid or nothing solid is reached. It finds floors whose stored outline does not cover the point.
     pub fn tree_floor(&self, p: Vec3, down: Vec3, max_drop: f32) -> Option<(f32, u32)> {
+        // At most this many steps (a long drop takes longer steps) and bisection rounds, so a degenerate or
+        // tiny-scale placement (a huge or non-finite drop) cannot stall a frame.
         const STEP: f32 = 8.0;
+        const MAX_STEPS: f32 = 256.0;
+        const MAX_BISECT: u32 = 32;
+        let finite = |v: Vec3| v.iter().all(|x| x.is_finite());
+        if !finite(p) || !finite(down) || !max_drop.is_finite() || max_drop <= 0.0 {
+            return None;
+        }
         if self.point_inside_at(p)?.0 {
             return None;
         }
+        let step = STEP.max(max_drop / MAX_STEPS);
         let at = |d: f32| add(p, scale(down, d));
         let (mut empty, mut solid) = (0.0f32, None);
-        let mut d = STEP.min(max_drop);
-        loop {
+        let mut d = step.min(max_drop);
+        for _ in 0..=MAX_STEPS as u32 {
             if self.point_inside_at(at(d)).is_some_and(|s| s.0) {
                 solid = Some(d);
                 break;
@@ -251,10 +260,13 @@ impl TriMesh {
             if d >= max_drop {
                 break;
             }
-            d = (d + STEP).min(max_drop);
+            d = (d + step).min(max_drop);
         }
         let mut hi = solid?;
-        while hi - empty > 0.01 {
+        for _ in 0..MAX_BISECT {
+            if hi - empty <= 0.01 {
+                break;
+            }
             let mid = 0.5 * (empty + hi);
             if self.point_inside_at(at(mid)).is_some_and(|s| s.0) {
                 hi = mid;
@@ -422,6 +434,47 @@ impl TriMesh {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    #[test]
+    fn tree_floor_rejects_bad_drops_and_stays_bounded() {
+        // One floor surface at z = 0 (normal up): below it is solid.
+        let positions = alloc::vec![[-100.0, -100.0, 0.0], [100.0, -100.0, 0.0], [0.0, 100.0, 0.0]];
+        let tri = formats::collision::CollisionTriangle {
+            corners: [0, 1, 2],
+            radius: 200.0,
+            center: [0.0; 3],
+            first_edge: 0,
+            edge_count: 0,
+        };
+        let mesh = formats::collision::CollisionMesh {
+            radius: 200.0,
+            positions,
+            triangles: alloc::vec![tri],
+            edges: alloc::vec::Vec::new(),
+        };
+        let tree = formats::collision::CollisionTree {
+            nodes: alloc::vec![formats::collision::TreeNode {
+                triangle: 0,
+                negative: formats::collision::NO_CHILD,
+                positive: formats::collision::NO_CHILD,
+            }],
+            full_count: 1,
+        };
+        let m = TriMesh::new(&mesh, &tree);
+        let down = [0.0, 0.0, -1.0];
+        let (d, _) = m.tree_floor([0.0, 0.0, 50.0], down, 100.0).unwrap();
+        assert!((d - 50.0).abs() < 0.02, "{d}");
+        // Non-finite or empty input is refused at once.
+        assert_eq!(m.tree_floor([0.0, 0.0, 50.0], down, f32::NAN), None);
+        assert_eq!(m.tree_floor([0.0, 0.0, 50.0], down, f32::INFINITY), None);
+        assert_eq!(m.tree_floor([f32::NAN, 0.0, 50.0], down, 100.0), None);
+        assert_eq!(m.tree_floor([0.0, 0.0, 50.0], [0.0, 0.0, f32::NAN], 100.0), None);
+        assert_eq!(m.tree_floor([0.0, 0.0, 50.0], down, 0.0), None);
+        // A huge drop is walked in at most 256 longer steps and still finds the floor.
+        let (d, _) = m.tree_floor([0.0, 0.0, 50.0], down, 1.0e30).unwrap();
+        assert!(d >= 50.0 && d.is_finite(), "{d}");
+    }
+
     use super::*;
     use alloc::vec;
     use formats::collision::{CollisionTriangle, NO_CHILD, TreeNode};

@@ -43,7 +43,7 @@ pub use machine::{MachineHost, MachineRun, StateMachine};
 pub use option_map::{MapError, MapLayout, OptionMap};
 pub use sly2::{BuiltinTable, EventSignatures};
 pub use tree::{Game, Node, NodeId, ParseError, Program};
-pub use value::{ObjectId, ScriptError, Value};
+pub use value::{ObjectId, ScriptError, Site, Value};
 
 #[cfg(test)]
 mod tests;

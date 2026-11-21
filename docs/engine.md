@@ -852,7 +852,9 @@ gang, so they get the spec camera without changes.
   floor:
   - camera objects (class 44, priority 10): one entering the world after load pushes its view; it looks at its
     target (1055) or along its axis with its field of view (1054), and cuts on leaving with 1059. Objects already in
-    the world at load are not pushed [I];
+    the world at load are not pushed [I]. The view lives exactly as long as the object is in the world (camera.md
+    7.2.1): no timer, no end with its clip. A push of equal priority goes beneath, so among equal priorities the
+    earliest pushed stays on top (timed moves included);
   - timed moves (10): `World::shared.camera_move` starts one when it changes; position, Euler angles and field of
     view blend by the four stored cubics (`MOVE_CURVES`);
   - the binocucom (8, not given by the spec): `World::shared.camera_binocucom` (focus, inverted). It follows section
@@ -866,6 +868,8 @@ gang, so they get the spec camera without changes.
     `0xFF`. This is `CameraSystem::visibility_mask()`, for the systems that activate and draw objects by their mask.
 - **Not yet**: the `focal length` lens command (`views::fov_of_focal_length` is there for the script host).
 
+- **Placements**: a player move of more than 1,500 in one frame (`TELEPORT`; `PlayerSystem::place`, warps) starts the
+  camera again behind the player, as at the start.
 - **Start and clearance**: a Sly 2 or Sly 3 camera starts, on the first frame with a player, behind it at the
   framing's distance and height as a cut (the view clearing and cut search then apply), whatever the session cut to.
   It clears the view against its own collision world (`camera::sly2::collision_world`: every solid with collision
@@ -1204,15 +1208,42 @@ From specs/sly2/gadgets.md, with the assignment screen of safehouse-and-shop.md 
   - a copy taken from a pool should leave the pool's group (the class-6 group directly under the character that
     holds the template), either attached to the carrier's hand while held, or at the world root once thrown;
   - a copy back in its pool (state 4 done) should be out of the world;
-  - a placed Trigger Bomb (state 2) shows its blast volume once it is out of the characters.
+  - a placed Trigger Bomb shows its kind's blast group while landed (state 2), and blinks it for 1.87 s
+    (`game::sly2::attached::BLINK_TIME`) while triggered (state 3); a copy kept in state 3 for that long before it
+    detonates and returns shows the countdown (returned at once, it shows none).
 
   `gang::pool` does this on the world's objects: `take` moves a copy of the item's class (Trigger Bomb 7: class
   101; pocket items 26, 37, 38, 41: class 100) out of the character's pool group to his hands, in the world, with
   the item as its kind (option 1104), state 0; `release` puts it at the world root where a throw lands (`landing`,
   a ballistic stand-in at the start height), state 2; `return_copy` puts it back in the pool group, out of the world.
   Each copy's state is in `World::shared.gadget_copies` (a marked field), for the renderer and the blast volumes.
-  The Sly 2 session calls them (a marked gang hook): on `Summoned` / `ItemStarted`, `Thrown` and `Triggered` (the
-  bomb returns at once; the 0.25 s fade is not shown yet).
+  The Sly 2 session calls them (a marked gang hook): on `Summoned` / `ItemStarted`, `Thrown` and `Triggered`. A
+  triggered bomb stays placed in state 3 for its 1.87 s countdown (`pool::trigger`, `pool::step` each frame), then
+  goes off (a blast notice on the copy) and returns to its pool; the 0.25 s fade is not shown yet.
+
+### State parts and the hook swing (`gang::parts`, `Character::swing`)
+
+- **Parts by state** (characters.md 9.3.1): `parts::update` puts Sly's canes and each character's throw marker in or
+  out of the world each frame (the Sly 2 session calls it from `write_back`, a marked gang hook; the objects are found
+  once and kept in `World::shared.gang_parts`). One cane at a time: 316 (with its hook 317) normally, 318 on a pipe
+  (modes 2 and 11 are the pipe climb: state 8 after the 0.4167 s grip; never in ordinary jumps), the new one taking
+  the old one's pose; all out while Sly hides. The throw marker 586 is in the world only while its character aims a
+  throw; `Character::aim_path` holds the predicted flight on aiming frames only, and `parts::marker_path` gives the
+  trail from the landing point back.
+- **Hook swing** (state 3; characters.md 9.1.1, `gang::character::swing` for the values):
+  - catch: a jump starts cane-reach mode at a hook (`TargetKind::Hook`; the Sly 2 session lists class-40 objects)
+    within 1,000, not more than 300 below Sly [I], reachable by a 0.25–3 s jump and with a clear path; each step the
+    body centre → cane tip segment and the tip's path are tested against the hook's point, within 15 catching it.
+    The tip is taken at Sly's hands [I]; the fit score, the enable flag and mask, and follow-hangs (kind 3) are not
+    modelled;
+  - the swing is an angular velocity ω about the hook: gravity; pumps (stick past 0.3 within 60° ahead, beyond 120°
+    back) add 5·dt rad/s about the swing axis for their first 0.25 s, scaled by clamp(0.5 − 0.01·h, 0, 1), and turn
+    to coasting after 1.4 s held; damping in the plane by clamp(1.5 − 0.35|ω|, −5, −0.25) and out of it by −2.5
+    while pumping, else −1.0; the rope eases to 230 (the hook's offset is not read) and ω is rescaled by
+    min(230, r) / max(75, new length);
+  - Cross after 0.25 s jumps off with the swing's velocity, at least 700 up; Square lets go (unconfirmed);
+  - `swing_angle` (θ) and `swing_stick` feed the swing blend (`anim::sly2_gang::SwingBlend`, a marked hook there).
+  The Sly 3 crew has no hook targets yet.
 
 ### Pickpocketing (`gang::pocket`)
 
@@ -1775,7 +1806,14 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   camera objects; the animation and camera owners).
 - **Sequences in the session** (dialogue-and-voice.md 2, level-flow.md 4.1): a started sequence raises script event
   5, an ended one event 6 (their modules answer, often by asking the current task for its next state); option 642
-  (command 0x11) sets a task's state through `World::shared.task_requests`. Without a sound engine a sequence ends
+  (command 0x11) sets a task's state through `World::shared.task_requests`; 670 adds an object to the world and 671
+  removes one; 634 raises script event 4 on the sequence with its value (missions.md 4.1: task 1696 is finished
+  this way, by sequence 1697's module); 635 plays a clip (on the object given, else the object its first channel
+  animates) at the clip's speed (option 109). The runner does not wait for the clip yet.
+- **Clip add and remove events** (camera.md 7.2.1): a clip's events of kind 7 add an object to the world and kind 8
+  remove it, as they fire (apply list on applying, retract list when a non-looping, non-holding playback ends;
+  `sly2_commands::clip_object_events`). This is what ends cutscene camera objects' views (row 0: clip 150489
+  removes camera 150484 about 1.67 s after sequence 1682 plays it). Without a sound engine a sequence ends
   the frame after it starts, and its task commands and sub-sequence starts apply as it ends.
 - **Episode openings** (level-flow.md 4.1): a task restored as available because it has no prerequisites raises its
   "after state change" event (21; a marked hook in `sly2_jobs::Jobs::restore`), which the episodes' macro modules
@@ -1801,15 +1839,18 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   (below), 9 played for and 8 advanced.
 - **Trigger volumes' task requests** (option 440) are action entries on the disc (typed argument lists); they are
   read with the stored values (`sly2_props::volume_requests`).
-- **Open questions** (for the spec side):
-  1. Task 1696 (`t0_chase_hallway_complete`, row 0): no option value, action entry or sequence command in the
-     world names it. What makes it done: a script module (job 1671's module 9, the chase sequence 1690), or a state
-     machine?
-  2. Hack station (vehicles-and-minigames.md 10.3): in row 14, with `t4_hack_station1` made current, no object with
-     ID 2410 or 2411 is in the world, and the scripts stop with 12 "too deep" errors; is 2410 in another package of
-     that row, placed by a switch? (The vehicles stand-in in `shots::follow_job` stays until the ship comes by
-     script.) After two jobs the progress is saved to an in-memory slot and continued, and the
-  task states compared by ID. Findings are journalled.
+- **Characters' parts removed at load** (characters.md 9.3.1, `sly2::remove_flagged_parts`): the objects the
+  characters' lookup tables mark with flag `0x200` (the second cane 318, the throw marker 586, object 685, the
+  target-ring placements) are taken out of the world when the world loads, each only below its own character. The
+  cane swap, the marker while aiming and the ring copies on targets are the gang's and the prompts'.
+- **The route's limits**: task 1709 (`t0_van_rescue_attempt`) is finished when object 150849 (not a character)
+  enters volume 150658 (its option 432 names the only object that counts); the route cannot bring it there and
+  finishes 1709 by request.
+- **Hack station** (vehicles-and-minigames.md 10.3): with the script host's recursion fixed and the job system's
+  exit ordering (event 19 before the exit's load), `t4_hack_station1`'s handler starts sequence 2410 in row 14, its
+  command 670 adds the ship, and the job hands it over; the vehicles stand-in in `shots::follow_job` is gone.
+- After two jobs the route saves the progress to an in-memory slot and continues it, and compares the task states by
+  ID. Findings are journalled.
 - **In the Sly 2 session** (`crates/game/src/sly2`): the characters' skinned parts are posed again when the
   character's object moves or the `Sly2Poser` version of it or of a bone object changes; texture animations advance
   by the time played since the last rendered frame (`StaticLevel::animate`); the scene build adds passes 7, 11 and
@@ -1959,6 +2000,10 @@ Hooks in shared files, each marked `Sly 2 hook`:
     are unique.
   - No option fails to decode, no placement is cut by the depth limit, and no loaded placement names a missing
     package: the 378 that do (classes/placement.md 1.3) are all excluded by their own level conditions.
+  - Level conditions are tested against the **level-table row** (`Sly2Options::row`), as every loader caller passes
+    it. Disc test `sly2_worlds::level_conditions_use_the_level_table_row`: in row 14 (world `0x82`),
+    `p_prison_macro`'s sequences 2408, 2410 and 2411 (conditioned on row 14) load in the world with their modules
+    (missions.md 4.1); 240 records of row 14 are left out by their conditions.
   - Each world runs 90 fixed frames with `Systems::null()` twice without scripts and twice with them. The state
     hashes match, and 1 to 1,876 objects per world are attached to modules.
   - No error value comes from the host. The test prints the actions no behaviour runs yet, by count: 44 (338),
@@ -1988,15 +2033,19 @@ as before.
     `episode/nightclub` for episode 1.
   - The current job, current task and checkpoint task are not saved. A world change carries them with the job timer
     and help (`Carry`, returned by `detach` and given to `attach`).
-- **Restore** (missions.md 7). The saved states are read, and a restarted task that was available without its
+- **Restore** (missions.md 7, 7.1). The tasks go in prerequisite-first graph order (`Graph::prerequisite_order`).
+  The saved states are read, and a restarted task that was available without its
   prerequisites goes back to locked. A task with no saved state is available if it has no prerequisites, otherwise
   locked; the restore does not propagate, so a saved locked task stays locked even when its prerequisites are met,
   as in live play (successors are re-evaluated only when a task becomes done or closed). An earlier fixed-point
   pass opened such tasks: task 1776 (`t1_recon_brawl`) came back available after a save and continue. Every task's
   switches are then applied for its state, and every job's load-time switches (1255)
   for the job's state (0 not begun, 1 current, 2 complete; our choice). The current job, task and checkpoint task
-  come from the carry; after a load the task with option 1273 that was restored as available becomes current
-  again, and its job with it.
+  come from the carry (session memory; none after a card load). On every world start a task with option 1273
+  restored as available replaces the remembered task, the last in graph order winning. The remembered job then
+  begins again and the task becomes current (which begins its own job when that is another), the carried timer and
+  help go on, and every task is saved again. Option 1272 acts only on state changes outside the restore. Sly 3
+  has no 1273; its own world-start pass (`game::sly3::jobs::attach`) follows.
   - A queued task is requested forced. A new game queues task 1583, which lies past the attract-mode tasks (our
     choice).
 - **Task rules** (missions.md 4):
@@ -2039,6 +2088,19 @@ as before.
     Task 1278, job 1259 and the scripts' 786 also fire exits.
   - Firing applies the exit's (task, state) pairs (788) and asks for a load: row, point (779, default 393), wipe
     (780) and up to 4 movies.
+  - **Timing** (level-flow.md 5.5): only an **armed** exit fires; firing one in any other state does nothing
+    (`fire_exit_id`, the scripts' 786). A task's or job's exit (1278, 1259) is *wanted* (`want_exit`): it fires
+    now if armed, else as soon as its own updates arm it (an exit whose volume is not read counts as not entered).
+    Firing does not load: the request waits in `Jobs::exit_pending` for the option-785 delay and is made in a later
+    update (`Jobs::step_exit`, from the Sly 2 session's `follow_load_request` on the real clock), while the game is
+    paused; a firing while one is pending or requested is dropped. The wipe-out is not drawn yet, so the load
+    follows the request at once.
+  - **Becoming current** (Sly 2, missions.md 4.2): the previous task stops being current; the new one is current, its
+    checkpoint remembered and its job begun; then its play count, event 0x23, switch group 4, goals and prompt,
+    and event 19 to its script; only then its exit (wanted, as above).
+  - **Row 14 and the door to row 15** (2379): a script's 786 on 2379 right after the world started fired it and
+    loaded row 15 (whatever task was current, so it looked like task 2414's doing). 2414 has no exit; with the armed
+    rule the call is ignored, as in the game.
   - `arrive` finds the last class-42 point answering to the ID (its own, or 393, 394 or its argument by options 790
     to 792) and places the player there. It then applies the point's lists: 793 a state-machine goal (object,
     machine, goal, instant; the field order is our inference), 794 a task-state request, 795 a move of an object to
@@ -2242,8 +2304,8 @@ Sly 3's own behaviours:
   turns it (state 0 / 1, waiting until it rests), Circle confirms (sound 62 when wrong), Triangle leaves; with 1608
   the safe opens as soon as the dials match. Methods 1611 and 1612 reset and snap. `devices::Tumbler` is the
   ten-position dial (states 1853 + position).
-- **Use points** (33, `interactables::UsePoint`): radius 1163, object 1164, animations 1170; tracks the playable
-  character within the radius.
+- **Use points** (33, `interactables::UsePoint`): radius 1163, command script 1164, (task, state) pairs 1170;
+  tracks the playable character within the radius.
 - **Treasure maps** (153, `interactables::TreasureMap`, data and helpers): the overhead view height 1901 (5,000;
   4,000 in row 31), screen 1902, arrival radius 1903 (400; default 500), the eight trail markers 1904, the eight clues
   1905 (riddle, plain hint), the script 1906. `reached` is the full 3-D distance within the arrival radius; `view`
@@ -2298,15 +2360,15 @@ attached by `behavior::vehicles::attach` after the Sly 2 and Sly 3 attaches (one
   `Sly3Session::update`): when a job begins the machines already active are noted; the first machine of a
   driveable class that becomes active while the job runs (a task's switches or script brought it in) is driven and
   followed by the camera; when the job ends the characters are played again. On the disc, Sly 2's `t7_robot_war`
-  brings the combat car in (its switches), `t2_turret_attack_chopper` the turret (a script), and a current
-  `t4_hack_station…` task brings the hacking ship's placement in (standing in for the station's script, which the
-  gang's interaction does not run yet) [I]. `Sly2Session::start_task(name)` / `Sly3Session::start_task(name)`
+  brings the combat car in (its switches), `t2_turret_attack_chopper` the turret (a script), and the hacking ship comes
+  by the station task's script (its event-19 handler starts sequence 2410, whose command 670 adds the ship's
+  placement; vehicles-and-minigames.md 10.3). `Sly2Session::start_task(name)` / `Sly3Session::start_task(name)`
   request a task forced (tests and the smoke run).
 - **Visibility volumes**: the driven machine updates even outside the player's Sly 2 visibility volume (a marked
   exemption in `Game::update_objects`; the hacking ship flies at z ≈ 25,000).
 - **Projectiles** (`vehicles::shots`, `World::shared.vehicles`, one marked step after the game-clock pass): turret
-  shots fly along the barrel at 800 units/s (the missiles' default; each launcher's own speed setting is not read
-  yet), Sly 3 biplane shots at option 1703's speed (Sly 2 has no biplane), and combat-car shots on a 45° arc whose
+  shots fly along the barrel at their launcher's speed (`turret::shot_speed`: option 1003's object, its option 509;
+  else the missiles' default, 800; on the disc the turret jobs leave 1003 unset, so 800), Sly 3 biplane shots at option 1703's speed (Sly 2 has no biplane), and combat-car shots on a 45° arc whose
   speed is solved for the distance to the target under gravity (1,750, clamped to 200 to 2,000 [I]); the homing
   limit is 1,500. Each shot hits what lies within its blast radius (200): guards (`Notice::Hit`), the gang's
   characters (a contact of kind `0x100`, 10, through `World::shared.gang_hits`) and other machines (`Notice::Hit`)
@@ -2376,8 +2438,10 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
     0.15 s the first frame with the stick past 0.5 picks forward (< 1.0996 rad), back (> 2.0420), else left or right
     (`sub_kind`), swapping the clip at the same time. A plain fall plays take-off 0. A missing clip falls back to
     index 0 of its set, then take-off 0. Landings 158 (Sly), 478 (Bentley).
-  - **Blends** (9.1.1): Stealth Slide 259 / 260 / 261 by the yaw rate (`slide_weights`); the hook swing holds its
-    still pose (165 at 0.3333 s: the gang does not model the swing's sub-states or angle); Bentley's crossbow plays
+  - **Blends** (9.1.1): Stealth Slide 259 / 260 / 261 by the yaw rate (`slide_weights`); the hook swing (`SwingBlend`)
+    plays 165 / 166 / 167 at `(a·p, a·(1 − p), 1 − a)`, activity and pump eased toward the sub-state's targets
+    (pumping ahead or back by the stick, coasting after a 0.25 s release or a 1.4 s hold), its time steered by the
+    swing angle at most 3 per second (the gang has no swing pendulum yet, so the angle is 0: the middle time); Bentley's crossbow plays
     pair `2·mode + side` from 560 (mode 0 standing, 2 near an object ahead, else 1; side 1 when his weapon marker,
     object 580 on transform 52, is on his left in the current pose, `weapon_side`) at weights `1 − u`, `u` from the event.
   - **Standing** (9.2, `IdleRun`): the idle machine (Sly 124, Murray and Bentley 418, class 111 read with
@@ -2404,12 +2468,15 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
   - Moving (12.3): the full-speed gait (Sly 173/174, Bentley and Murray 449/447) at weight 1 in the run states, the
     stick-driven gait (307/308, 535/534) in the walk states, Murray's carry gait 528/529; rates as Sly 2's.
   - Jumps and falls by sub-kind (chosen at take-off, `sly2_gang::sub_kind`), missing clips falling back to index 0;
-    dodge 312/313; the swing's still pose (213 at 0.3333 s); the glide 1727, then 1728, 1729, 1730, 1732, 1731 by
+    dodge 312/313; the swing blend (213, 214, 215, as Sly 2's); the glide 1727, then 1728, 1729, 1730, 1732, 1731 by
     the stick (`glide_weights`); Sly's combo runner's clip at the runner's time; Murray's punches 457, 458, 468, 467, 244 (his
     table's records 5 to 9) by punch index, as Sly 2's; Bentley's chair melee clips.
   - The ledge hang (Sly 217, Murray 706) needs a ledge catch the gang does not do. `ACCESSORY_RECORDS` lists the
     flag-`0x20` records of 12.3; nothing of the crew is hidden, since the specs do not say which are state
     accessories.
+- **Bad data**: clip lengths that are negative or not finite read as 0 (`sly2_pose::sane_length`, also in
+  `game::sly2_anim`'s length cache), so the playback clamps cannot panic; the binocucom ignores a bad step and leaves
+  an angle unclamped when its limits are not numbers; a timed move whose duration is not a number ends at once.
 - **Session hooks** (marked): `crates/game/src/sly2/gang.rs` (`GangPlayer::clips`), `crates/game/src/sly3/crew.rs`
   (`CrewPlayer::clips`), and `sly2/skin.rs` (the parts' pose version also counts the Sly 3 poser's; accessories).
 - **Tests**: unit tests of the tracks, directions, blends, fallbacks and state tables; `tests/pose_disc.rs` (both
@@ -2584,7 +2651,10 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
       (the table is in the module docs). Sly 3 has no "resume after loading" option.
       - **Becoming current** (missions.md 4): switch group 4, the objective, the script events, then the task's
         1408 script (with the controlled character as its context), "done" at once when 1405 is set, then the
-        1406 exit.
+        1406 exit. The "done" requests of 1405 tasks are queued and finished in a loop by the outermost
+        `Jobs::make_current` (`done_queue`), so a chain of such tasks does not nest calls; and a task whose "done"
+        completes its own job does not begin that job again (`completed_now`). Sly 3 keeps its order (the job begins
+        after the task's events and exit) through `Jobs::sly3_rules`.
       - **Job completion** (4.1): completion mode 2 (1367) sends the first task back to 0; 1385 grants its item;
         a following job's resume task (1366) is written to `oidCheckpointForce` / `widCheckpointForce`.
         1361 keeps the last task open. 1368's event list is kept on the job.
@@ -2629,24 +2699,82 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
     - **Broadcast fix:** a task event broadcast with no current job now goes to the available tasks that have no
       job, as Sly 2's missions.md 3 says. Before, it was dropped.
     - **The first Venice job, by input and scripts** (`smoke_run::run_sly3_job`, journalled):
-      1. Episode 3 starts in v_ext at 424.
+      1. Episode 3 starts in v_ext at 424, and the route stands in for the intro (2064 closed; see below).
       2. The safe house takes Sly out: 2061 makes `t1_intro_outside_safehouse` (2083) current, starting 2084,
          which holds the pad for 2 s.
       3. The route then steers toward the open job's waypoint, `t1_recon_intro`'s placement 121540 (waypoint
          35785). There is no path-finding, so after 10 s of walking straight at it, the route places Sly there.
-      4. Entering the waypoint raises its events and broadcasts task event 29. The macro listener 2058 (v_macro
-         module 4) gets event 20, without an interpreter error. No task request comes back, and task 2086 stays
-         locked; listener 2228 is not in the world.
-      5. It stalls there, with 2083 current. The job is started by the waypoint's own event-5 handler, not by the
-         listeners. That handler needs three things:
-         - the world object's methods 984 (the controlled object) and 1000 (player 0 held). Both are now
-           answered, with a real hold count: one per pausing script and one while a screen holds the pad
-           (`World::shared.sly3_holds`).
-         - the player's option 30 to equal the waypoint's custom property 1991, and its custom property 1992. The
-           loaded waypoint has neither.
-         - the waypoint's task (script 1364, stream 1485). It is −1 on the loaded waypoint, so it is probably
-           set at run time by the task whose option 1407 names the waypoint.
-         The last two are open questions; the handler makes no task call until they are answered.
+      4. Entering the waypoint runs its event-5 handler.
+         - The handler checks that player 0 is not held (world method 1000) and has a controlled object (984).
+         - It checks that the player's owner code (option 30) equals the waypoint's custom property 1991 (24,
+           Sly).
+         - It asks the waypoint's task (1364, which its load handler set from custom property 1990 = 2086) for
+           state 4 through 1309.
+      5. `m1_recon` begins: `t1_recon_intro` (2086) becomes current and starts its scripts 2087 and 2088.
+      6. During a job, the route heads for the trigger shape (class 21) whose task request names the next task.
+         Trigger shapes now read their Sly 3 volume (`behavior::sly2_props::volume_box`, Sly 3 branch). Trigger
+         140617 on the Interpol roof (z 2,116; request (2089, −1)) makes `t1_recon_interpol_roof` current, and
+         its script 2090 holds the pad for 4 s.
+      7. The script then fires exit 2046: v_interpol loads at point 138289. Its 847 pairs are now applied on
+         arrival.
+      8. The trigger's task 2089 done opens `t1_recon_cell_dialog` (2091), which becomes current. Its script fires
+         exit 2046, and v_interpol loads at point 138289. Then `t1_recon_key_intro` (2099) becomes current.
+      9. The route heads for use point 138235 and presses Circle. 2105 becomes current and is done at once (1405),
+         and `t1_recon_get_key` (2106) becomes current.
+      10. The 60 s run ends heading for trigger 138216, which names `t1_recon_get_to_cell` (2109).
+      - Use points (class 33, interactables.md 5): option 1170 holds up to 4 (task, state) pairs and 1164 is the
+        command script. The use button (Circle) uses the nearest point within its radius
+        (`behavior::sly3::interactables::use_point_used`, a marked session hook). In order, it applies the pairs
+        as checked task requests (−1 makes the task current), raises event 5 on the point and starts the script
+        with the user. 138235 has no 1163; an unset radius is 100 (working choice). `disc_sly3_flow` checks that
+        using 138235 finishes 2105 (1405) and moves on to its successor. The route heads for a use point whose
+        pairs name the next task and presses Circle there.
+      - Every world loads all of the episode's jobs and tasks (missions.md 4.1a). The loader
+        (`world::sly3::load`, Sly 3 hook) creates classes 168 and 169 whatever their world filter or conditions.
+        Other worlds' jobs and tasks are out of the world, so they get no task events and no switches. v_ext holds
+        `v_macro`'s 11 jobs and 150 tasks, 55 of them off-world. A prerequisite is dropped only when its object ID
+        is in no record of the file.
+      - The restore: a never-saved task reads 0, and 0 becomes available only when the task has no prerequisites
+        at all. With `from_memcard` set, a job's task saved as 1 or 2 is recomputed: available when every
+        prerequisite is done, else locked (`Jobs::restore`, Sly 3 branch).
+      - The visit order (`jobs::visit_order`): from the roots, a task is reached once all its prerequisites are
+        visited. Its depth (+0x108) is the longest path from a root. Its job-change depth (+0x10C) counts, along
+        that path, the steps from a task with a job into another job. The two are separate maxima over the task's
+        prerequisites, taken once all of them are visited. The sort is by job-change depth, the job's object ID
+        (−1 none), the depth, then the task's object ID. The pass scans the available tasks in this order.
+      - World start: after the restore (missions.md 4.1a steps 1 and 2), the pass makes the last available
+        "current when available" task that is not current current (forced), whatever its job. The game repeats
+        the pass while its request queue holds requests. Requests apply at once here, so the pass makes one pick.
+      - New game in v_ext: only 2064 `t1_intro` is available, and no task or job is current
+        (`disc_sly3_flow::the_jobs_graph_of_venice`).
+      - Requests (missions.md 4.1a, Sly 3 branch of `Jobs::request`). Command 0x1E, the use-point pairs (1170)
+        and the exit and arrival pairs (841, 847, `jobs::set_task`) are ordinary checked requests. A checked
+        request allows only 0 to 1 (prerequisites held), 1 to 2, 1 to 3 and 2 to 3. A closed task never changes,
+        and a request for 3 on a job's task asks for 2. Forced requests are task methods 1314 to 1317 (stream 1418
+        to 1421) and make-current forcing.
+      - Back-fill (`Jobs::backfill`, on every request path, never in the restore or world-start step 2):
+        - For a new state 1 or 2, a prerequisite with no job goes to 3, one of the same job to 2, and one of
+          another job to 3 (2 when that job has 1361).
+        - For 3, every prerequisite goes to 3.
+        - It recurses, raising only prerequisites below their target that are not already being changed.
+      - World-start step 2 (the carried job begun again, the carried task made current) runs in restoring mode
+        (mode 1). Events fire, but a task opened there does not become current through 1399. The restore's own
+        state changes broadcast their task events too (the before and after codes, heard by the macro packages).
+      - New game: 2061's requests (2083 current, 2138, 2227, 2418 and 2083 closed) are all refused, because 2083
+        waits for `t1_intro` (2064). The spec has the episode's macro module play the intro and advance 2064. Its
+        handler is not decoded yet, and no macro module answers the restore's broadcast, so nothing advances 2064
+        here (`the_take_out_script_runs` checks the refusals).
+        - The Venice route stands in for the intro with the checked request (2064, 3), as Sly 2's intro sequence
+          does. The take-out then makes 2083 current and closes it, which opens `t1_recon_intro` (2086).
+      - The job and task keys of step 2 (+0x1498, +0x149C) are not saved, so a slot load has nothing to restore
+        there.
+      - Task-state requests from props and triggers with state 4 or −1 now make the task current.
+      - What it took:
+        - Custom properties from stream option 8 (`world::sly2::custom_properties`, Sly 3 branch; a placement's
+          setters apply to its copy's root, after the root's own).
+        - The world object's methods 984 and 1000, and the hold count.
+        - The crew's owner code as option 30 (stream 16).
+        - Object-ID options read as objects (value types `0x2000 + c`) in the Sly 3 host.
     - **Option sets** (conditions.md): `flow::choose_option_set` picks, from table B, the condition of the last
       task whose saved state is done (2 or 3), when the world has that set; otherwise, and on a fresh load, the
       first set. The session builds the scene, the lighting and the load context from it

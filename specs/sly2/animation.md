@@ -42,6 +42,15 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/asega.cpp (extra-curve linking), cmworld.cpp, smrun.cpp (transition masks), sly.cpp (look mask)
     used_for: the extra-curve use and the mask rule (sections 2 and 8) [R]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/asega.cpp (event dispatch, playback update, retract), asegevent.cpp (event kinds 7 and 8), asega.h (clip speed)
+    used_for: event types 6, 7 and 8, retract at the clip's end, option 109 (section 2, added 2026-11-20) [R]
+  - kind: disc
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), machine code of 0x00130918 (the 0x38 test at 0x00130A90 before the call
+      to 0x00130B18) and option-table entry 109 at 0x002AC880; level row 0 clip 150489's body and a byte search of
+      row 0 for type-7 / type-8 events naming its camera objects (2026-11-20)
+    used_for: the retract-at-end test and the camera-object clip events (section 2) [D]
 reviewed_by: pending
 date: 2026-11-19
 ---
@@ -122,6 +131,19 @@ clip is how a clip with an intro loops back into its cycle [R] [D for the placem
 ID of a marker; Sly's run clip fires four of them at 0.083, 0.25, 0.333 and 0.5 s [D] (*interpretation: footfall
 markers*). **Type 0** (the most frequent timed event: 331 in Sly's clips) has the layout of a sound request [I].
 Other meanings belong to the gameplay specs.
+
+Added 2026-11-20:
+- **Type 7** adds the object with the given ID to the world, and **type 8** removes it. The `f32` is a fade time.
+  When the clip is playing backward the two swap [R].
+- **Type 6** retracts the playback [R].
+- A playback whose time passes the clip's end, with none of the loop or hold bits (`0x38`) set in its apply flags, is
+  retracted, and retracting fires the retract list. The test is at `0x00130A90` in SCUS_973.16, followed by the call
+  to the retract routine `0x00130B18` [D].
+- The clip's option 109 is its playback speed: the clip's time advances at that rate times the playback's own speed
+  [R].
+- Camera objects are usually put in and taken out of the world this way. In level row 0 each of the eight camera
+  objects is named by a type-7 and a type-8 event in a clip. For clip 150489 the type-7 event is in the apply list
+  and the type-8 event in the retract list ([camera.md](camera.md) 7.2.1) [D].
 
 ## 3. Curves
 

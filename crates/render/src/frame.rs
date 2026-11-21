@@ -658,7 +658,11 @@ impl FrameBuilder {
                     layers |= LAYERS_TWO_COLOUR;
                 }
             }
+            // The light block's index rides in the morph field, so a morphed or placed instance (which use that
+            // field) never takes the shader light; it keeps its weights.
             if mat.lighting == Lighting::TwoColour
+                && rec.morph.is_none()
+                && mesh.placed_base.is_none()
                 && let (Some(k), Some((start, n)), Some([t0, t2])) = (rec.shader_light, rec.bones, mat.palettes)
                 && k + LIGHT_BLOCK_MATRICES <= n
             {

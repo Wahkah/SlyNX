@@ -11,7 +11,7 @@ use crate::host::ScriptHost;
 use crate::option_map::{CUSTOM_BASE, OptionMap, SLY2_CUSTOM_BASE, SLY3_CUSTOM_BASE};
 use crate::sly2::BuiltinTable;
 use crate::tree::{Game, Node, NodeId, Program, kind};
-use crate::value::{ObjectId, Procedure, ScriptError, Value, same_value};
+use crate::value::{ObjectId, Procedure, ScriptError, Site, Value, same_value};
 
 /// Limits that keep a broken script from hanging or overflowing the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,6 +286,10 @@ pub struct Interpreter {
     depth: u32,
     steps: u32,
     errors: u64,
+    /// The innermost event handler running: (object, event, module).
+    handler: Option<(ObjectId, u32, u32)>,
+    /// The procedure running (for operation 133's lookup).
+    running: Option<Rc<Procedure>>,
     /// The limits in force.
     pub limits: Limits,
 }
@@ -312,6 +316,8 @@ impl Interpreter {
             depth: 0,
             steps: 0,
             errors: 0,
+            handler: None,
+            running: None,
             limits: Limits::default(),
         }
     }
@@ -495,9 +501,11 @@ impl Interpreter {
         let mut full = Vec::with_capacity(args.len() + 1);
         full.push(Value::Object(Some(object)));
         full.extend_from_slice(args);
+        let outer = self.handler.replace((object, event, module));
         self.enter();
         let r = self.apply(host, handler, full);
         self.leave();
+        self.handler = outer;
         self.maybe_collect();
         Some(r)
     }
@@ -640,6 +648,23 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Whether `op` is the operation operation 133 (Sly 3 141) gives for an unbound symbol.
+    fn is_unbound_marker(&self, op: u32) -> bool {
+        match self.game() {
+            Game::Sly1 => false,
+            Game::Sly2 => op == 134,
+            Game::Sly3 => op == 142,
+        }
+    }
+
+    /// A [`ScriptError::TooDeep`] naming the innermost handler running.
+    pub(crate) fn too_deep(&self) -> ScriptError {
+        ScriptError::TooDeep(match self.handler {
+            Some((o, e, m)) => Site { object: Some(o), event: Some(e), module: Some(m) },
+            None => Site::default(),
+        })
+    }
+
     /// Makes an error value and reports it.
     pub(crate) fn fail(&mut self, host: &mut dyn ScriptHost, e: ScriptError) -> Value {
         self.errors += 1;
@@ -651,7 +676,8 @@ impl Interpreter {
     pub(crate) fn drain_host_events(&mut self, host: &mut dyn ScriptHost) {
         while let Some(ev) = host.poll_event() {
             if self.depth >= self.limits.max_depth {
-                let _ = self.fail(host, ScriptError::TooDeep);
+                let site = Site { object: Some(ev.object), event: Some(ev.event), module: self.module_of(ev.object) };
+                let _ = self.fail(host, ScriptError::TooDeep(site));
                 continue;
             }
             self.raise_event(host, ev.object, ev.event, &ev.args);
@@ -700,7 +726,7 @@ impl Interpreter {
                     return Value::Nil;
                 }
                 if self.depth >= self.limits.max_depth {
-                    return self.fail(host, ScriptError::TooDeep);
+                    return self.fail(host, self.too_deep());
                 }
                 self.depth += 1;
                 let r = match self.program.head_keyword(id) {
@@ -732,7 +758,13 @@ impl Interpreter {
                 _ => None,
             };
             if let Some(s) = sym {
-                return self.heap.lookup(env, s).unwrap_or(Value::Builtin(symbol_op.unwrap_or(0) + 1));
+                // The running procedure's own binding is passed over: on the disc every call names the symbol of
+                // the handler it is in, `((op133 (quote sN)) ...)` inside handler sN (all 209 Sly 2 calls), to
+                // run the definition it shadows (an outer module's, else nothing: operation 134). Finding the
+                // handler itself would recurse without end [I].
+                let me = self.running.clone();
+                let own = |v: &Value| matches!((v, &me), (Value::Procedure(p), Some(r)) if Rc::ptr_eq(p, r));
+                return self.heap.lookup_skipping(env, s, own).unwrap_or(Value::Builtin(symbol_op.unwrap_or(0) + 1));
             }
             return self.apply(host, f, alloc::vec![arg]);
         }
@@ -753,10 +785,14 @@ impl Interpreter {
     /// Calls `f` with evaluated arguments.
     pub(crate) fn apply(&mut self, host: &mut dyn ScriptHost, f: Value, args: Vec<Value>) -> Value {
         if self.depth >= self.limits.max_depth {
-            return self.fail(host, ScriptError::TooDeep);
+            return self.fail(host, self.too_deep());
         }
         self.depth += 1;
         let r = match f {
+            // Operation 134 (Sly 3 142), the value operation 133 gives for an unbound symbol, never appears on the
+            // disc; a handler calling a shadowed definition that does not exist gets it. Doing nothing is a working
+            // assumption: the spec does not say what it does [I].
+            Value::Builtin(op) if self.is_unbound_marker(op) => Value::Void,
             Value::Builtin(op) => builtins::call(self, host, op, args),
             Value::Procedure(p) => self.apply_procedure(host, &p, args),
             Value::Method { object, option } => {
@@ -805,7 +841,10 @@ impl Interpreter {
         if let Some(r) = p.rest {
             self.heap.define(env, r, Value::list(rest));
         }
-        self.sequence(host, p.node, 2, env)
+        let outer = self.running.replace(p.clone());
+        let r = self.sequence(host, p.node, 2, env);
+        self.running = outer;
+        r
     }
 
     /// Evaluates elements `from..` of a list in order; the result is the last one's (void when there are none).

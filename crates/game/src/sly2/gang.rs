@@ -263,6 +263,9 @@ impl GangPlayer {
             let (s, co) = (engine::math::sin(c.yaw), engine::math::cos(c.yaw));
             let t = Affine { cols: [[co, s, 0.0], [-s, co, 0.0], [0.0, 0.0, 1.0]], t: c.position };
             world.set_world_transform(h, t);
+            // Gang hook: the canes and the throw marker by the character's state (characters.md 9.3.1).
+            let hiding = c.who == g.player && world.shared.player.hiding != engine::world::shared::Hiding::None;
+            engine::gang::parts::update(world, h, c, hiding);
         }
         world.player = self.handles[g.player.index()];
         // Sly 2 hook (HUD): the current character's vitals.
@@ -362,6 +365,12 @@ impl PlayerSystem for GangPlayer {
             let Some(p) = world.position(h).filter(|&p| dist(p, at) <= TARGET_RANGE) else { continue };
             targets.push(Target { id: h.index(), position: p, yaw: 0.0, kind: TargetKind::Interactable });
         }
+        // Gang hook: hooks Sly can swing on (class 40), as targets.
+        for &s in world.slots_of_class(engine::gang::parts::HOOK_CLASS) {
+            let Some(h) = world.handle(s).filter(|&h| world.in_world(h)) else { continue };
+            let Some(p) = world.position(h).filter(|&p| dist(p, at) <= TARGET_RANGE) else { continue };
+            targets.push(Target { id: h.index(), position: p, yaw: 0.0, kind: TargetKind::Hook });
+        }
         let gw = GangWorld {
             cw: &self.collision,
             filter: QueryFilter::default(),
@@ -419,6 +428,8 @@ impl PlayerSystem for GangPlayer {
             // Sly 2 pose hook: each character's clips for its state, posed by this frame's pose step.
             self.clips.drive(world, &gang.members, &self.handles, &done, step.game_dt);
             events.extend(done.into_iter().map(|(_, e)| e));
+            // Gang hook: triggered bombs count down (1.87 s) before they go off and return to the pool.
+            engine::gang::pool::step(world, step.game_dt);
         }
         // The gang's attacks on the guards.
         let Some(me) = player else {
@@ -481,9 +492,8 @@ impl PlayerSystem for GangPlayer {
                     }
                 }
                 GangEvent::Triggered(item) => {
-                    if let Some(g) = engine::gang::pool::copy_of(world, item) {
-                        engine::gang::pool::set_state(world, g.object, 3);
-                        engine::gang::pool::return_copy(world, g.object);
+                    if let Some(g) = engine::gang::pool::copy_of(world, item).filter(|g| g.countdown.is_none()) {
+                        engine::gang::pool::trigger(world, g.object);
                     }
                 }
                 // Gang hook: R3's binocucom (camera.md 6).

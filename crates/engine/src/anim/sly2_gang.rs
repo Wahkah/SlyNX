@@ -29,8 +29,9 @@
 //!   glide blends 1519 (centre), 1520 (left), 1521 (right), 1523 (forward), 1522 (back) by the stick
 //!   (`sly3_pose::glide_weights`, the same rule); Bentley's crossbow plays pair `2·mode + side` with the target's
 //!   height weight, through mode changes, the side read from his weapon marker when the swing starts.
-//! - **The hook swing** holds the swing blend's still pose: 165 alone at 0.3333 s (9.1.1's weights with activity and
-//!   pump at 1; the gang models neither the swing's sub-states nor its angle, which steer them).
+//! - **The hook swing** (9.1.1, [`SwingBlend`]): 165 / 166 / 167 at `(a·p, a·(1 − p), 1 − a)`, activity and pump eased
+//!   toward the sub-state's targets (pumping ahead or back by the stick against the heading, coasting after a
+//!   release or a long hold), the blend's time steered by the swing angle (0 until the gang swings Sly on a pendulum: the middle time).
 //!
 //! The clips are object IDs found in the character's own package (characters.md 9; `World::find_sly2_id` with the
 //! character as context). Root motion: the driven blends hold transform 1's horizontal translation, since the gang
@@ -267,6 +268,8 @@ pub enum Motion {
     At(i32, f32),
     /// Up to five clips looping together at weights `w` (−1: no clip), as the glide blend.
     Blend5([i32; 5], [f32; 5]),
+    /// Three clips at weights `w`, all at the time given (the swing blend, whose time is steered).
+    BlendAt([i32; 3], [f32; 3], f32),
 }
 
 impl Motion {
@@ -278,6 +281,7 @@ impl Motion {
             }
             Motion::Loop(c) | Motion::Once(c) | Motion::At(c, _) => [Some(c), None, None, None, None],
             Motion::Blend5(c, _) => c.map(|c| (c >= 0).then_some(c)),
+            Motion::BlendAt(c, _, _) => [Some(c[0]), Some(c[1]), Some(c[2]), None, None],
         }
     }
 
@@ -316,6 +320,8 @@ pub struct Track {
     /// The facing last frame and the yaw rate (rad/s, counter-clockwise positive).
     pub yaw: Option<f32>,
     pub yaw_rate: f32,
+    /// The hook swing's blend while swinging.
+    pub swing: Option<SwingBlend>,
     /// Bentley's weapon side at the crossbow swing's start (set by the driver, [`weapon_side`]).
     pub weapon_side: i32,
 }
@@ -339,6 +345,13 @@ impl Track {
             self.yaw_rate = (crate::math::rem_euclid(c.yaw - p + PI, 2.0 * PI) - PI) / dt;
         }
         self.yaw = Some(c.yaw);
+        if c.who == Who::Sly && c.state == sly::HOOK {
+            let stick = (c.last_deflection > SWING_STICK).then(|| facing_angle(c));
+            // Gang hook: the pendulum's swing angle θ (`Character::swing_angle`).
+            self.swing.get_or_insert_with(SwingBlend::enter).step(dt, stick, c.swing_angle, SWING_LENGTH);
+        } else {
+            self.swing = None;
+        }
     }
 
     /// Starts an overlay that plays until it ends or the state leaves `state`.
@@ -372,6 +385,8 @@ impl Track {
         out: &mut Vec<(i32, f32, f32)>,
     ) {
         out.clear();
+        // Bad lengths (negative, infinite or not a number) read as 0.
+        let mut len = |id: i32| len(id).map(super::sly2_pose::sane_length);
         if let Some((om, st, t)) = self.overlay.as_mut() {
             *t += dt;
             let end = match *om {
@@ -424,6 +439,8 @@ fn emit(m: Motion, t: f32, phase: f32, len: &mut impl FnMut(i32) -> Option<f32>,
         if w > 0.0
             && let Some(l) = len(c)
         {
+            // Lengths are sanitised where they are read; this guard keeps a bad one from panicking here too.
+            let l = super::sly2_pose::sane_length(l);
             out.push((c, time(l).clamp(0.0, l), w));
         }
     };
@@ -448,6 +465,15 @@ fn emit(m: Motion, t: f32, phase: f32, len: &mut impl FnMut(i32) -> Option<f32>,
             push(c[0], 1.0 - w, &|_| t);
             push(c[1], w, &|_| t);
             solo(out);
+        }
+        Motion::BlendAt(c, w, at) => {
+            for (c, w) in c.into_iter().zip(w) {
+                push(c, w, &|_| at);
+            }
+            let sum: f32 = out.iter().map(|m| m.2).sum();
+            if sum > 0.0 {
+                out.iter_mut().for_each(|m| m.2 /= sum);
+            }
         }
         Motion::Blend5(c, w) => {
             for (c, w) in c.into_iter().zip(w) {
@@ -549,6 +575,8 @@ pub mod clip {
     pub const SLY_DODGE: [i32; 2] = [281, 282];
     pub const SLY_SLIDE: [i32; 5] = [259, 260, 261, -1, -1];
     pub const SLY_SWING: i32 = 165;
+    /// The swing blend's three clips (9.1.1): 165 = a·p, 166 = a·(1 − p), 167 = 1 − a.
+    pub const SLY_SWING_BLEND: [i32; 3] = [165, 166, 167];
     /// The paraglider (9.3): the opening clip (slot `0x438`) and the five glide poses (`0x440` to `0x470`).
     pub const SLY_GLIDE_OPEN: i32 = 1518;
     /// In slot order: centre, left, right, forward, back (9.1.1: 1523 before 1522).
@@ -570,6 +598,106 @@ pub mod clip {
 
 /// The swing blend's still pose time (0.3333 s of its 0.6667 s clips).
 pub const SWING_STILL_TIME: f32 = 1.0 / 3.0;
+/// The swing blend's clips' length (9.1: 165 to 167, 0.6667 s; Sly 3's 213 to 215 the same).
+pub const SWING_LENGTH: f32 = 2.0 / 3.0;
+/// The stick counts as pushed past this (9.1.1).
+pub const SWING_STICK: f32 = 0.3;
+/// Pumping ahead within this angle of the heading, back beyond the other (9.1.1).
+pub const SWING_AHEAD: f32 = core::f32::consts::FRAC_PI_3;
+pub const SWING_BACK: f32 = 2.0 * core::f32::consts::FRAC_PI_3;
+/// Coasting after the stick is released this long, or held ahead or back longer than the other.
+pub const SWING_RELEASE: f32 = 0.25;
+pub const SWING_HOLD: f32 = 1.4;
+/// The easings of activity (`0x002BF570`) and pump (`0x002BF580`): (fast, slow, fast time).
+pub const SWING_ACTIVITY_EASE: [f32; 3] = [1.0, 0.0, 0.1];
+pub const SWING_PUMP_EASE: [f32; 3] = [4.0, 0.0, 0.1];
+/// The swing angle mapped onto the blend's time (`0x002BF58C`), and the time's rate limit (`0x002BF590`).
+pub const SWING_ANGLE_RANGE: f32 = 1.7;
+pub const SWING_TIME_RATE: f32 = 3.0;
+
+/// The hook swing's blend (characters.md 9.1.1): activity `a` and pump `p` eased toward targets set by the
+/// sub-state, weights `(a·p, a·(1 − p), 1 − a)`, and the blend's time steered by the swing angle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SwingBlend {
+    /// Sub-state: 0 pumping ahead, 1 coasting, 2 pumping back.
+    pub sub: u8,
+    /// Activity and pump.
+    pub active: f32,
+    pub pump: f32,
+    /// The blend's time.
+    pub time: f32,
+    /// How long the stick has been released, and held in the current pumping direction.
+    pub released: f32,
+    pub held: f32,
+    ease: [crate::physics::Smoother; 2],
+}
+
+impl SwingBlend {
+    /// Entering the swing: pumping ahead, at the blend's middle.
+    pub fn enter() -> SwingBlend {
+        SwingBlend { active: 1.0, pump: 1.0, time: SWING_LENGTH * 0.5, ..SwingBlend::default() }
+    }
+
+    /// One step: `stick` is the stick's angle against the heading when pushed past 0.3, `theta` the swing angle
+    /// (the hook direction's pitch from straight up, in the heading's frame), `length` the blend's length.
+    pub fn step(&mut self, dt: f32, stick: Option<f32>, theta: f32, length: f32) {
+        let dt = if dt.is_finite() && dt > 0.0 { dt } else { 0.0 };
+        match stick {
+            None => {
+                self.released += dt;
+                self.held = 0.0;
+                if self.released >= SWING_RELEASE {
+                    self.sub = 1;
+                }
+            }
+            Some(a) => {
+                self.released = 0.0;
+                let a = if a < 0.0 { -a } else { a };
+                let dir = if a < SWING_AHEAD {
+                    Some(0)
+                } else if a > SWING_BACK {
+                    Some(2)
+                } else {
+                    None
+                };
+                if let Some(d) = dir {
+                    if self.sub != d && !(self.sub == 1 && self.held > SWING_HOLD) {
+                        self.held = 0.0;
+                        self.sub = d;
+                    }
+                    self.held += dt;
+                    if self.held > SWING_HOLD {
+                        self.sub = 1;
+                    }
+                }
+            }
+        }
+        let (a_goal, p_goal) = match self.sub {
+            0 => (1.0, 1.0),
+            2 => (1.0, 0.0),
+            _ => (0.0, if self.pump > 0.5 { 1.0 } else { 0.0 }),
+        };
+        let p = |e: [f32; 3]| crate::physics::SmoothParams {
+            fast: e[0],
+            slow: e[1],
+            fast_time: e[2],
+            max_speed_change: None,
+        };
+        self.active = self.ease[0].step(&p(SWING_ACTIVITY_EASE), self.active, a_goal, dt).clamp(0.0, 1.0);
+        self.pump = self.ease[1].step(&p(SWING_PUMP_EASE), self.pump, p_goal, dt).clamp(0.0, 1.0);
+        // The time follows the swing angle: D·(clamp(θ / 1.7, −1, 1) + 1) / 2, at most 3 per second.
+        let length = super::sly2_pose::sane_length(length);
+        let theta = if theta.is_finite() { theta } else { 0.0 };
+        let goal = length * ((theta / SWING_ANGLE_RANGE).clamp(-1.0, 1.0) + 1.0) * 0.5;
+        let max = SWING_TIME_RATE * dt;
+        self.time = (self.time + (goal - self.time).clamp(-max, max)).clamp(0.0, length);
+    }
+
+    /// The weights of 165, 166, 167 (Sly 3: 213, 214, 215).
+    pub fn weights(&self) -> [f32; 3] {
+        [self.active * self.pump, self.active * (1.0 - self.pump), 1.0 - self.active]
+    }
+}
 
 /// Standing: a looping idle clip (9.2); the driver plays the idle machine instead when it finds it.
 fn idle(who: Who) -> Motion {
@@ -605,8 +733,11 @@ pub fn sly2_motion(c: &Character, track: &Track) -> Motion {
             sly::AIR_TRIANGLE => Motion::Once(clip::SLY_AIR_ATTACK[1]),
             sly::JUGGLE_STRIKE => Motion::Once(clip::SLY_JUGGLE),
             sly::SLIDE => Motion::Blend5(clip::SLY_SLIDE, slide_weights(track.yaw_rate)),
-            // The swing blend's still pose (Sly 3 12.3, Sly 2's swing): the first clip alone at its middle.
-            sly::HOOK => Motion::At(clip::SLY_SWING, SWING_STILL_TIME),
+            // The swing blend (9.1.1): its weights and steered time; its still pose until the first step.
+            sly::HOOK => match track.swing {
+                Some(b) => Motion::BlendAt(clip::SLY_SWING_BLEND, b.weights(), b.time),
+                None => Motion::At(clip::SLY_SWING, SWING_STILL_TIME),
+            },
             _ => idle(c.who),
         },
         Who::Murray => match c.state {
@@ -741,6 +872,62 @@ mod tests {
         assert_eq!(out[0].2, 1.0);
         t.advance(Motion::Once(9), 1, 1.0 / 60.0, lens, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn swing_blend_follows_the_stick_and_the_angle() {
+        let mut b = SwingBlend::enter();
+        assert_eq!(b.weights(), [1.0, 0.0, 0.0]);
+        assert!((b.time - SWING_LENGTH * 0.5).abs() < 1e-6);
+        // Pumping back: the pump eases to 0, so 166 takes over.
+        for _ in 0..60 {
+            b.step(1.0 / 60.0, Some(3.0), 0.0, SWING_LENGTH);
+        }
+        assert_eq!(b.sub, 2);
+        assert!(b.weights()[1] > 0.9, "{:?}", b.weights());
+        // Released for 0.25 s: coasting; the activity eases to 0, so 167 takes over.
+        for _ in 0..90 {
+            b.step(1.0 / 60.0, None, 0.0, SWING_LENGTH);
+        }
+        assert_eq!(b.sub, 1);
+        assert!(b.weights()[2] > 0.9, "{:?}", b.weights());
+        // The time follows the swing angle at most 3 per second: θ = 1.7 is the end.
+        let t0 = b.time;
+        b.step(0.05, None, 1.7, SWING_LENGTH);
+        assert!((b.time - (t0 + 0.15).min(SWING_LENGTH)).abs() < 1e-5);
+        for _ in 0..30 {
+            b.step(1.0 / 60.0, None, 5.0, SWING_LENGTH);
+        }
+        assert!((b.time - SWING_LENGTH).abs() < 1e-5);
+        // Held ahead for more than 1.4 s: coasting.
+        let mut h = SwingBlend::enter();
+        for _ in 0..90 {
+            h.step(1.0 / 60.0, Some(0.2), 0.0, SWING_LENGTH);
+        }
+        assert_eq!(h.sub, 1);
+        // Bad numbers do not panic.
+        h.step(f32::NAN, Some(f32::NAN), f32::NAN, f32::NAN);
+        assert!(h.weights().iter().all(|w| w.is_finite()));
+    }
+
+    #[test]
+    fn bad_clip_lengths_do_not_panic() {
+        let bad = |id: i32| match id {
+            1 => Some(-1.0),
+            2 => Some(f32::NAN),
+            _ => Some(f32::INFINITY),
+        };
+        let mut out = Vec::new();
+        let mut t = Track::default();
+        for m in
+            [Motion::Once(1), Motion::Loop(2), Motion::Gait { clips: [1, 3], u: 0.5, rate: 1.0 }, Motion::At(2, 5.0)]
+        {
+            t.advance(m, 0, 1.0 / 60.0, bad, &mut out);
+            assert!(out.iter().all(|&(_, at, _)| at == 0.0), "{m:?}: {out:?}");
+        }
+        assert_eq!(super::super::sly2_pose::sane_length(f32::NAN), 0.0);
+        assert_eq!(super::super::sly2_pose::sane_length(-2.0), 0.0);
+        assert_eq!(super::super::sly2_pose::sane_length(0.5), 0.5);
     }
 
     #[test]

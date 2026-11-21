@@ -286,6 +286,9 @@ pub struct Shared {
     /// Camera hook: a mount the camera rides (a turret taking over the camera): the object and the eye's offset in
     /// its frame (forward, left, up).
     pub camera_mount: Option<(Handle, [f32; 3])>,
+    /// Gang hook: each character's state parts (canes 316, 317, 318 and the throw marker 586), found once
+    /// (`gang::parts`), by character slot.
+    pub gang_parts: alloc::collections::BTreeMap<u32, [Option<Handle>; 4]>,
     /// Gang hook: the gadget copies out of their pools, with their carry states (`gang::pool`).
     pub gadget_copies: Vec<crate::gang::pool::GadgetCopy>,
     /// Camera hook: two characters to frame together (confrontations; camera.md 2, priority 6).
@@ -346,13 +349,14 @@ impl Default for Shared {
             player_events: Vec::new(),
             camera_yaw: 0.0,
             camera_placement: None,
-            launches: Vec::new(),      // Sly 3 hook
-            camera_follow: None,       // camera hook
-            camera_pair: None,         // camera hook
-            gadget_copies: Vec::new(), // gang hook
-            camera_binocucom: None,    // camera hook
-            camera_move: None,         // camera hook
-            camera_mount: None,        // camera hook
+            launches: Vec::new(),           // Sly 3 hook
+            camera_follow: None,            // camera hook
+            camera_pair: None,              // camera hook
+            gadget_copies: Vec::new(),      // gang hook
+            gang_parts: Default::default(), // gang hook
+            camera_binocucom: None,         // camera hook
+            camera_move: None,              // camera hook
+            camera_mount: None,             // camera hook
         }
     }
 }

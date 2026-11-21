@@ -81,7 +81,8 @@ accessor was needed. `Program::read_table` reads a whole table at an offset, inc
   an operation that gets one treats it as an argument of the wrong kind (operations that take any value, such as
   40, keep it); calling an error value gives `NotCallable`.
 - **Limits** (`Limits`), so a broken or hostile script can neither hang a frame nor exhaust memory or the stack:
-  - nesting depth 256 (`TooDeep`);
+  - nesting depth 256 (`TooDeep`, with a `Site`: the object, event and module of the innermost handler running,
+    or of the event dropped because raising it would nest too deeply);
   - one million evaluation steps per entry into the interpreter (`OutOfSteps`, so an endless `while` cannot hang a
     frame). Built-ins that walk or build lists use one step per element. All the scheduled calls that fall due in
     one `tick` share one budget;
@@ -265,8 +266,11 @@ if let Some(m) = scripts.program().package_module(package, record.script) { scri
     rotation interpolation (A's rotation turned by t of the way to B's; position row zero), 79 Euler angles
     (rotation = Rz Ry Rx, the spec's pole rule), 83 evaluate three coefficients, 135 and 136 bitwise AND and OR;
   - 105 schedules a call and returns a handle; 106 cancels by handle;
-  - 133 looks a symbol (quoted, or its number) up in the calling environment; unbound, it gives operation 134 as a
-    value;
+  - 133 looks a symbol (quoted, or its number) up in the calling environment, passing over the running
+    procedure's own binding; unbound, it gives operation 134 as a value, which does nothing when called [I]. Every
+    call on the disc (all 209) is `((op133 (quote sN)) ...)` inside handler sN: it runs the definition the handler
+    shadows (an outer module's), or nothing. Finding the handler itself recursed to the depth limit (rows 14 and
+    15's class-76 objects);
   - the game's own operations go to `ScriptHost::game_operation(op, args)` (`sly2::HOST_OPERATIONS`, scripts.md 4.2
     and 4.3): 97 the level row and 99 its episode; 100 to 102 the current job, the current task and the checkpoint
     task; 103 the difficulty help (0 to 1); 104 a game-state integer, always 0; 114 the objects found for a list of

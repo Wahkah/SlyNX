@@ -47,6 +47,81 @@ use level::StaticLevel;
 /// The world the session starts in when none is named: the nightclub hub (`f_nightclub_exterior`).
 pub const HUB_WORLD_ID: u32 = 0x41;
 
+/// A sequence's object and script commands (missions.md 4.1): 670 adds an object to the world, 671 removes one,
+/// 634 raises script event 4 on the sequence with its value.
+fn apply_world_cue(world: &mut engine::world::World, seq: engine::object::Handle, c: talk::SeqCommand) {
+    match c {
+        talk::SeqCommand::AddObject(id) | talk::SeqCommand::RemoveObject(id) => {
+            if let Some(h) = world.find_sly2_id(id, Some(seq)) {
+                world.set_in_world(h, matches!(c, talk::SeqCommand::AddObject(_)));
+            }
+        }
+        talk::SeqCommand::Value(v) => world.raise(seq, SEQUENCE_VALUE, alloc::vec![script::Value::Int(v)]),
+        // Command 635: the clip on the object given, else on the clip's own rig (its parent), at the clip's speed
+        // (option 109); its events (the add and remove of camera objects) fire as it is applied and retracted.
+        talk::SeqCommand::PlayClip { clip, object, flags } => {
+            let Some(c) = world.find_sly2_id(clip, Some(seq)) else { return };
+            // −1: the object its first channel animates (camera.md 7.2.1: clip 150489 on rig 150483).
+            let target = if object >= 0 {
+                world.find_sly2_id(object, Some(seq))
+            } else {
+                let channel = world.sly2.as_deref().zip(world.sly2_record(c)).and_then(|(l, r)| {
+                    formats_sly2::anim::Clip::of_record(&world.level.bytes, r, &l.table)
+                        .ok()?
+                        .channels
+                        .first()
+                        .map(|ch| ch.target)
+                });
+                channel.and_then(|id| world.find_sly2_id(id, Some(c))).or(world.parent(c))
+            };
+            let Some(target) = target else { return };
+            let speed = world.options(c).map_or(1.0, |o| o.f32_or(CLIP_SPEED, 1.0));
+            engine::game::sly2_anim::with(world, |a, w| a.apply_clip(w, c, target, 0.0, speed, flags));
+        }
+        _ => {}
+    }
+}
+
+/// A clip's playback speed (option 109; camera.md 7.2.1).
+pub const CLIP_SPEED: u16 = 109;
+
+/// Script event a sequence's value command raises (option 634).
+pub const SEQUENCE_VALUE: u32 = 4;
+
+/// Removes the characters' objects their lookup tables mark with flag `0x200` when bound at load (characters.md
+/// 9.3.1): the second cane 318, the throw marker 586, object 685 and the target-ring placements.
+pub fn remove_flagged_parts(world: &mut engine::world::World, exe: &formats_sly2::exe::Executable) {
+    use formats_sly2::anim::{self as fa};
+    let tables: [(i16, &[(u32, usize)]); 3] = [
+        (fa::SLY_CLASS, &[fa::SLY_TABLES[0], fa::SLY_TABLES[1], fa::SHARED_TABLE]),
+        (fa::BENTLEY_CLASS, &[fa::BENTLEY_TABLE, fa::SHARED_TABLE]),
+        (fa::MURRAY_CLASS, &[fa::MURRAY_TABLE]),
+    ];
+    for (class, list) in tables {
+        let characters: Vec<engine::object::Handle> =
+            world.handles().filter(|&h| world.class(h) == Some(class)).collect();
+        for t in list {
+            let Ok(records) = fa::read_lookup_table(exe, *t) else { continue };
+            for r in records.iter().filter(|r| r.flags & REMOVE_AT_BIND != 0 && r.is_object()) {
+                for &c in &characters {
+                    let Some(h) = world.find_sly2_id(r.key as i32, Some(c)) else { continue };
+                    // Only the character's own (below it).
+                    let mut p = world.parent(h);
+                    while let Some(x) = p.filter(|&x| x != c) {
+                        p = world.parent(x);
+                    }
+                    if p == Some(c) {
+                        world.set_in_world(h, false);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A lookup record's flag that removes its object from the world when the table is bound at load.
+pub const REMOVE_AT_BIND: u32 = 0x200;
+
 /// The camera's current state (position, Euler angles from its forward axis, field of view).
 fn current_cam(v: &engine::game::render_scene::CameraView) -> engine::camera::views::CamState {
     let f = engine::math::normalize(engine::math::sub(v.target, v.eye));
@@ -334,6 +409,10 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 ));
             }
         }
+        // The parts the characters' lookup tables take out of the world when bound (characters.md 9.3.1).
+        if let Some(d) = self.disc.as_ref() {
+            remove_flagged_parts(&mut world, &d.executable);
+        }
         let mut game = Game::new(world, Progress::new_game(), systems, cfg);
         // The characters' skinned meshes are not in the scene build: they are added here and posed every frame.
         let skinned = skin::character_draws(&game.world, &build.material_base);
@@ -500,7 +579,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             self.enter_safe_house();
         }
         // Sly 2 hook: a load the job system asked for (an exit, a restart at a checkpoint).
-        if let Err(e) = self.follow_load_request() {
+        if let Err(e) = self.follow_load_request(measured) {
             self.message = Some(e);
         }
         // Sequences that ended (their commands run out; at once without a sound engine) raise script event 6, which
@@ -519,6 +598,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 // apply as it ends, in order.
                 if sound.is_none() {
                     for c in talk::sequence_commands(&g.world, h) {
+                        apply_world_cue(&mut g.world, h, c);
                         match c {
                             talk::SeqCommand::Task { task, state } => g.world.shared.task_requests.push((task, state)),
                             talk::SeqCommand::Start { sequence, .. } => g.world.shared.sequence_requests.push(
@@ -570,6 +650,9 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             // Task states the running sequences asked for (option 642), and their camera blocks (camera.md 2.1.1).
             if let Some(g) = self.game.as_mut() {
                 g.world.shared.task_requests.extend(s.take_task_requests());
+                for (h, c) in s.take_world_cues() {
+                    apply_world_cue(&mut g.world, h, c);
+                }
                 for c in s.take_camera_cues() {
                     g.world.shared.camera_move = match c {
                         talk::CameraCue::Move { from, to, duration, curve } => {
@@ -610,7 +693,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         let Some(g) = self.game.as_ref() else { return Ok(FrameStats::default()) };
         self.gpu.characters.update(&mut self.renderer, &g.world)?;
         // Gadgets, effects and held items on the characters, where the engine has them (`attached`).
-        self.gpu.attached.update(&mut self.renderer, &g.world)?;
+        self.gpu.attached.update(&mut self.renderer, &g.world, self.unrendered)?;
         // Draws outside the camera's visibility volumes' zones are hidden (camera.md 0).
         self.gpu.show_zones(&mut self.renderer, g.world.shared.visibility_mask)?;
         // Texture animations (rendering.md 4) by the time played since the last frame.

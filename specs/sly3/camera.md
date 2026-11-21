@@ -55,9 +55,10 @@ Class 5 also carries 167, 168, 181, 183 to 188 (open). Defaults as Sly 2 1 [R].
 - **Switching: a zone is on while it is in the world** [X]. Sly 3 has no switching-mode option (Sly 2's 214) and
   no on/off field. The zone's load-time setup (`0x00273BB0`) sets +0x12C = 7 (the allowed behaviour bits, option
   224), +0x134 = −1 (option 227, never set on the disc) and +0x19C = 0. None of these is a mode, and nothing else in
-  the zone's code reads +0x134. When the zone enters the world (vtable slot 24, `0x00273C28`), it is taken out of
-  every player's remembered-zone list (`0x00166228`) and appended to the world's camera-zone list at `0x00479370`
-  (`0x0011B028`). When it leaves the world (slot 25, `0x00273CC0`), it is removed from that list (`0x0011AF60`). A zone
+  the zone's code reads +0x134. When the zone enters the world (vtable slot 25, `0x00273CC0`), it is appended to
+  the world's camera-zone list at `0x00479370` (`0x0011AF60`, the list append). When it leaves the world (slot 24,
+  `0x00273C28`), it is taken out of every player's remembered-zone list (`0x00166228`) and removed from the world's
+  list (`0x0011B028`, the list removal, which also fixes running iterators). A zone
   in the list follows the player's position, as Sly 2's mode −1: it pushes its follow view while the player is
   inside, and the highest priority wins.
 - **So a zone starts on**, unless one of the general world-membership rules keeps it out [X for 27, R for the rest]:

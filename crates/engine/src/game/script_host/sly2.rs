@@ -164,6 +164,11 @@ impl WorldHost<'_> {
 
     /// Also Sly 3's option read (same value types, same store).
     pub(super) fn sly2_get_option(&mut self, object: ObjectId, option: u16) -> Value {
+        if self.world.sly3.is_some()
+            && let Some(v) = self.sly3_live_option(object, option)
+        {
+            return v; // Sly 3 hook: options the game computes.
+        }
         let stored = if object == WORLD_SCRIPT_ID {
             self.world.world_options.get(option).cloned()
         } else {

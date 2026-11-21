@@ -193,7 +193,14 @@ fn jobs() -> Jobs {
         fired_elsewhere: Vec::new(),
         script_events: Some,
         listener_class: None,
+        done_queue: alloc::collections::VecDeque::new(),
+        finishing: false,
+        sly3_rules: false,
+        pending: Vec::new(),
+        completed_now: None,
         load: None,
+        exit_pending: None,
+        exit_fresh: false,
         place: None,
         notices: Vec::new(),
         machine_goals: Vec::new(),
@@ -245,6 +252,105 @@ fn a_request_for_minus_one_or_four_makes_current() {
     j.request(0, state::DONE, false);
     assert!(j.request(1, 4, false));
     assert_eq!(j.current, Some(1));
+}
+
+#[test]
+fn done_at_once_chains_without_recursion_and_does_not_rebegin_the_job() {
+    // Tasks 1 to 3 (job 0's) become current when available and ask for "done" at once (Sly 3's option 1405): task
+    // 0's completion runs the whole chain, job 0 completes once and is not begun again, and job 1's task 4 is
+    // current with job 1 begun.
+    let mut j = jobs();
+    for t in &mut j.graph.tasks[1..=3] {
+        t.done_on_current = true;
+        t.auto_current = true;
+    }
+    j.graph.tasks[4].auto_current = true;
+    assert!(j.request(0, state::DONE, false));
+    assert!(j.states[1..=3].iter().all(|&s| s >= state::DONE), "{:?}", j.states);
+    let completions = j.notices.iter().filter(|n| matches!(n, Notice::JobComplete { job: 2001, .. })).count();
+    assert_eq!(completions, 1, "job 0 completes once");
+    assert_eq!((j.current, j.job), (Some(4), Some(1)));
+    assert!(!j.finishing && j.done_queue.is_empty());
+}
+
+#[test]
+fn a_long_done_at_once_chain_does_not_nest() {
+    // 20,000 tasks in a row, each asking for "done" when it becomes current: one loop, no deep recursion.
+    let mut j = jobs();
+    let n = 20_000;
+    let base = j.graph.tasks[1].clone();
+    j.graph.tasks.truncate(1);
+    j.graph.tasks[0].succ = vec![1];
+    for i in 1..=n {
+        let mut t = base.clone();
+        t.id = 10_000 + i as i32;
+        t.job = None;
+        t.exit = None;
+        t.checkpoint = None;
+        t.done_on_current = true;
+        t.auto_current = true;
+        t.prereq = vec![i - 1];
+        t.succ = if i < n { vec![i + 1] } else { Vec::new() };
+        t.switches = Vec::new();
+        j.graph.tasks.push(t);
+    }
+    j.states = vec![state::LOCKED; n + 1];
+    j.states[0] = state::AVAILABLE;
+    // Nested, this depth would overflow the test thread's stack.
+    assert!(j.request(0, state::DONE, false));
+    assert!(j.states.iter().all(|&s| s >= state::DONE));
+}
+
+#[test]
+fn becoming_current_begins_the_job_then_event_19_then_the_exit() {
+    // missions.md 4.2: the job begins before the task's switches and event 19, and the task's exit fires last.
+    let mut j = jobs();
+    j.graph.tasks[1].exit = Some(9100);
+    j.request(0, state::DONE, false);
+    j.effects.clear();
+    assert!(j.request_current(1, false));
+    let pos = |f: &dyn Fn(&Effect) -> bool| j.effects.iter().position(f).expect("the effect");
+    let job_begin = pos(&|e| matches!(e, Effect::Script { slot: 201, event: script_event::BEGIN, .. }));
+    let task_begin = pos(&|e| matches!(e, Effect::Script { slot: 101, event: script_event::BEGIN, .. }));
+    let exit = pos(&|e| matches!(e, Effect::FireExit(9100)));
+    assert!(job_begin < task_begin && task_begin < exit, "{:?}", j.effects);
+}
+
+#[test]
+fn world_start_takes_the_remembered_task_and_job_and_1273_wins() {
+    // The carry's job begins and its task becomes current (missions.md 7.1).
+    let mut j = jobs();
+    j.request(0, state::DONE, false);
+    j.request(1, state::DONE, false);
+    j.request(2, state::AVAILABLE, false);
+    let carry = Carry { job: 2001, task: 1002, checkpoint: 1002, timer: 4.0, help: 0.3 };
+    let saved = j.progress.clone();
+    let mut k = jobs();
+    k.progress = saved.clone();
+    k.restore(None, Some(carry));
+    assert_eq!((k.current, k.job, k.checkpoint), (Some(2), Some(0), Some(2)));
+    assert_eq!((k.timer, k.help), (4.0, 0.3), "the carried timer and help go on");
+    // A task with option 1273 restored as available replaces the remembered task on every world start.
+    let mut k = jobs();
+    k.progress = saved;
+    k.graph.tasks[3].resume = true;
+    let s3 = k.graph.tasks[3].keys.state.clone();
+    put(&mut k.progress, &s3, SaveValue::Int(1));
+    k.restore(None, Some(carry));
+    assert_eq!(k.current, Some(3), "the last 1273 task restored as available");
+}
+
+#[test]
+fn prerequisite_order_puts_prerequisites_first() {
+    let mut j = jobs();
+    // Make task 0 depend on task 4: 4 comes before 0, the rest keep their chain order.
+    j.graph.tasks[0].prereq = vec![4];
+    j.graph.tasks[4].succ.push(0);
+    j.graph.tasks[4].prereq.clear();
+    j.graph.tasks[3].succ.clear();
+    let order = j.graph.prerequisite_order();
+    let at = |t: usize| order.iter().position(|&x| x == t).unwrap();
+    assert!(at(4) < at(0) && at(0) < at(1) && at(1) < at(2) && at(2) < at(3), "{order:?}");
 }
 
 #[test]

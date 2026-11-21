@@ -118,9 +118,8 @@ pub struct Biplane {
     guns: usize,
     next_gun: usize,
     shot_wait: f32,
+    /// Shots fired and not yet sent as projectiles ([`Biplane::launch`] empties it).
     pub shots: Vec<Shot>,
-    /// Shots already sent as projectiles.
-    launched: usize,
     // The computer pilot.
     pub target: Option<Handle>,
     pub threat: Option<Handle>,
@@ -163,7 +162,6 @@ impl Biplane {
             next_gun: 0,
             shot_wait: 0.0,
             shots: Vec::new(),
-            launched: 0,
             target: None,
             threat: None,
             threat_time: 0.0,
@@ -318,9 +316,10 @@ impl Biplane {
         }
     }
 
-    /// Sends the shots fired since the last call as projectiles (1.5 s of flight, 10 damage [I]).
-    fn launch(&mut self, world: &mut World, me: Handle) {
-        for s in &self.shots[self.launched..] {
+    /// Sends the shots fired since the last call as projectiles (1.5 s of flight, 10 damage [I]), emptying
+    /// [`Biplane::shots`].
+    pub fn launch(&mut self, world: &mut World, me: Handle) {
+        for s in core::mem::take(&mut self.shots) {
             super::shots::fire(
                 world,
                 super::shots::Projectile {
@@ -333,7 +332,6 @@ impl Biplane {
                 },
             );
         }
-        self.launched = self.shots.len();
     }
 
     /// The computer's burst window: whether it may fire now.
@@ -354,9 +352,10 @@ impl Biplane {
 }
 
 /// The other planes as this one sees them.
-fn contacts(world: &World, me: Handle) -> Vec<Contact> {
-    world
-        .handles()
+fn contacts(world: &mut World, me: Handle) -> Vec<Contact> {
+    let planes = super::shots::candidates(world);
+    planes
+        .into_iter()
         .filter(|&h| h != me && world.class(h) == Some(82) && world.is_active(h))
         .filter_map(|h| {
             let w = world.world_transform(h)?;

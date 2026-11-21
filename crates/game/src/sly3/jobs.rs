@@ -24,6 +24,7 @@
 //! 1385 grants an item, and a following job's resume task (1366) becomes the forced checkpoint; 1368's task-event
 //! list is kept on the job. 1362 makes a job ignore the player's defeat ([`defeat`]). Not read yet: the job's state-machine goal 1379 (Sly 2's 1256), 1372 and 1386.
 
+use alloc::vec::Vec;
 use engine::game::sly2_jobs::graph::Ids;
 use engine::game::sly2_jobs::{Carry, Jobs, state};
 use engine::world::World;
@@ -87,11 +88,66 @@ pub fn script_events(e: u32) -> Option<u32> {
 pub fn attach(world: &mut World, progress: Progress, carry: Option<Carry>, queued: Option<i32>) -> Jobs {
     let mut j = Jobs::new_with(world, progress, &IDS);
     j.script_events = script_events;
+    j.sly3_rules = true; // Sly 3's order of becoming current and world start (sly3/missions.md 4, 7).
     // The macro packages (class 147) hear every task event too (missions.md 4.2).
     j.listener_class = Some(MACRO_LISTENER_CLASS);
     j.restore(queued, carry);
+    current_when_available(&mut j);
     j.apply(world);
     j
+}
+
+/// The world start's "current when available" pass (missions.md 4.1a step 3): the last available task with 1399
+/// set that is not the current task, in the available list's order ([`visit_order`]), gets a forced request for
+/// state 4 (made current). The available tasks are every available task, whatever its job (missions.md 4.1a).
+/// Steps 1 and 2 are [`Jobs::restore`]: the tasks restored without events, then the carried job and task (a world
+/// change) re-begun and made current.
+pub fn current_when_available(j: &mut Jobs) {
+    // The game repeats the pass while its request queue holds requests; here requests apply at once, so the queue
+    // is empty after the forced request and the pass ends.
+    let next = visit_order(j)
+        .into_iter()
+        .rev()
+        .find(|&t| j.states[t] == state::AVAILABLE && j.graph.tasks[t].auto_current && j.current != Some(t));
+    if let Some(t) = next {
+        j.request_current(t, true);
+    }
+}
+
+/// The restore's visit order (missions.md 4.1a), which is also the order the restore fills the available list. The
+/// walk starts at the roots and reaches a task once all its prerequisites are visited, recording its depth (+0x108,
+/// the longest path from a root) and its job-change depth (+0x10C: along that path, one more at each step from a
+/// task with a job to a task of a different job). The order is sorted by the job-change depth, the job's object ID
+/// (−1 for none), the depth, then the task's object ID.
+pub fn visit_order(j: &Jobs) -> Vec<usize> {
+    let g = &j.graph;
+    let (depth, changes) = visit_depths(j);
+    let mut order: Vec<usize> = g.prerequisite_order();
+    order.sort_by_key(|&t| {
+        let d = &g.tasks[t];
+        (changes[t], d.job.map_or(-1, |k| g.jobs[k].id), depth[t], d.id)
+    });
+    order
+}
+
+/// Each task's depth and job-change depth (see [`visit_order`]): two separate maxima over the task's prerequisites,
+/// each taken once all of them are visited.
+pub fn visit_depths(j: &Jobs) -> (Vec<u32>, Vec<u32>) {
+    let g = &j.graph;
+    let n = g.tasks.len();
+    let (mut depth, mut changes) = (alloc::vec![0u32; n], alloc::vec![0u32; n]);
+    for t in g.prerequisite_order() {
+        for &c in &g.tasks[t].succ {
+            if c >= n || !g.tasks[c].prereq.contains(&t) {
+                continue;
+            }
+            let from = g.tasks[t].job;
+            let step = u32::from(from.is_some() && g.tasks[c].job != from);
+            depth[c] = depth[c].max(depth[t] + 1);
+            changes[c] = changes[c].max(changes[t] + step);
+        }
+    }
+    (depth, changes)
 }
 
 /// One frame: play time (total and the episode's), the job timer, the task requests of the frame, the effects.
@@ -106,9 +162,15 @@ pub fn step(j: &mut Jobs, world: &mut World, dt: f32, touched: bool) {
     if j.job.is_some() && j.idle < engine::game::sly2_jobs::IDLE_LIMIT {
         j.timer += dt;
     }
+    // Task-state requests from props and trigger shapes (option 489: (task, state), state 4 meaning "current", as
+    // for the task methods).
     for (task, s) in core::mem::take(&mut world.shared.task_requests) {
         if let Some(&t) = j.graph.task_ids.get(&task) {
-            j.request(t, s as i8, false);
+            if s == state::BECAME_CURRENT || s == -1 {
+                j.request_current(t, false);
+            } else {
+                j.request(t, s as i8, false);
+            }
         }
     }
     // The task methods scripts called (engine::game::script_host::sly3: 1409, 1410, 1418 to 1422).
@@ -135,13 +197,14 @@ pub fn step(j: &mut Jobs, world: &mut World, dt: f32, touched: bool) {
     j.apply(world);
 }
 
-/// Command `0x1E` (scripts.md 7.2): task `task` set to `s` as at a checkpoint (4: made current), forced.
+/// Command `0x1E` (scripts.md 7.2) and the exit and arrival pairs (841, 847): task `task` asked for state `s` as
+/// at a checkpoint, an ordinary checked request (sly3/missions.md 4.1a); 4 or −1 asks for it to become current.
 pub fn set_task(j: &mut Jobs, world: &mut World, task: i32, s: i32) {
     let Some(&t) = j.graph.task_ids.get(&task) else { return };
-    if s == state::BECAME_CURRENT {
-        j.request_current(t, true);
+    if s == state::BECAME_CURRENT || s == -1 {
+        j.request_current(t, false);
     } else if (0..=3).contains(&s) {
-        j.force_state(t, s as i8);
+        j.request(t, s as i8, false);
     }
     j.apply(world);
 }

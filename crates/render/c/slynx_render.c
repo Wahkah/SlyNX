@@ -294,8 +294,9 @@ int slynx_render_init(uint32_t max_instances, uint32_t max_draws, uint32_t max_b
     g.cmd_mem = make_block(FRAME_SLOTS * (g.cmd_slot_bytes + CMD_RESERVE_BYTES),
                            DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
     if (!g.cmd_mem) goto oom;
-    // Optional: without it, frames report no GPU time.
-    g.query_mem = make_block(FRAME_SLOTS * QUERY_SLOT_BYTES, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
+    // Optional: without it, frames report no GPU time. GPU-uncached, so the reports reach memory without a cache
+    // flush before the fence (the fence is signalled without one).
+    g.query_mem = make_block(FRAME_SLOTS * QUERY_SLOT_BYTES, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
     if (g.query_mem) memset(dkMemBlockGetCpuAddr(g.query_mem), 0, FRAME_SLOTS * QUERY_SLOT_BYTES);
     DkCmdBufMaker cbm;
     dkCmdBufMakerDefaults(&cbm, g.device);

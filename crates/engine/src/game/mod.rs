@@ -431,6 +431,7 @@ impl Game {
                 sly2_anim::step(&mut self.world, steps.game);
                 crate::anim::sly2_pose::step(&mut self.world); // Sly 2 hook: the clips applied to the poses
                 crate::behavior::sly2_commands::animation_sequence_starts(&mut self.world);
+                crate::behavior::sly2_commands::clip_object_events(&mut self.world);
             }
             self.process_anim_commands();
             self.render.texture_time += steps.game;

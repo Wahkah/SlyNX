@@ -74,6 +74,17 @@ sources:
       loaders.cpp lookup-table binding, trail.cpp and jtthrow.cpp throw marker, jt.cpp target tracking and ring);
       sly2-decomp @ 33e2bab9 (Sly's hide routine, the cane fade, the mode-change routine)
     used_for: the cane rule, the throw marker and the target ring (9.3.1) [R]
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b1dbe8cd9bc9b764c34ffda3f88869713a338e188b4f407732fec6a73), 2026-11-20: the swing
+      floats at 0x002BF4F0 to 0x002BF59C and the catch radius store at 0x0018849C/0x001884B0 in Sly's set-up
+    used_for: every swing and catch constant quoted with an address in 9.1.1 [D]
+  - kind: reference-project
+    what: >-
+      SafeHouse @ c70803ce, Sly2-Release slyhang.cpp (the swing's pendulum, substates, hands and release), sly.cpp
+      (the action-mode routine, the cane catch test, the kept points), climb.cpp (the pipe grip's mode), jumptgt.cpp
+      and jt.cpp (hook targeting), jump.cpp (the reach start and jump kind 2's launch)
+    used_for: the swing physics (9.1.1) and the cane modes 2 and 11 (9.3.1) [R] (2026-11-20)
 reviewed_by: pending
 date: 2026-11-20
 ---
@@ -627,6 +638,60 @@ time is steered toward `D × (clamp(θ / 1.7, −1, 1) + 1) / 2`, `θ` the swing
 straight up in the heading's frame) and `D` the blend's length, at a rate limited to ±3 (`0x002BF58C` = 1.7,
 `0x002BF590` = 3); entering the swing starts it at the middle.
 
+**Swing physics: catch, pump, damping, release (2026-11-20) [R; D for every constant quoted with an address].**
+
+*Which hooks.* A hook is a point-type jump target; its kind (the hook's word at `+0x124`) picks the hang: kind 0
+faces where the stick points (within a quarter turn of the hook frame's x axis, else the reverse), kind 1 faces the
+hook frame's x axis, kind 2 faces its reverse, and kind 3 is not a swing but the hang that follows a moving hook
+(state 22). The jump-target search takes a hook only when its flag word `+0xE8` has bit 0 set, its target mask
+matches, Sly is not higher above it than the hook's authored height allowance, it is within 1000 units, a jump
+taking 0.25 to 3 s (searched from 0.5 s) reaches it with a fit score under 2500, and the path is clear.
+
+*The catch.* Jumping at a hook (jump states 14 and 15, current player only) puts Sly in action mode 0, the cane
+reach. Each physics step while mode 0 is on, Sly keeps three points: his body centre, the cane hook's (object 317)
+centre before the step and its centre after it. The catch tests the two segments body centre → cane hook before,
+and cane hook before → cane hook after, against the hook's point; **the hook is caught when either segment passes
+within 15 units of it** (15.0 stored by Sly's set-up at `0x0018849C`/`0x001884B0`, field `+0x19AC`). The same test
+against the nearest pipe points catches pipes (state 8). So the reach is measured from the cane's hook end, swept,
+not from Sly's hands, and it is 15, not 135. On a catch Sly enters state 3 substate 1 (kind 3: state 22).
+
+*Substates (stick against the heading, pushed past 0.3).* 0 pump ahead (stick within 1.0472 rad), 2 pump back
+(beyond 2.0944 rad), 1 coast, 3 still. From 0: stick back → 2; stick held ahead over 1.4 s (`0x002BF554`) → 1 and
+that direction is locked out; stick released 0.25 s (`0x002BF55C`) → 1. From 2 the mirror (1.4 s at
+`0x002BF558`). From 1 or 3: stick ahead → 0 and stick back → 2 unless that direction is locked; the lock clears
+when the stick is released (magnitude 0.3 or less). 1 → 3 when |angle| < 0.1 rad and speed < 80; 3 → 1 when
+|angle| > 0.4 rad and speed > 120 (`0x002BF560`..`0x002BF56C`).
+
+*The pendulum.* Each frame, about the hook (a hook on a moving object adds its point velocity): let `r` be the
+distance from the hook to Sly's centre, `ω` the swing's angular velocity (tangential speed / `r` about the
+axis across the motion) plus gravity's angular term times `dt`. Split `ω` into its part about the **hook frame's y
+axis** (the swing plane's normal) and the rest. The in-plane part is multiplied by `1 + dt·k`, `k = clamp(1.5 −
+0.35·|ω|, −5, −0.25)` (`0x002BF4F0`, `0x002BF500`): a light −0.25/s drag up to 5 rad/s, heavier above, −5/s from
+about 18.6 rad/s. The out-of-plane part is multiplied by `1 + dt·b`, `b` = −2.5 while pumping (substates 0, 2)
+and −1.0 otherwise (`0x002BF508`). **The push:** for the first 0.25 s after entering substate 0 or 2
+(`0x002BF510`) only, `5·dt` rad/s (`0x002BF514`) is added about the hook's y axis, negative for substate 0,
+positive for 2, both reversed when Sly faces the hook's back; it is scaled by `clamp(0.5 − 0.01·h, 0, 1)`
+(`0x002BF520`), `h` = the swing's energy height relative to the hook (Sly's height minus the hook's plus
+`v²/2g`): full push while that height is 50 or more below the hook, half at the hook's height, none from 50 above.
+So each pump is one 0.25 s impulse of at most 1.25 rad/s, timed by re-pushing the stick (alternating ahead and
+back restarts it at once); holding gives nothing more. **The rope:** its length is eased toward `230 −` the
+hook's value at `+0x134` with the smoothing parameters (1000, 0, 0.25, 5000) (`0x002BF530`), and `ω` is scaled by
+`min(230, r) / max(75, new length)` (`0x002BF540`, `0x002BF544`). Sly's next velocity is the hook's velocity plus
+`ω × (the rope vector rotated by the mean ω over half a step)` plus the rope's length rate; the frame's
+acceleration is set to reach it (gravity removed). Sly's body is braked toward hanging straight below the hook at
+the heading (braking parameters 15, 0, 0.1 at `0x002BF548`). **There is no angle limit and no maximum speed**: the
+energy-height fade of the push and the drag are the only bounds.
+
+*Hands on the hook.* While swinging, the hand record is moved each draw so the cane hook (317) sits on the hang
+point, the hook's position plus its `+0x134` along the direction from the arm to the hook, the arm's two-bone joint
+is solved, and the hand is turned so its x axis points from the arm to the hook, then 1.5 rad about it
+(`0x002BF594`); an extra offset is eased to zero with (3000, 1000, 0.15) (`0x002BF598`).
+
+*Release.* Cross, taken after 0.25 s in the state, lets go as jump kind 2: the swing's velocity is kept and its
+upward part raised to at least 700. The hook's release sound (its `+0x130`, default 9) plays when the hang mode
+ends; the hook's splice events are 5 on entering and 6 on leaving. Whether Square also lets go was not found in this
+pass [I].
+
 **Stealth Slide (Sly, state 24; clips 259, 260, 261).** Entering: 260 alone (weights 0, 1, 0). Each frame, with
 `ω` the body's yaw rate (rad/s, counter-clockwise positive), `L = 0.5 × clamp(ω / 2.5, −1, 1)` (2.5 = 0.1 × 25, the
 first braking value at `0x002C3CB8`): **259 = max(0, L), 260 = 1 − |L|, 261 = max(0, −L)**. So 259 leans into a
@@ -791,12 +856,26 @@ when the table is bound at load** [D for the flags, R for the meaning] (0x300 = 
 
 **The cane rule [R].** Exactly one cane is in the world at a time. At load 316 (with 317) is in, 318 is out. When
 Sly's movement mode changes between "mode 2 or 11" and any other mode, the cane for the new side is added, moved to
-the pose of the one in use, and the other is removed: 318 while the mode is 2 or 11 (mode 11 is the climb), 316/317
-otherwise. While Sly is in a hiding spot his cane 316 is taken out of the world and put back when he leaves it. Sly's
+the pose of the one in use, and the other is removed: 318 while the mode is 2 or 11 (both belong to the pipe climb;
+see "Cane modes 2 and 11" below), 316/317 otherwise. While Sly is in a hiding spot his cane 316 is taken out of the world and put back when he leaves it. Sly's
 hide routine hides and shows 316, 317 and 318 together. When Sly is the current player, 316 and 317 take Sly's own
 fade value each frame, so they fade with him. 317 is also the cane tip for reach tests and for the jump-to-target
 aim. Both canes hang on animated bones (36 and 73) and must be drawn with those bones' world matrices; drawn with
 only their local offsets, they land near the character's origin, at floor level [I].
+
+**Cane modes 2 and 11 (2026-11-20) [R; D for the clips].** The mode is Sly's *action mode*, a value kept apart
+from the gang state and changed by one routine (`0x0018E540`); it is not the movement state. Its values: −1 none;
+0 the cane reaching for a jump target (sound 15, its clip held at the middle for 0.1 s); 1 hanging from a hook;
+**2, 10 and 11 the pipe climb**; 4 to 7 hang blends (sound 11); 12 to 21 cane swings; 22 and 23. The climb sets
+them as follows. Gripping a pipe (state 8, its first substate, current player only) sets **mode 10** when the grip
+clip (slot `0x14D4`, clip 150, 0.4167 s in the nightclub hub) exists, else mode 2 at once; when mode 10's clip
+ends the mode becomes **2** (the climb proper). Leaving state 8 for state 2 (the air) sets **mode 11** when the
+jump-off clip slot `0x14D8` holds a clip, else −1; mode 11 ends with that clip (any mode other than 10 goes to −1
+when its clip ends). In the nightclub hub slot `0x14D8` names object 151, which is not a clip there, so that world
+never enters mode 11 [D for the slot contents]. So 318 (the cane worn on the back, bone 73) is shown only while
+climbing a pipe and during the jump-off clip from one; mode 10 keeps 316 in the hand during the grip clip. Ordinary
+jumps, falls and the other air states never use modes 2 or 11: reading "modes 2 and 11" as "the air states and the
+climb" is wrong.
 
 **The throw marker (586) [R].** Class 105 is a history-trail object: its vertices are redrawn every frame from a
 ring of recent world matrices of its parent transform, each vertex using an older matrix the farther it lies along

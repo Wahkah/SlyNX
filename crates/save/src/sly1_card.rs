@@ -75,12 +75,17 @@ pub fn validate(record: &[u8]) -> Result<(), CardError> {
     Ok(())
 }
 
-/// Writes the header and the check word into `record` (6,656 bytes), as the game does before saving.
-pub fn seal(record: &mut [u8]) {
+/// Writes the header and the check word into `record` (6,656 bytes), as the game does before saving. A record of
+/// any other size is refused ([`CardError::Size`]) and left as it is.
+pub fn seal(record: &mut [u8]) -> Result<(), CardError> {
+    if record.len() != RECORD_SIZE {
+        return Err(CardError::Size);
+    }
     record[0..4].copy_from_slice(&VERSION.to_le_bytes());
     record[4..8].copy_from_slice(&(RECORD_SIZE as u32).to_le_bytes());
     let sum = check_word(record);
     record[CHECK_AT..CHECK_AT + 4].copy_from_slice(&sum.to_le_bytes());
+    Ok(())
 }
 
 /// A new record: zero-filled, the starting values, the header and its check word.
@@ -89,13 +94,22 @@ pub fn new_record() -> Vec<u8> {
     for (at, v) in NEW_RECORD {
         r[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
-    seal(&mut r);
+    seal(&mut r).expect("a new record has the record's size");
     r
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sealing_a_record_of_the_wrong_size_is_refused() {
+        for n in [0, 4, 11, 12, RECORD_SIZE - 1, RECORD_SIZE + 1] {
+            let mut r = vec![7u8; n];
+            assert_eq!(seal(&mut r), Err(CardError::Size), "{n} bytes");
+            assert!(r.iter().all(|&b| b == 7), "left as it is");
+        }
+    }
 
     #[test]
     fn a_new_record_passes_and_holds_its_starting_values() {
@@ -124,14 +138,14 @@ mod tests {
         c[100] ^= 1;
         assert_eq!(validate(&c).map_err(CardError::code), Err(27));
         // Bytes before offset 12 are not summed; resealing fixes the check word.
-        seal(&mut c);
+        seal(&mut c).unwrap();
         assert_eq!(validate(&c), Ok(()));
     }
 
     #[test]
     fn the_sum_is_unsigned_and_32_bit() {
         let mut r = vec![0xFFu8; RECORD_SIZE];
-        seal(&mut r);
+        seal(&mut r).unwrap();
         assert_eq!(word(&r, CHECK_AT), 255 * (RECORD_SIZE as u32 - 12));
         assert_eq!(validate(&r), Ok(()));
     }

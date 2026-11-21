@@ -98,6 +98,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         debug_log(&format!("SlyNX 2: {e}\n"));
     }
     let mut session = Sly2Session::new(backend, disc, 7);
+    // The performance overlay rides along from the first committed level on.
+    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     // Sly 2 hook (front end): the three slots in the user folder (saves/sly2/, SlyNX's own format), and movies read
     // through a second reader of the disc image.
     session.set_slots(alloc::boxed::Box::new(save::sly2::Sly2Store::new(fs)));
@@ -134,7 +136,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     platform.set_cpu_boost(false);
 
     let mut perf = render::perf::PerfMeter::new();
-    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let mut last = now();
     let mut log_at = last + LOG_EVERY_NS;
     let mut paused = false;

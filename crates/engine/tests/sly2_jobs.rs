@@ -222,7 +222,18 @@ fn new_game_job_task_save_load_and_hub() {
     ep1.set_named(&["dt"], None, SaveValue::Float(1.0));
     let mut g3 = enter(d, 3, ep1, None, flow::DEFAULT_POINT);
     let exit = jobs(&g3).exits.iter().find(|e| e.row == Some(2)).map(|e| e.id).expect("an exit to the hub");
+    // Only an armed exit fires (level-flow.md 5.5): just after the arrival it is not, so firing does nothing; armed
+    // (as when the player has left its volume), it fires.
     sly2_jobs::with(&mut g3.world, |j, w| j.fire_exit_id(w, exit));
+    assert!(sly2_jobs::with(&mut g3.world, |j, _| j.exit_pending.is_none()).unwrap(), "not armed: ignored");
+    sly2_jobs::with(&mut g3.world, |j, w| {
+        j.exits.iter_mut().find(|e| e.id == exit).unwrap().state = flow::ExitState::Armed;
+        j.fire_exit_id(w, exit)
+    });
+    // Firing does not load (level-flow.md 5.5): the request comes in a later update, after the delay (0 here).
+    assert!(sly2_jobs::with(&mut g3.world, |j, _| j.load.is_none() && j.exit_pending.is_some()).unwrap());
+    assert_eq!(sly2_jobs::with(&mut g3.world, |j, _| j.step_exit(1.0 / 60.0)), Some(true), "not in the firing update");
+    assert_eq!(sly2_jobs::with(&mut g3.world, |j, _| j.step_exit(1.0 / 60.0)), Some(false));
     let req = sly2_jobs::with(&mut g3.world, |j, _| j.load.take()).flatten().expect("a load request");
     eprintln!("exit {exit}: {req:?}");
     assert_eq!(req.row, 2);

@@ -34,8 +34,23 @@ sources:
   - kind: reference-project
     what: sly2-decomp src/new_100008 (the three command routines) and src/stepguard-jsg (record kinds)
     used_for: section 4.1, command meanings [R]
+  - kind: executable
+    what: SCUS_973.16 (hash checked), task state routine 0x1657D0 and its mode jump table 0x2A5250, task manager world-start event 0x161A58 (calls 0x165C98, 0x164270, 0x15E938, 0x165DC0, 0x165DE8, 0x165E10, 0x1629A0, 0x163D18, 0x1657A8, 0x1643B0), session current-task ID at 0x2DEB44, option-table entries 1271-1273 at 0x2AC880
+    used_for: section 7.1, world start and options 1272 / 1273 (2026-11-20) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (state routine, restore, task manager event 5, field defaults), task.h
+    used_for: section 7.1, meaning of the world-start steps [R]
+  - kind: disc
+    what: 2026-11-20 count of options 1272 and 1273 over every class-133 record of all 43 worlds, per episode
+    used_for: section 7.1 survey table [D]
+  - kind: disc
+    what: 2026-11-20 read of rows 14 and 15 (4_prison) task, job and exit records and option lists (tasks 2412-2425, job 2406, exits 2378-2381, 2442, 2532, 2596, 2604)
+    used_for: section 4.2, the hack-station tasks have no exit [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (task activation, state routine, job completion), frontend.cpp (exit firing and update), transition.cpp (load request)
+    used_for: section 4.2, the order of becoming-current effects and when a task exit loads [R]
 reviewed_by: pending
-date: 2026-11-20
+date: 2026-11-21
 ---
 
 # Sly 2 jobs and tasks
@@ -229,6 +244,74 @@ So 1696 is finished by the script of its completion sequence 1697 (module 20), d
 job 1671's module, sequence 1690 or a state machine. An engine needs: commands 670/671 (add/remove object),
 634 (raise event 4 on the sequence's module with the value), and trigger volumes that start a sequence on entry.
 
+**Tasks 1703–1711: the van chase and volume 150658 (added 2026-11-21).** Task 1709 (`t0_van_rescue_attempt`;
+prerequisite 1707, successor 1711 `t0_van_escape`) switches in two trigger volumes for state 1, 150660 and 150658
+[D]. The object 150658 waits for is the getaway van's carrier. The player doesn't drive it: a fixed chain of clips
+moves it, and the player only triggers each leg by running ahead on the rooftops.
+
+- **What 150849 is** [D]. A top-level class-48 solid object in package `jb_intro_rooftops`. It has no meshes, no
+  options and no name; its two transforms sit at (−14328.6, 16001.4, 0) (the second turned about z). Its only
+  record is a placement of package `jb_getaway_van` (the van, object 118385, whose own module is module 0 of that
+  package). So 150849 carries the van, and moving 150849 moves the van along the street at z = 0.
+- **What moves it** [D]. Six top-level clips, each with one channel on 150849's transform 0 (a position curve, kind
+  2), and nothing else drives it. Each clip starts where the one before ends, so together they make one route
+  through the streets:
+
+| Clip | Played by sequence | Length | From | To |
+|---|---|---|---|---|
+| 150808 | 1704 | 2.48 s | (−14466.1, 15800.9) | (−15744.1, 12712.2) |
+| 150804 | 1704 | 6.65 s | (−15744.0, 12712.5) | (−16599.9, 3701.1) |
+| 150722 | 1706 | 6.85 s | (−16599.1, 3698.9) | (−22078.1, 9785.9) |
+| 150691 | 1708 | 7.78 s | (−22276.9, 9690.8) | (−25605.4, −1293.7) |
+| 150662 | 1710 | 4.17 s | (−25604.5, −1284.5) | (−26524.9, 3232.4) |
+| 150654 | 1712 | 6.12 s | (−26523.7, 3232.0) | (−29082.4, −4737.8) |
+
+  Every one is played with command 635 with the no-wait flag 0, so the sequence goes on only after the clip. The
+  other clips of those sequences drive other objects.
+- **What starts each leg** [D]. Tasks 1703, 1705, 1707, 1709 and 1711 own modules 25–29 of `jb_intro_macro`. Each
+  module's event-19 handler (the task became current) starts the matching sequence, 1704, 1706, 1708, 1710 or 1712,
+  with no starter (script ID 235). This is the same pattern as 1689 and 1690 above. None of these tasks carries option
+  1272. Each becomes current through a Sly-only trigger volume (option 432 = 7) that its own state-1 switch adds,
+  whose option 440 requests state 4 (become current):
+
+| Task | Name | Volume | Volume centre | Box half-size |
+|---|---|---|---|---|
+| 1703 | `t0_cop_car_chase2` | 150778 | (−13851.6, 14892.8, 1554.1) | about 400 to 690 |
+| 1705 | `t0_cop_car_chase3` | 150726 | (−18084.0, 10749.2, 1595.6) | 400 |
+| 1707 | `t0_cop_car_chase4` | 150695 | (−22148.0, 6983.4, 1512.2) | 400 |
+| 1709 | `t0_van_rescue_attempt` | 150660 | (−26225.4, 4238.5, 1412.1) | 354 to 1714 |
+| 1711 | `t0_van_escape` | 118395 | inside the van package, at local (−119.1, −0.2, 65.0) | 50 to 123 (mask 0x80) |
+
+  These volumes are at rooftop height (z about 1400 to 1600) above the van's street route. Volume 118395 is part of
+  the van and switched by 1711 with the van, 118385, as owner.
+- **How 150849 gets into 150658** [D for the positions, I for the test point]. Sequence 1704 also sets task 1703 to
+  state 2 right after its first clip, and 1706 and 1708 do the same for 1705 and 1707. That makes the next task
+  available, and its volume appears. When Sly reaches 150660, task 1709 becomes current and sequence 1710 runs. 1710
+  plays sub-sequence 1659 (command 636), then clip 150662.
+  - Volume 150658 is a 200-unit cube centred on (−26554.5, 3323.8, 23.8).
+  - Clip 150662 brings 150849's position into the cube 4.07 s into its 4.17 s run, and leaves it there at the end.
+    The next clip, 150654, starts at that same point.
+  - Volume 150658 (option 432 = 150849) then fires its option 440, (1709, 2): task 1709 is done, so 1711 becomes
+    available along with the van's own volume 118395.
+  - Volume 150658's mask is 0x1. It is active only while the camera's eye is inside zone 150851 (mask 1), which
+    covers this whole street area (x −38081 … −11734, y −11303 … 20411; camera.md 7.2.1).
+- **Afterwards.** Sly entering 118395 makes 1711 current, and module 29 starts sequence 1712 [D]. 1712:
+  - removes 150650 (command 671);
+  - plays clip 150654, which drives the van away;
+  - raises value 152660 on its own module 30 (command 634).
+
+  Module 30's case for 152660 hides four of Sly's mesh groups (script ID 111 with 3820, 3824, 3822, 3794) and calls
+  Sly's script ID 33 with (150849, 3) [D]. This reads as putting Sly in the van and attaching him to the carrier [I].
+  Module 28 (task 1709) also has an event-21 handler that reaches the van's script (object 118385, method 1861) [D];
+  what it does was not followed further.
+- **For an engine.** Getting 1709 done needs:
+  - clips that move a solid's transform 0 in world space, including the objects placed under it;
+  - trigger volumes that test a non-player object named in option 432;
+  - option 440 requests of state 4 (become current) and state 2.
+
+  No path or curve moves 150849, and nothing in the data links it to player input [D]. Curve 150847, the record
+  just before it, does not reference it [D].
+
 **Hack sequences 2410/2411 in row 14.** They are in the world file of row 14 (`4_prison/00_0x082_hub.s2w`), in
 package `p_prison_macro` (keep flag set: no clone, 1 copy; not placed; package 110 of 284) [D]. The records carry
 **level conditions**: 2408, 2410 and 2411 (class 114) each list row 14, and screen object 2409 lists rows 14 and
@@ -245,6 +328,51 @@ current level: row 14 is the level-table row, not the file's index (00) or the w
 The 12 "too deep" errors are then probably the scripts' method calls on the missing objects (lookups that return
 no object) cascading through handlers, not a data recursion [I]; nothing in row 14's scripts calls itself through
 2410/2411 [D].
+
+### 4.2 Becoming current: the order of effects, and the hack-station case (added 2026-11-20)
+
+**Order** [R, from the task-activation and task-state routines]. When a task becomes current (a request for state 4,
+3.1), in this order, all within the same update:
+
+1. The previous current task stops being current (switch group 5, event 0x24, prompt removed, event 20 to its
+   script).
+2. The new task is made current; its checkpoint (option 1274) is remembered; its job begins if it is not the current
+   job.
+3. If the task is live (its record is loaded in this world): play count + 1 and saved; event 0x23 broadcast; switch
+   group 4 applied; state-machine goals for 4; objective prompt (option 1265) shown; **event 19 sent to the task's
+   own script**, whose handler runs at once.
+4. Only then, if the task has an exit (option 1278): the exit is set to update on the real clock and fired
+   (level-flow.md 5.5). The exit does not load anything in this step.
+
+So event 19's handler always runs, and any sequence it starts has been started, before a task exit is fired. Even
+then the load comes later: the exit's delay (option 785) and the wipe-out animation of option 780 (level-flow.md
+5.5). An engine that loads the destination in the update where the task becomes current, or before event 19, is
+wrong.
+
+**Task 2414 (`t4_hack_station1`, row 14) has no exit** [D]. Its options are: 1264 = job 2406 (`m4_hack`), four 1288
+state-machine goals, one 1287 object switch (object 77397, states (1), owner −1, row −1), and the save keys
+1295–1299. There is no 1278, 1279, 1274, 1275 or 1276. The other station tasks (2416–2424) have none either; the
+path tasks (2415, 2417, …, 2423) carry only a checkpoint (1274), world row 14 (1275), Bentley (1276 = 8) and 1271 /
+1272. Job 2406 has no job exit (1259). In all of row 14 only four task and job exits exist [D]:
+
+| Owner | Option | Exit | Destination |
+|---|---:|---:|---|
+| task 2443 `t4_chalktalk2` | 1278 | 2442 | row 14, movie `0x7E5`, wipe 777 |
+| task 2533 `t4_chalktalk3` | 1278 | 2532 | row 14, movie `0x7E6` |
+| job 2444 | 1259 | 2381 | row 14, wipe 777 |
+| job 2534 | 1259 | 2604 | row 1 (ending `0x7E8`) |
+
+None of them leads to row 15, and none belongs to job 2406. The row-14 exit to row 15 is 2379 (wipe 778), an
+ordinary door volume that fires only when the player enters it while it is armed [D for the record, R for the rule].
+So in the game, 2414 becoming current loads nothing: event 19 runs its handler (module 28: sets the job's focus pair
+and starts sequence 2410 with the current character, 4.1), and the player stays in row 14.
+
+If an engine loads row 15 at this point, the exit it fired is not from 2414's data [I]. Places to check: the task's
+exit field (option 1278, default none) being filled from another option (1287's object 77397, or 2412's 1279 object
+60442) or from a default that resolves to an object; 77397 is an object switch target, not an exit; a task-exit or
+job-exit lookup that falls back to "the first exit of the world"; or job 2406 being taken as ended (an ended job with
+no next task fires its 1259 exit, and it has none; a job end with no exit pending goes to the episode's main world,
+row 14, not 15) [I].
 
 ## 5. Jobs
 
@@ -297,6 +425,79 @@ world load the restore makes them current again [R]. **Loading a save from the c
 restored as available that carries option 1273 (section 3), in practice the episode's pending briefing or purchase.
 A port should keep the three in session state, not in the save block [I]. The save format itself is for
 `saving.md`.
+
+### 7.1 World start: which task becomes current (added 2026-11-20)
+
+Question: Sly 3's world start ends with a separate pass that forces the last available "current when available"
+task current with a state-4 request, then re-begins a saved job and makes a saved active task current. Sly 2 has
+**no such pass** [D]. Its world start is the task manager's world-start event (event 5), and the only place options
+1272 and 1273 act is the routine every task state change goes through [D]. The two fields (option 1271 at task
+offset 0x6C, 1272 at 0x70, 1273 at 0x74, per the option table at 0x2AC880) default to 0 [D for the offsets, R for the
+default].
+
+**World start, in order** [D for the calls, R for the meaning]:
+
+1. Every task of the world is put in prerequisite-first graph order.
+2. Each task in turn is restored from the save (section 7) with its mode set to "restoring". Its previous mode is put
+   back afterwards.
+3. The current job, the current task and the checkpoint task are looked up again from three object IDs kept in
+   session memory (not in the save; [saving.md](saving.md) 2). An ID with no object in this world gives none.
+4. If there is a current job it begins again, then if there is a current task it becomes current. Making a task
+   current also begins its own job when that is not the current job (section 4), so the task's job wins over the
+   remembered job.
+5. If the "level-change request" flag 4 of the task manager is set, event 0x1E is sent to the checkpoint task, or to
+   the current job's first task (job option 1243) when there is no checkpoint task [D for the branch, R for the targets].
+6. Every task is saved again with its mode set to "normal".
+
+**What the options do during that restore** [D]. After every state change, the state routine branches on the task's
+mode (jump table at 0x2A5250, modes 0 to 4):
+
+- **Restoring (mode 1).** When the new state is available (1) and option 1273 is set, the task's ID is written over
+  the session's remembered current-task ID. Nothing else happens; the task is not made current here. Option 1272 is
+  ignored in this mode. Because the tasks are restored in graph order and each qualifying task overwrites the ID, **the
+  last 1273 task restored as available wins**; step 3 then makes it current. This happens on every world start, so
+  inside one session a 1273 task that comes back available also replaces the task the player had current before the
+  world load.
+- **Normal play and the two reset modes (modes 0, 2 and 4).** When the new state is available and option 1272 is set,
+  the task becomes current at once. When the new state is locked (0) or done (3), the task stops being current if it
+  was. Mode 3 does neither.
+
+So in Sly 2, 1272 is a play-time rule ("become current the moment you open up") and never runs at world start; 1273
+is the world-start rule. There is **no saved job key and no saved active-task key** [D]: the three IDs are session
+memory only. After a memory-card load they are empty, so the current task after the load is the last 1273 task
+restored as available, or none; no job is current until that task (or a later request) begins one [R].
+
+**Disc survey** [D] (all 43 worlds; every world of an episode carries the whole episode's task graph, so counts are
+per episode, distinct task names):
+
+| Episode | 1272 = 1 | 1272 present but 0 | 1273 (always 1) |
+|---|---:|---:|---:|
+| 0 (prologue) | 2 | 0 | 0 |
+| 1 | 20 | 3 | 3 |
+| 2 | 19 | 4 | 3 |
+| 3 | 14 | 5 | 3 |
+| 4 | 38 | 2 | 2 |
+| 5 | 25 | 3 | 4 |
+| 6 | 17 | 3 | 3 |
+| 7 | 41 | 3 | 4 |
+| 8 | 23 | 6 | 2 |
+| **all** | **199** | **29** | **24** |
+
+The 228 of the option table in section 3 counts every task that carries option 1272; 29 of them set it to 0, which is
+the same as leaving it out. The tasks with 1272 = 1 are mostly a job's "…_complete" step and intermediate steps that
+hand on to the next (`t1_recon_complete`, `t4_hack_path2`, `t8_engine_room_jt_lower`, …). The 29 zeros include every
+briefing that carries 1272. The 24 tasks with 1273 are the briefings (`t1_chalktalk1` … `t8_chalktalk2`; episode 4 has
+no `chalktalk1` with it) and the purchases `t5_paraglide_purchase` and `t7_alarmclock_purchase`. The two purchases are the
+only tasks with both 1272 = 1 and 1273: in play they become current the moment they open up, and after a world start
+they are the remembered current task if they come back available.
+
+**Compared with the engine.** Making the 1273 tasks current after a load matches the memory-card case. To match the
+game a port should also [I]:
+
+- on every world start, look up the remembered current job, current task and checkpoint task from session state and
+  make them current again (section 7), and let a 1273 task restored as available replace the remembered task;
+- when several 1273 tasks come back available, make only the last one in graph order current, not each in turn;
+- apply 1272 only to state changes outside the restore, never as a world-start pass.
 
 ## 8. Jobs by episode (names from the game's string table) [D]
 

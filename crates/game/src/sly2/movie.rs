@@ -116,6 +116,9 @@ pub struct Still {
 
 /// Deepest sprite nesting followed.
 pub const MAX_DEPTH: u32 = 8;
+/// Most slots drawn for one still, across all nesting: bounds the work a screen whose sprites place each other many
+/// times over can cause (the depth cap alone allows slots^8).
+pub const MAX_SLOTS: u32 = 4096;
 
 /// A sprite's label by ID.
 pub fn label(screen: &Screen, sprite: usize, id: i32) -> Option<&Label> {
@@ -167,15 +170,30 @@ fn slots(l: &Label, time: f32) -> Vec<(u16, Slot)> {
 /// it play their first label to its end.
 pub fn still(screen: &Screen, l: &Label, time: f32, m: &Affine, tint: &Tint) -> Still {
     let mut out = Still::default();
-    draw_label(screen, l, time, m, tint, 0, &mut out);
+    let mut budget = MAX_SLOTS;
+    draw_label(screen, l, time, m, tint, 0, &mut budget, &mut out);
     out
 }
 
-fn draw_label(screen: &Screen, l: &Label, time: f32, m: &Affine, tint: &Tint, depth: u32, out: &mut Still) {
+#[allow(clippy::too_many_arguments)]
+fn draw_label(
+    screen: &Screen,
+    l: &Label,
+    time: f32,
+    m: &Affine,
+    tint: &Tint,
+    depth: u32,
+    budget: &mut u32,
+    out: &mut Still,
+) {
     if depth > MAX_DEPTH {
         return;
     }
     for (_, s) in slots(l, time) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
         let Some(item) = screen.items.iter().find(|i| i.number == s.item) else { continue };
         let m = compose(m, &s.m);
         let tint = tint.then(&s.tint);
@@ -203,7 +221,7 @@ fn draw_label(screen: &Screen, l: &Label, time: f32, m: &Affine, tint: &Tint, de
                 let n = *n as usize;
                 out.sprites.push((n, m));
                 if let Some(first) = screen.sprites.get(n).and_then(|s| s.labels.first()) {
-                    draw_label(screen, first, f32::MAX, &m, &tint, depth + 1, out);
+                    draw_label(screen, first, f32::MAX, &m, &tint, depth + 1, budget, out);
                 }
             }
             ItemBody::Text(t) => out.texts.push(PlacedText {
@@ -288,6 +306,31 @@ mod tests {
         // At the end slot 1 is emptied.
         let s = still(&screen, l, f32::MAX, &IDENTITY, &Tint::NONE);
         assert_eq!(s.triangles.len(), 1);
+    }
+
+    #[test]
+    fn nested_sprites_stop_at_the_work_budget() {
+        // A sprite whose label places itself in 16 slots: 16^8 slots without the budget.
+        let screen = Screen {
+            items: alloc::vec![Item { number: 1, body: ItemBody::Value(0) }],
+            sprites: alloc::vec![Sprite {
+                instances: 1,
+                slots: 16,
+                labels: alloc::vec![Label {
+                    duration: 0.0,
+                    id: 1,
+                    keys: alloc::vec![key(
+                        0.0,
+                        (0..16).map(|i| place(1, i, -1, 0.0)).collect(),
+                        alloc::vec![],
+                        alloc::vec![]
+                    )],
+                }],
+            }],
+            ..Screen::default()
+        };
+        let s = still(&screen, label(&screen, 0, 1).unwrap(), f32::MAX, &IDENTITY, &Tint::NONE);
+        assert_eq!(s.sprites.len(), MAX_SLOTS as usize);
     }
 
     #[test]

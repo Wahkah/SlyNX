@@ -533,8 +533,12 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         self.gpu = match made {
             Ok(gpu) => gpu,
             Err(e) => {
-                // The renderer holds an empty level now: nothing may keep handles into the old one.
+                // The renderer holds an empty level now: nothing may keep handles into the old one (the layers made
+                // before the failure included).
                 self.gpu = StaticLevel::default();
+                self.shot_marks = None;
+                self.ui.layer = None;
+                self.front.movies.set_layer(None);
                 self.game = None;
                 self.current = None;
                 return Err(format!("{label}: {e}"));
@@ -591,10 +595,16 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         // Scripts: none carry over; the arrival point's script (option 845) starts.
         self.scripts = commands::Scripts::new(self.seed ^ slot as u64);
         let classes = checkpoint_classes(&disc.classes);
-        if let Some(a) = flow::find_arrival(&game.world, self.arrival_id, &classes)
-            && let Some(script) = game.world.options(a.handle).and_then(|o| o.i32(flow::opt::ARRIVAL_SCRIPT))
-        {
-            self.scripts.start(&game.world, script, -1);
+        if let Some(a) = flow::find_arrival(&game.world, self.arrival_id, &classes) {
+            // The point's (task, state) pairs (option 847; level-flow.md 5.2), applied on arrival.
+            if let Some(j) = self.jobs.as_mut() {
+                for &(task, state) in &a.task_states {
+                    jobs::set_task(j, &mut game.world, task, state);
+                }
+            }
+            if let Some(script) = game.world.options(a.handle).and_then(|o| o.i32(flow::opt::ARRIVAL_SCRIPT)) {
+                self.scripts.start(&game.world, script, -1);
+            }
         }
         self.current = Some(Sly3Current { slot, name: entry.name, id, objects: game.world.len() });
         self.game = Some(game);
@@ -793,11 +803,33 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let input = &if self.screens_hold() || self.script_paused {
             FrameInput::default()
         } else {
-            self.safe_house_input(input)
+            // Sly 3 hook (2D layer): the job-failed screen keeps its dismiss button.
+            self.safe_house_input(&layer::without_dismiss(input, self.ui.failed.is_some()))
         };
         if let Some(g) = self.game.as_mut() {
             g.world.shared.sly3_holds = holds;
             g.frame(input, measured);
+            // Sly 3 hook (use points): the use button (Circle) uses the nearest point within reach.
+            if input.pressed & platform_api::Buttons::A.0 != 0
+                && let Some(p) = g.world.player.and_then(|h| g.world.position(h))
+            {
+                use engine::behavior::sly3::interactables::{class, use_point_used};
+                let w = &g.world;
+                let mut points: Vec<(f32, engine::object::Handle)> = w
+                    .handles()
+                    .filter(|&h| w.class(h) == Some(class::USE_POINT))
+                    .filter_map(|h| {
+                        let q = w.position(h)?;
+                        let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+                        Some((d[0] * d[0] + d[1] * d[1] + d[2] * d[2], h))
+                    })
+                    .collect();
+                points.sort_by(|a, b| a.0.total_cmp(&b.0));
+                if let Some(script) = points.into_iter().find_map(|(_, h)| use_point_used(&mut g.world, h)).flatten() {
+                    let me = g.world.player.and_then(|h| g.world.sly3_id(h)).unwrap_or(-1);
+                    self.scripts.start(&g.world, script, me);
+                }
+            }
             let touched = input.buttons != 0 || input.left != [0.0; 2] || input.right != [0.0; 2];
             if let Some(j) = self.jobs.as_mut() {
                 jobs::step(j, &mut g.world, measured, touched);

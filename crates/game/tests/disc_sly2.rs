@@ -170,11 +170,19 @@ fn the_gang_lands_runs_and_switches_in_the_hub() {
         s.update(&FrameInput { pressed: b.0, buttons: b.0, ..Default::default() }, 1.0 / 60.0);
         assert_eq!(class_of_player(&s), Some(class));
     }
-    // The follow camera looks at the played character.
-    let g = s.game.as_ref().unwrap();
-    let eye = g.render.camera.eye;
-    let p = pos(&s);
-    let d = ((eye[0] - p[0]).powi(2) + (eye[1] - p[1]).powi(2)).sqrt();
+    // The follow camera looks at the played character (once the episode's opening cutscene, whose clips add and
+    // remove camera objects, has given the view back; camera.md 7.2.1).
+    let mut d = f32::MAX;
+    for _ in 0..1800 {
+        let g = s.game.as_ref().unwrap();
+        let eye = g.render.camera.eye;
+        let p = pos(&s);
+        d = ((eye[0] - p[0]).powi(2) + (eye[1] - p[1]).powi(2)).sqrt();
+        if d < 3000.0 {
+            break;
+        }
+        s.update(&FrameInput::default(), 1.0 / 60.0);
+    }
     assert!(d < 3000.0, "the camera follows the gang: {d}");
 }
 

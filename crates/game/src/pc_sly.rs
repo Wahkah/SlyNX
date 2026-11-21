@@ -51,12 +51,14 @@ pub struct Sly2App {
     // Field order is drop order: the session (and its backend) before the platform.
     session: Sly2Session<GlBackend, File>,
     platform: PcPlatform,
+    /// Testing aid: the frame at which the placed bomb is triggered.
+    trigger: Option<(u32, engine::object::Handle)>,
+    frame: u32,
 }
 
 impl Sly2App {
     pub const NAME: &'static str = "sly2";
-    pub const DESCRIPTION: &'static str =
-        "SlyNX on Sly 2 (OpenGL); options: world=ROW or 0xID, disc=PATH, place_bomb=1 (a Trigger Bomb placed ahead)";
+    pub const DESCRIPTION: &'static str = "SlyNX on Sly 2 (OpenGL); options: world=ROW or 0xID, disc=PATH, place_bomb=1 (a Trigger Bomb placed), trigger_bomb=FRAME";
 
     pub fn new(config: &AppConfig) -> Result<Sly2App, AppError> {
         let platform = platform(config)?;
@@ -75,15 +77,22 @@ impl Sly2App {
         }
         .ok_or_else(|| format!("no world `{}`", w.unwrap_or("hub")))?;
         session.load_row(row)?;
-        if config.option("place_bomb").is_some() {
-            place_bomb(&mut session);
-        }
-        Ok(Sly2App { session, platform })
+        let bomb = config.option("place_bomb").and_then(|_| place_bomb(&mut session));
+        // `trigger_bomb=F`: the placed bomb is triggered at frame F (state 3: its countdown blink).
+        let trigger = config.option("trigger_bomb").and_then(|f| f.parse().ok()).zip(bomb);
+        Ok(Sly2App { session, platform, trigger, frame: 0 })
     }
 }
 
 impl App for Sly2App {
     fn update(&mut self, ctx: &mut FrameContext<'_>) -> Result<(), AppError> {
+        if let Some((at, copy)) = self.trigger
+            && self.frame == at
+            && let Some(g) = self.session.game.as_mut()
+        {
+            engine::gang::pool::set_state(&mut g.world, copy, 3);
+        }
+        self.frame += 1;
         let input = harness_input(ctx.input);
         self.session.update(&input, ctx.dt as f32);
         Ok(())
@@ -101,27 +110,16 @@ impl App for Sly2App {
     }
 }
 
-/// Testing aid for the attached objects' drawing: takes Bentley's Trigger Bomb out of his pool (out of the
-/// characters, as a copy would be) and places it halfway between Bentley and the player, on the player's floor, as
-/// if thrown and landed.
-/// The engine does not place gadget copies yet (gadgets.md 6).
-fn place_bomb(session: &mut Sly2Session<GlBackend, File>) {
-    use crate::sly2::attached::{BOMB_CLASS, pool_template};
-    let Some(g) = session.game.as_mut() else { return };
-    let w = &mut g.world;
-    let Some(bomb) = w.handles().find(|&h| w.class(h) == Some(BOMB_CLASS) && pool_template(w, h) && w.is_active(h))
-    else {
-        return;
-    };
-    let Some(p) = w.player.and_then(|h| w.world_transform(h)) else { return };
-    let Some(carrier) = w.world_transform(bomb) else { return };
-    w.reparent(bomb, None, false);
-    // Halfway from its carrier to the player, on the player's floor.
-    let mut at = p;
-    at.t = [(p.t[0] + carrier.t[0]) * 0.5, (p.t[1] + carrier.t[1]) * 0.5, p.t[2]];
-    w.set_local(bomb, at);
-    w.set_in_world(bomb, true);
-    w.update_transforms();
+/// Testing aid for the attached objects' drawing: Bentley takes a Trigger Bomb from his pool and places it halfway
+/// between him and the player, on the player's floor, landed (`engine::gang::pool`), as a throw would.
+fn place_bomb(session: &mut Sly2Session<GlBackend, File>) -> Option<engine::object::Handle> {
+    use engine::gang::pool;
+    let w = &mut session.game.as_mut()?.world;
+    let bentley = w.handles().find(|&h| w.class(h) == Some(55))?;
+    let copy = pool::take(w, bentley, 7)?;
+    let (p, b) = (w.player.and_then(|h| w.position(h))?, w.position(bentley)?);
+    pool::release(w, copy, [(p[0] + b[0]) * 0.5, (p[1] + b[1]) * 0.5, p[2]], 0.0, true);
+    Some(copy)
 }
 
 /// The Sly 3 session as a harness app.

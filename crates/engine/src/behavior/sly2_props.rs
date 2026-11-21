@@ -47,8 +47,11 @@ pub fn send_task_event(world: &mut World, e: u32) {
 
 /// A Sly 2 volume's box: its frame and the box of its collision points in that frame.
 pub fn volume_box(world: &World, h: Handle) -> Option<(Affine, [f32; 3], [f32; 3])> {
-    let r = world.sly2_record(h)?;
-    let end = r.options()?.end;
+    // Sly 3 hook: a Sly 3 trigger shape (class 21, layout "shape": header, options, then the same collision mesh).
+    let end = match world.sly3 {
+        Some(_) => world.sly3_record(h)?.options()?.end,
+        None => world.sly2_record(h)?.options()?.end,
+    };
     let data = &world.level.bytes;
     let mut rd = formats::reader::Reader::at(data, end);
     let n = rd.u16().ok()? as usize;
@@ -373,12 +376,18 @@ impl ClassBehavior for TriggerVolume {
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
-        let Some(shape) = volume_box(cx.world, cx.me) else { return };
-        let mut inside: Vec<Handle> = characters(cx.world)
-            .into_iter()
-            .filter(|&(h, c)| in_volume(&shape, c) && Self::counts(cx.world, cx.me, h))
-            .map(|(h, _)| h)
-            .collect();
+        let shape = volume_box(cx.world, cx.me);
+        if shape.is_none() && !self.visit {
+            return;
+        }
+        let mut inside: Vec<Handle> = match &shape {
+            Some(shape) => characters(cx.world)
+                .into_iter()
+                .filter(|&(h, c)| in_volume(shape, c) && Self::counts(cx.world, cx.me, h))
+                .map(|(h, _)| h)
+                .collect(),
+            None => Vec::new(),
+        };
         if core::mem::take(&mut self.visit)
             && let Some(p) = cx.world.player
             && !inside.contains(&p)

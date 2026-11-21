@@ -148,6 +148,11 @@ fn sly_walks_v_apt_and_v_ext_deterministically() {
         assert_eq!(trail[200].0, 52, "{name}: back to Sly");
         // Sly moved and stayed finite.
         let (p0, p1) = (trail[0].1, trail[119].1);
+        // v_apt: after the arrival cutscene Sly still stands on the arrival floor (surface 401, z ≈ 46), held by the
+        // collision tree's one-sided rule.
+        if name == "v_apt" {
+            assert!((p0[2] - 46.0).abs() < 6.0, "v_apt: Sly at {p0:?} after the arrival");
+        }
         let moved = ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2)).sqrt();
         assert!(moved > 50.0, "{name}: Sly moved {moved} units");
         assert!(trail.iter().all(|t| t.1.iter().all(|v| v.is_finite())));

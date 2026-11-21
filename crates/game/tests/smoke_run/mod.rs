@@ -250,35 +250,59 @@ pub fn run_gang(title: Title, cfg: &Config, mut progress: impl FnMut(&Stage)) ->
     stages
 }
 
-/// The world matrix of the first open job's waypoint (see [`steer_to_waypoint`]).
-fn waypoint_target(s: &game::sly3::Sly3Session<NullBackend, DiscFile>) -> Option<formats::geometry::Affine> {
+/// Where the route heads (missions.md 4.2): with no job running, the waypoint of the first available task that has
+/// one; during a job, a trigger shape naming the current task's successor, else the nearest active waypoint used
+/// during jobs (kind 1). `None` when there is none or the
+/// player is already in it.
+fn route_target(s: &game::sly3::Sly3Session<NullBackend, DiscFile>) -> Option<engine::object::Handle> {
     let j = s.jobs.as_ref()?;
     let g = &s.game.as_ref()?.world;
-    let named = |h, m: i32| g.sly3_id(h) == Some(m) || g.parent(h).and_then(|p| g.sly3_id(p)) == Some(m);
-    (0..j.states.len()).filter(|&k| j.states[k] == 1).filter_map(|k| j.graph.tasks[k].marker).find_map(|m| {
-        let w = s.waypoints.iter().find(|w| named(w.handle, m) && g.is_active(w.handle))?;
-        g.world_transform(w.handle)
-    })
+    let wp = if j.job.is_none() {
+        // 1407 names the waypoint's placement (its ID names the copy's root) or the waypoint itself.
+        let named = |h, m: i32| g.sly3_id(h) == Some(m) || g.parent(h).and_then(|p| g.sly3_id(p)) == Some(m);
+        (0..j.states.len())
+            .filter(|&k| j.states[k] == 1)
+            .filter_map(|k| j.graph.tasks[k].marker)
+            .find_map(|m| s.waypoints.iter().find(|w| named(w.handle, m) && g.is_active(w.handle)))?
+    } else {
+        // A trigger shape (class 21, interactables.md 6) whose task requests name the current task's successor.
+        let next: Vec<i32> = match j.current {
+            Some(t) => j.graph.tasks[t].succ.iter().map(|&k| j.graph.tasks[k].id).collect(),
+            None => (0..j.states.len())
+                .filter(|&k| j.states[k] == 1 && j.graph.tasks[k].job == j.job)
+                .map(|k| j.graph.tasks[k].id)
+                .collect(),
+        };
+        {
+            let l = g.sly3.as_deref()?;
+            let names = |h| {
+                let slot = g.slot(h);
+                l.actions.iter().any(|a| {
+                    Some(a.0) == slot
+                        && a.2.iter().any(|x| matches!(x, engine::object::Arg::Int(v) if next.contains(v)))
+                }) || g
+                    .options(h)
+                    .is_some_and(|o| o.entries().iter().any(|(_, v)| v.as_i32().is_some_and(|v| next.contains(&v))))
+            };
+            // Or a use point (class 33) whose (task, state) pairs (1170) name it.
+            if let Some(h) = g.handles().find(|&h| matches!(g.class(h), Some(21 | 33)) && g.is_active(h) && names(h)) {
+                return Some(h);
+            }
+        }
+        let at = g.position(g.player?)?;
+        let d = |w: &&game::sly3::waypoints::Waypoint| {
+            let p = g.position(w.handle).unwrap_or(at);
+            (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2)
+        };
+        s.waypoints.iter().filter(|w| w.kind == 1 && g.is_active(w.handle)).min_by(|a, b| d(a).total_cmp(&d(b)))?
+    };
+    (!wp.inside).then_some(wp.handle)
 }
 
-/// The stick that walks the played character to the waypoint of the first available task that has one (none when
-/// a job runs, there is none, or the character is already in it).
-fn steer_to_waypoint(s: &game::sly3::Sly3Session<NullBackend, DiscFile>) -> Option<FrameInput> {
-    let j = s.jobs.as_ref()?;
-    if j.job.is_some() {
-        return None;
-    }
+/// The stick that walks the played character straight to `to` (relative to the camera, as the crew reads it).
+fn steer_to(s: &game::sly3::Sly3Session<NullBackend, DiscFile>, to: engine::object::Handle) -> Option<FrameInput> {
     let g = &s.game.as_ref()?.world;
-    // 1407 names the waypoint's placement (its ID names the copy's root) or the waypoint itself.
-    let named = |h, m: i32| g.sly3_id(h) == Some(m) || g.parent(h).and_then(|p| g.sly3_id(p)) == Some(m);
-    let wp = (0..j.states.len())
-        .filter(|&k| j.states[k] == 1)
-        .filter_map(|k| j.graph.tasks[k].marker)
-        .find_map(|m| s.waypoints.iter().find(|w| named(w.handle, m) && g.is_active(w.handle)))?;
-    if wp.inside {
-        return None;
-    }
-    let to = g.position(wp.handle)?;
+    let to = g.position(to)?;
     let at = g.position(g.player?)?;
     let (dx, dy) = (to[0] - at[0], to[1] - at[1]);
     let len = (dx * dx + dy * dy).sqrt().max(1e-3);
@@ -324,6 +348,13 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             (0..j.states.len()).filter(|&t| j.states[t] == 1).map(|t| j.graph.tasks[t].name.clone()).collect();
         journal.push(format!("start: current {}, available {open:?}", task_name(&s, j.current)));
     }
+    // Stand-in for the episode intro (missions.md 4.1a): the macro module plays it and advances `t1_intro` (2064),
+    // which opens 2083. Its handler is not decoded yet, so the route asks for 2064's state 3 as Sly 2's intro
+    // sequence does (a checked request, command 0x1E).
+    if let (Some(j), Some(g)) = (s.jobs.as_mut(), s.game.as_mut()) {
+        game::sly3::jobs::set_task(j, &mut g.world, 2064, 3);
+        journal.push(format!("intro stand-in: 2064 state {:?}", j.task_state(2064)));
+    }
     // The safe house: step to Sly (24) and take him out.
     if s.enter_safe_house() {
         for _ in 0..6 {
@@ -336,6 +367,13 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
         let b = platform_api::Buttons::B.0;
         s.update(&FrameInput { pressed: b, buttons: b, ..Default::default() }, 1.0 / FPS as f32);
         journal.push(format!("safe house: took out Sly, in safe house {}", s.in_safe_house));
+        if let Some(j) = s.jobs.as_ref() {
+            let open: Vec<String> = (0..j.states.len())
+                .filter(|&t| j.states[t] == 1)
+                .map(|t| format!("{} ({})", j.graph.tasks[t].name, j.graph.tasks[t].id))
+                .collect();
+            journal.push(format!("safe house: available {open:?}"));
+        }
     }
     let frames = (cfg.seconds * FPS as f32) as u32;
     let mut last_task = s.jobs.as_ref().and_then(|j| j.current);
@@ -343,33 +381,67 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
     let mut scripts: std::collections::BTreeSet<i32> = s.scripts.running.iter().map(|r| r.oid).collect();
     let mut paused = false;
     let mut inside: Vec<bool> = s.waypoints.iter().map(|w| w.inside).collect();
+    // Steering toward the current target, and since when (frames); placing once per target.
+    let mut target: Option<engine::object::Handle> = None;
     let mut steering = 0u32;
     let mut placed = false;
     for f in 0..frames {
         let t = Instant::now();
-        // Head for the first open job's waypoint (missions.md 4.2: walking in starts the job); the pattern once
-        // there or with none.
-        let steer = steer_to_waypoint(&s);
+        let now = route_target(&s);
+        if now != target {
+            target = now;
+            steering = 0;
+            placed = false;
+            if let Some(h) = now {
+                let g = &s.game.as_ref().unwrap().world;
+                journal.push(format!(
+                    "{:.1} s: heading for {:?} (class {:?})",
+                    f as f32 / FPS as f32,
+                    g.sly3_id(h),
+                    g.class(h)
+                ));
+            }
+        }
+        let steer = target.and_then(|h| steer_to(&s, h));
         steering += u32::from(steer.is_some());
         // No path-finding: after 10 s of walking straight at it, the route puts Sly at the waypoint (standing in for
         // the walk) and goes on by input and scripts from there.
         if steering > 10 * FPS && !placed {
             placed = true;
-            if let Some(to) = waypoint_target(&s) {
+            if let Some(to) = target.and_then(|h| s.game.as_ref().unwrap().world.world_transform(h)) {
                 let g = s.game.as_mut().unwrap();
                 g.systems.player.place(&mut g.world, to);
                 journal.push(format!("{:.1} s: placed at the waypoint (no path-finding)", f as f32 / FPS as f32));
             }
         }
-        let input = steer.unwrap_or_else(|| gang_pattern(f));
+        let mut input = steer.unwrap_or_else(|| gang_pattern(f));
+        // At a use point within reach: stand and press the use button (Circle) twice a second.
+        if let Some(h) = target {
+            use engine::behavior::sly3::interactables::{UsePoint, class};
+            let g = &s.game.as_ref().unwrap().world;
+            if g.class(h) == Some(class::USE_POINT)
+                && UsePoint::new(g, h).user_of(g, h).is_some_and(|u| Some(u) == g.player)
+            {
+                let b = if f % (FPS / 2) == 0 { platform_api::Buttons::A.0 } else { 0 };
+                input = FrameInput { pressed: b, buttons: b, ..Default::default() };
+                if b != 0 {
+                    journal.push(format!(
+                        "{:.1} s: pressed Circle at use point {:?}",
+                        f as f32 / FPS as f32,
+                        g.sly3_id(h)
+                    ));
+                }
+            }
+        }
         s.update(&input, 1.0 / FPS as f32);
         for (k, w) in s.waypoints.iter().enumerate() {
             if inside.get(k) != Some(&w.inside) {
                 let g = &s.game.as_ref().unwrap().world;
                 journal.push(format!(
-                    "{:.1} s: waypoint {:?} {}",
+                    "{:.1} s: waypoint {:?} (of {:?}) {}",
                     f as f32 / FPS as f32,
                     g.sly3_id(w.handle),
+                    g.parent(w.handle).and_then(|p| g.sly3_id(p)),
                     if w.inside { "entered" } else { "left" }
                 ));
             }
@@ -450,20 +522,48 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
                 .filter(|&k| j.states[k] == 1)
                 .filter_map(|k| j.graph.tasks[k].marker.map(|m| format!("{} at {m}", j.graph.tasks[k].name)))
                 .collect();
-            let id = t.map_or(0, |t| j.graph.tasks[t].id);
+            // What in the world names the current task and its successors (trigger shapes, scripts, ...).
             let w = &s.game.as_ref().unwrap().world;
+            // With no current task: the current job's available tasks.
+            let ids: Vec<i32> = t.map_or_else(
+                || {
+                    (0..j.states.len())
+                        .filter(|&k| j.states[k] == 1 && j.job.is_some() && j.graph.tasks[k].job == j.job)
+                        .map(|k| j.graph.tasks[k].id)
+                        .collect()
+                },
+                |t| {
+                    core::iter::once(t)
+                        .chain(j.graph.tasks[t].succ.iter().copied())
+                        .map(|k| j.graph.tasks[k].id)
+                        .collect()
+                },
+            );
             let mut naming: Vec<String> = Vec::new();
-            for h in w.handles() {
-                let by_value = w.options(h).is_some_and(|o| o.entries().iter().any(|(_, v)| v.as_i32() == Some(id)));
-                let by_action = w.sly3.as_deref().is_some_and(|l| {
-                    let slot = w.slot(h);
-                    l.actions.iter().any(|a| {
-                        Some(a.0) == slot && a.2.iter().any(|x| matches!(x, engine::object::Arg::Int(v) if *v == id))
-                    })
-                });
-                if (by_value || by_action) && w.class(h) != Some(169) && naming.len() < 8 {
-                    naming.push(format!("class {:?} oid {:?}", w.class(h), w.sly3_id(h)));
+            for &id in &ids {
+                let mut by: Vec<String> = Vec::new();
+                for h in w.handles() {
+                    let by_value =
+                        w.options(h).is_some_and(|o| o.entries().iter().any(|(_, v)| v.as_i32() == Some(id)));
+                    let by_action = w.sly3.as_deref().is_some_and(|l| {
+                        let slot = w.slot(h);
+                        l.actions.iter().any(|a| {
+                            Some(a.0) == slot
+                                && a.2.iter().any(|x| matches!(x, engine::object::Arg::Int(v) if *v == id))
+                        })
+                    });
+                    if (by_value || by_action) && w.class(h) != Some(169) && by.len() < 8 {
+                        by.push(format!("class {:?} oid {:?}", w.class(h), w.sly3_id(h)));
+                    }
                 }
+                let def = j.graph.task_ids.get(&id).map(|&k| {
+                    let d = &j.graph.tasks[k];
+                    format!(
+                        "{} state {} auto-current {} done-when-current {} checkpoint {:?} script {:?}",
+                        d.name, j.states[k], d.auto_current, d.done_on_current, d.checkpoint, d.script
+                    )
+                });
+                naming.push(format!("{id} ({}): {by:?}", def.unwrap_or_default()));
             }
             format!(
                 "current {} in job {:?}; {}; successors {succ:?}; named by {naming:?}; open waypoints {waypoints:?}; scripts running {:?}; commands not run {:?}",
@@ -576,37 +676,82 @@ fn sly2_play_for(s: &mut Sly2, t: usize, visited: &mut Vec<engine::object::Handl
                 .any(|c| matches!(c, game::sly2::talk::SeqCommand::Task { task, .. } if *task == id))
         })
     };
-    let pick = w.handles().filter(|h| !visited.contains(h) && w.in_world(*h)).find_map(|h| {
-        let o = w.options(h)?;
-        match w.class(h)? {
-            24 | 25 => {
-                let by_request = engine::behavior::sly2_props::volume_requests(w, h).iter().any(|r| r.0 == id);
-                (by_request || names(o.i32(441), h)).then_some((h, 0))
+    // Volumes removed at level start (option 26) that a sequence has since added (command 670) are where the
+    // player is being sent next (missions.md 4.1: 1690 adds 150620, whose sequence 1697 finishes 1696 by script).
+    let added_volume = |h: engine::object::Handle| {
+        matches!(w.class(h), Some(24 | 25))
+            && w.options(h).and_then(|o| o.i32(441)).is_some()
+            && w.sly2.as_deref().is_some_and(|l| l.actions.iter().any(|a| Some(a.0) == w.slot(h) && a.1 == 26))
+    };
+    let fallback = w.handles().find(|&h| !visited.contains(&h) && w.in_world(h) && added_volume(h));
+    let pick = w
+        .handles()
+        .filter(|h| !visited.contains(h) && w.in_world(*h))
+        .find_map(|h| {
+            let o = w.options(h)?;
+            match w.class(h)? {
+                24 | 25 => {
+                    let by_request = engine::behavior::sly2_props::volume_requests(w, h).iter().any(|r| r.0 == id);
+                    (by_request || names(o.i32(441), h)).then_some((h, 0))
+                }
+                // An exit whose task states (788) name the task: the player leaves through it.
+                26 => w
+                    .sly2
+                    .as_deref()?
+                    .actions
+                    .iter()
+                    .any(|a| {
+                        Some(a.0) == w.slot(h)
+                            && a.1 == 788
+                            && a.2.iter().any(|x| matches!(*x, engine::object::Arg::Int(n) if n == id))
+                    })
+                    .then_some((h, 2)),
+                35 => names(o.i32(1070), h).then_some((h, 1)),
+                _ => None,
             }
-            // An exit whose task states (788) name the task: the player leaves through it.
-            26 => w
-                .sly2
-                .as_deref()?
-                .actions
-                .iter()
-                .any(|a| {
-                    Some(a.0) == w.slot(h)
-                        && a.1 == 788
-                        && a.2.iter().any(|x| matches!(*x, engine::object::Arg::Int(n) if n == id))
-                })
-                .then_some((h, 2)),
-            35 => names(o.i32(1070), h).then_some((h, 1)),
-            _ => None,
-        }
-    })?;
+        })
+        .or(fallback.map(|h| (h, 0)))?;
     visited.push(pick.0);
     let oid = w.sly2_id(pick.0);
     if pick.1 == 2 {
         let id = oid?;
-        engine::game::sly2_jobs::with(&mut g.world, |j, w| j.fire_exit_id(w, id));
+        // As if the player had walked out and back in: the exit is armed, then fired (only an armed exit fires,
+        // level-flow.md 5.5); the load follows in a later update.
+        engine::game::sly2_jobs::with(&mut g.world, |j, w| {
+            arm(j, id);
+            j.fire_exit_id(w, id)
+        });
         return Some(format!("left by exit {oid:?}"));
     }
     if pick.1 == 0 {
+        // No path-finding: the played character is put in the middle of the volume (standing in for the walk), so
+        // its entry goes through the real rules (the camera's visibility mask, the classes that count); a volume
+        // whose box is not read is entered by its visit flag instead.
+        if let Some((w, lo, hi)) = engine::behavior::sly2_props::volume_box(&g.world, pick.0) {
+            let mid = [
+                (lo[0] + hi[0]) * 0.5,
+                (lo[1] + hi[1]) * 0.5,
+                ((lo[2] + hi[2]) * 0.5 - engine::behavior::sly2_sensors::CHARACTER_CENTRE).max(lo[2]),
+            ];
+            // On a floor: probed down from the top of the volume through it (none: the visit flag below).
+            let top = w.transform_point([mid[0], mid[1], hi[2]]);
+            let floor = g.systems.physics.queries().ground(&g.world, top, hi[2] - lo[2]).map(|f| f.0);
+            let Some(floor) = floor else {
+                if let Some(Behavior::Sly2Volume(v)) = g.world.behavior_mut(pick.0) {
+                    v.visit = true;
+                }
+                return Some(format!("walked into trigger volume {oid:?} (no floor in it: entered by flag)"));
+            };
+            let mut to = w;
+            to.t = floor;
+            g.systems.player.place(&mut g.world, to);
+            let who = g.world.player.and_then(|p| g.world.class(p));
+            let zone = g.world.sly2_zone_mask(pick.0);
+            return Some(format!(
+                "walked into trigger volume {oid:?} (placed in it; player class {who:?}, camera mask {:#x}, volume zone {zone:#x})",
+                g.world.shared.visibility_mask
+            ));
+        }
         if let Some(Behavior::Sly2Volume(v)) = g.world.behavior_mut(pick.0) {
             v.visit = true;
         }
@@ -636,11 +781,12 @@ fn sly2_take_exit(s: &mut Sly2, journal: &mut Vec<String>, at: f32) -> bool {
             .find(|e| e.id == 1329)
             .or_else(|| j.exits.iter().find(|e| e.row != Some(here)))
             .map(|e| (e.id, e.row, e.handle))?;
+        arm(j, e.0);
         j.fire_exit_id(w, e.0);
         // An exit whose destination did not resolve loads nothing: journal it, and go on to the row level-flow.md
         // gives (the intro's exit to the menu world, the menu's episode 1 exit to the hub) so the route continues.
         let mut stuck = None;
-        if j.load.is_none() {
+        if e.1.is_none() {
             let records = engine::game::sly2_jobs::flow::exit_records(w, e.2);
             let row = SLY2_EXIT_ROWS.iter().find(|x| x.0 == e.0).map(|x| x.1);
             stuck = Some((records, row));
@@ -675,7 +821,7 @@ fn sly2_take_exit(s: &mut Sly2, journal: &mut Vec<String>, at: f32) -> bool {
 /// world's episode 1 exit to the hub.
 pub const SLY2_EXIT_ROWS: [(i32, i16); 2] = [(150652, 1), (1329, 2)];
 
-/// Sly 2, episode 1 as far as scripted play and the job system go: a new game, then [`gang_pattern`] input. A task
+/// Sly 2, episode 1 as far as scripted play and the job system go: a new game, then [`game::smoke::pattern`] input. A task
 /// that does not move for [`SLY2_STALL_AFTER`] seconds is journalled with what would finish it, then requested done
 /// (forced), as its event would; exits and loads are the job system's. After [`SLY2_JOBS`] jobs (or the time), the
 /// progress is saved to an in-memory slot and continued, and the reloaded task states are compared.
@@ -709,12 +855,29 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
     let mut findings: Vec<String> = Vec::new();
     let mut visited: Vec<engine::object::Handle> = Vec::new();
     let mut played = 0u32;
+    let mut hold_until = 0u32;
     let mut advanced = 0u32;
     let mut seen_sequences: Vec<engine::object::Handle> = Vec::new();
     let mut namers: std::collections::BTreeMap<i16, u32> = std::collections::BTreeMap::new();
     for f in 0..frames {
         let t = Instant::now();
-        s.update(&gang_pattern(f), 1.0 / FPS as f32);
+        // The plain pattern: jobs and tasks choose the character (missions.md: a task's character), and volumes that
+        // count only one character must see that one.
+        // After being placed somewhere the character stands still for a moment (the camera catches up and the
+        // volume sees it), then the pattern goes on.
+        let input = if f < hold_until { FrameInput::default() } else { game::smoke::pattern(f) };
+        if f == hold_until
+            && f > 0
+            && let Some(g) = s.game.as_ref()
+        {
+            let p = g.world.player.and_then(|p| g.world.position(p));
+            journal.push(format!(
+                "{:.1} s: after the placement: player at {p:?}, camera mask {:#x}",
+                f as f32 / FPS as f32,
+                g.world.shared.visibility_mask
+            ));
+        }
+        s.update(&input, 1.0 / FPS as f32);
         st.update_ms.push(t.elapsed().as_secs_f64() * 1000.0);
         let _ = s.render();
         st.ms.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -805,6 +968,7 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
             if let Some((k, what)) = did {
                 journal.push(format!("{at:.1} s: played for {}: {what}", name(&s, Some(k))));
                 played += 1;
+                hold_until = f + 2 * FPS;
                 continue;
             }
             match task {
@@ -1007,4 +1171,11 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
     }
     let stall = format!("first stall: {stall}; findings: {findings:?}");
     JobRun { stage: st, journal, current, stall }
+}
+
+/// Arms exit `id` (as the player leaving its volume does), so that firing it is not ignored (level-flow.md 5.5).
+fn arm(j: &mut engine::game::sly2_jobs::Jobs, id: i32) {
+    if let Some(e) = j.exits.iter_mut().find(|e| e.id == id) {
+        e.state = engine::game::sly2_jobs::flow::ExitState::Armed;
+    }
 }

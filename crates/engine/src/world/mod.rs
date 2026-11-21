@@ -811,9 +811,12 @@ impl World {
             return true;
         }
         // Sly 2: option 26 is "removed when the level starts" (specs/sly2/object-stream.md 1.4); called by a script it
-        // takes the object out of the world now (our reading: the same effect at the time of the call).
+        // takes the object out of the world now (our reading: the same effect at the time of the call). Jobs and
+        // tasks (classes 132 and 133) are not world objects: the job system keeps running them.
         if id == crate::world::sly2::options::REMOVE_AT_START && self.sly2.is_some() {
-            self.set_in_world(h, false);
+            if !matches!(self.class(h), Some(132 | 133)) {
+                self.set_in_world(h, false);
+            }
             return true;
         }
         // Sly 2 generic object actions (set parent, move to, add, show and hide meshes).

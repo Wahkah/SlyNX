@@ -145,9 +145,15 @@ impl PerfMeter {
         (self.sum_gpu, self.max_gpu, self.gpu_frames, self.sum_draws) = (0.0, 0.0, 0, 0);
     }
 
-    /// Whether a summary was added since the last call (time to write the log out).
+    /// Whether to write the log out now: a summary was added since the last write and the overlay is on. While it
+    /// is off nothing is written (no storage writes on the game thread in normal play); turning it on writes the
+    /// summaries kept meanwhile.
     pub fn log_due(&mut self) -> bool {
-        core::mem::take(&mut self.dirty)
+        let due = self.dirty && self.on;
+        if due {
+            self.dirty = false;
+        }
+        due
     }
 
     /// The log so far: a header, then one line per five seconds.
@@ -222,6 +228,18 @@ mod tests {
         assert_eq!(f[7], "8.00");
         let text = m.lines();
         assert!(text[0].starts_with("FPS 60.0") && text[1].contains("DRAWS 100"), "{text:?}");
+    }
+
+    #[test]
+    fn no_log_writes_while_the_overlay_is_off() {
+        let mut m = PerfMeter::new();
+        let s = FrameStats::default();
+        for _ in 0..360 {
+            m.record(16_666_667, 5_000_000, &s);
+        }
+        assert!(!m.log_due(), "off: nothing to write");
+        m.on = true;
+        assert!(m.log_due() && !m.log_due(), "on: the kept summary is written once");
     }
 
     #[test]

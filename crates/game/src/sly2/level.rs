@@ -127,9 +127,12 @@ pub fn upload_prepared<B: Backend>(
         let m = match looks.get(&(d.material, look.order)) {
             Some(&m) => m,
             None => {
-                // The scene's textures come first in the prepared list, then a white one.
-                let texture = sh.texture.unwrap_or(up.textures.len() as u32 - 1);
-                let grey = input.slot1.get(d.material as usize).copied().flatten().unwrap_or(texture);
+                // The scene's textures come first in the prepared list, then a white one; an index past them (a
+                // damaged scene) takes the white one.
+                let white = up.textures.len() as u32 - 1;
+                let valid = |t: u32| (t < white).then_some(t);
+                let texture = sh.texture.and_then(valid).unwrap_or(white);
+                let grey = input.slot1.get(d.material as usize).copied().flatten().and_then(valid).unwrap_or(texture);
                 let desc = stage::geometry::MaterialDesc {
                     texture,
                     palettes: lit.then_some([grey, grey]),
@@ -181,15 +184,18 @@ pub fn upload_prepared<B: Backend>(
             let k = d.draw as usize;
             let (Some(&id), Some(g)) = (instances.get(k), geo.draws.get(k)) else { continue };
             let Some(mesh) = up.meshes.get(g.mesh as usize).copied().flatten() else { continue };
+            let Some(&material) = up.materials.get(g.material as usize) else { continue };
             draws.push(super::attached::PlacedDraw {
                 id,
                 mesh,
-                material: up.materials[g.material as usize],
+                material,
                 weights: up.weight_bases.get(k).copied().flatten(),
                 transform: g.transform,
                 record: d.record,
                 volume: d.volume,
                 radius: d.radius,
+                mesh_index: d.mesh,
+                tint: geo.materials.get(g.material as usize).map_or([255; 4], |m| m.tint),
             });
         }
         out.attached = super::attached::AttachedParts::new(r, w, &draws)?;

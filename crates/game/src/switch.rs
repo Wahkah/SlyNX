@@ -52,6 +52,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let options =
         SessionOptions { camera_triggers: settings.triggers.unwrap_or(true), overlay: true, ..Default::default() };
     let mut session = Session::new(backend, disc, options);
+    // The performance overlay rides along from the first committed level on.
+    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     session.renderer.set_clock(now);
     session.set_saves(alloc::boxed::Box::new(save::SaveStore::new(fs)));
     let movie_settings = settings.clone();
@@ -72,7 +74,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     }
 
     let mut perf = render::perf::PerfMeter::new();
-    session.renderer.enable_perf_text(render::perf::TEXT_CHARS);
     let mut last = now();
     let mut log_at = last + LOG_EVERY_NS;
     let mut paused = false;

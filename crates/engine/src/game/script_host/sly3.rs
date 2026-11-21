@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use script::{ObjectId, ScriptError, Value};
 
 use super::WorldHost;
-use crate::object::{Handle, flags};
+use crate::object::{Handle, OptionValue, flags};
 use crate::world::NONE;
 
 /// Class of the object operation 124 gives (when the world has no player object).
@@ -150,6 +150,38 @@ impl WorldHost<'_> {
             .iter()
             .find(|&&s| self.world.handle(s).is_some_and(|h| self.world.flags(h) & flags::IN_WORLD != 0))?;
         self.world.handle(s).map(Handle::to_script)
+    }
+
+    /// Options the game computes rather than stores: the world object's methods 984 and 1000, and a crew member's
+    /// option 30 (stream 16) is its owner code
+    /// (Sly 24, Bentley 25, Murray 26; the item table's owner codes, characters.md 3.1), which mission waypoints
+    /// compare with their custom property 1991 (missions.md 4.2).
+    pub(super) fn sly3_live_option(&mut self, object: ObjectId, option: u16) -> Option<Value> {
+        const OWNER_CODE: u16 = 16;
+        // The world object's player methods are methods to call (the shared read hands out methods only for
+        // objects other than the world).
+        if object == crate::object::WORLD_SCRIPT_ID {
+            return matches!(option, world_method::CONTROLLED | world_method::HELD)
+                .then_some(Value::Method { object, option });
+        }
+        let h = self.obj(object)?;
+        // Value types 0x2000 + c hold the ID of an object of class c: scripts get the object (as Sly 2's read
+        // does), found by Sly 3 ID from the object's copy.
+        if option != OWNER_CODE {
+            let e = self.entry(option)?;
+            if !(0x2000..0x3000).contains(&e.value_type) || e.is_typed() {
+                return None;
+            }
+            let id = self.world.options(h).and_then(|o| o.get(option)).and_then(OptionValue::as_i32)?;
+            return Some(Value::Object(if id < 0 { None } else { self.sly3_find(id, Some(object)) }));
+        }
+        let code = match self.world.class(h)? {
+            52 => 24,
+            54 => 25,
+            53 => 26,
+            _ => return None,
+        };
+        Some(Value::Int(code))
     }
 
     pub(super) fn sly3_player(&mut self) -> Option<ObjectId> {

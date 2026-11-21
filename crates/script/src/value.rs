@@ -9,6 +9,19 @@ use core::fmt;
 use crate::env::EnvRef;
 use crate::tree::NodeId;
 
+/// Where a nesting limit was reached, for tracing: the event handler running then (object, event, the handler's
+/// module), or for an event dropped because raising it would nest too deeply, that event. All `None` outside any
+/// handler.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Site {
+    /// The object the event was raised on.
+    pub object: Option<ObjectId>,
+    /// The event number.
+    pub event: Option<u32>,
+    /// The module whose handler runs (or would run).
+    pub module: Option<u32>,
+}
+
 /// An engine object, as the host names it. The interpreter never looks inside; the null object is
 /// `Value::Object(None)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -68,8 +81,8 @@ pub enum ScriptError {
     NotCustom(u32),
     /// The host refused or does not implement an operation (operation ID or option ID, host's choice).
     Host(u32),
-    /// Nesting deeper than the interpreter's limit.
-    TooDeep,
+    /// Nesting deeper than the interpreter's limit, with where it happened.
+    TooDeep(Site),
     /// The step budget of one entry into the interpreter ran out (an endless loop, for instance).
     OutOfSteps,
     /// A list would exceed [`crate::Limits::max_list_len`], or the scheduled-call queue is full.

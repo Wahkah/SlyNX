@@ -116,7 +116,8 @@ impl Expect<'_> {
     }
 
     fn record(&mut self, r: &Record, f: Frame<'_>) {
-        if r.mode == 1 && !r.filter.matches(&self.ctx) {
+        // Jobs and tasks (168, 169) of other worlds load anyway, out of the world (missions.md 4.1a).
+        if r.mode == 1 && !r.filter.matches(&self.ctx) && !matches!(r.class, 168 | 169) {
             return;
         }
         let skip = match r.mode {

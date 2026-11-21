@@ -536,4 +536,28 @@ impl Graph {
     pub fn tasks_of(&self, j: usize) -> impl Iterator<Item = usize> + '_ {
         self.tasks.iter().enumerate().filter(move |(_, t)| t.job == Some(j)).map(|(i, _)| i)
     }
+
+    /// Every task in prerequisite-first order (missions.md 7.1): each after all its prerequisites, otherwise in index
+    /// order; tasks on a prerequisite cycle (none on the disc) come last, in index order.
+    pub fn prerequisite_order(&self) -> Vec<usize> {
+        let n = self.tasks.len();
+        let mut waiting: Vec<usize> = self.tasks.iter().map(|t| t.prereq.iter().filter(|&&p| p < n).count()).collect();
+        let mut placed = alloc::vec![false; n];
+        let mut out = Vec::with_capacity(n);
+        let mut ready: alloc::collections::BTreeSet<usize> = (0..n).filter(|&t| waiting[t] == 0).collect();
+        while let Some(t) = ready.pop_first() {
+            placed[t] = true;
+            out.push(t);
+            for &c in &self.tasks[t].succ {
+                if c < n && !placed[c] && self.tasks[c].prereq.contains(&t) {
+                    waiting[c] = waiting[c].saturating_sub(1);
+                    if waiting[c] == 0 {
+                        ready.insert(c);
+                    }
+                }
+            }
+        }
+        out.extend((0..n).filter(|&t| !placed[t]));
+        out
+    }
 }

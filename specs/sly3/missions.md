@@ -170,6 +170,130 @@ The routine at `0x00187270`:
    ID and world are written to `oidCheckpointForce` and `widCheckpointForce` ([saving.md](saving.md) 3). Starting
    episode 8 then resumes there ([level-flow.md](level-flow.md) 3).
 
+### 4.1a World start: restoring tasks and the "current when available" rule [X]
+
+Every world start runs `0x00184B60`, called at `0x0025C8C0` in the world's start-up (`0x0025C2A8`). This includes a level load with
+progress restored and a reload at a checkpoint. In order:
+
+1. **Restore.** Every task is restored from the save (`0x00188CB0`), prerequisites first (the visit order from
+   `0x0018A900`). For the call, the task's mode (+0xFC) is set to 1 and +0x100 to 0, and its job's +0xF0 / +0xF4
+   to 1 / 0. They are put back afterwards. The restore calls the state setter directly (`0x0018A3E8`), so it does
+   **not** back-fill prerequisites (below).
+2. **The saved keys.** The game-state keys for the job (+0x1498) and the active task (+0x149C) are looked up. A job
+   found is re-begun (`0x00186248`), and a task found is **made current** (`0x00188540`), both in mode 1 (the
+   same mode values as step 1).
+   Both keys are then reset to −1.
+3. **"Current when available" (1399, field +0x60).** The request queue (`0x0036C6E8`) is held and its pending
+   requests run (`0x00189160`, `0x00189180`). Then the game scans the **available-task list** (`0x00479498`, linked
+   through +0x78). It keeps the **last** task with 1399 set that is **not the current task** (`0x00188A20`, current
+   task at `0x004794C8`). If it finds one, it releases the queue and issues a **forced request for state 4**, make
+   current (`0x001890B0(task, 4, 0)`). It repeats step 3 while the queue (`0x0036C6F0`) still holds requests. When
+   no task qualifies, it stops.
+4. A forced state-4 request (`0x00189500`) makes the task current through `0x00188540`. If the task is still
+   locked (state 0) and its prerequisites hold (`0x00189008`), it first sets it available (`0x00189B08(task, 1)`).
+
+**The available-task list holds every available task of the world, from every job and from none** [X]. The
+state setter (`0x0018A3E8`) appends a task to `0x00479498` when its new state is 1 (`0x0011AF60`) and removes
+it when it leaves state 1 (`0x0011B028`). Nothing else adds to the list, and no job test is made. The broadcast
+of 4.2 filters by job when it delivers; **this pass does not**: it compares only 1399 and "not current".
+So if a task of another job (for example an `m1_recon` task) is available with 1399 set at the world start,
+the game makes it current too. A wrong result on a new game in Venice therefore points to that task's state:
+it should not be available yet, because its prerequisites are not done. Limiting the pass to the current job
+is not the game's rule.
+
+**Jobs and tasks of other worlds are loaded too** (correction) [X]. The object loader (`0x00151D80`) skips a
+mode-1 record whose world filter (`0x00151C98`, against the current world at `0x0047989C`) or conditions
+(`0x00151D10`) do not match, **except classes 168 and 169**. A job or task of another world is created and loaded
+anyway, with a marker set: a task gets +0x40 = 1, a job +0x50 = 1 (`0x00151F68` to `0x00151FB4`). A task with
++0x40 set fails the "live" test (`0x001880F0`), so it receives no task events. Every job and task of the episode's
+macro group is therefore present in every world of the episode.
+
+**Prerequisites and the restore** [X]:
+
+- Prerequisites are **list A** of the task record and successors are **list B**
+  ([classes/simple-layouts.md](classes/simple-layouts.md) 5). At post-load (`0x001881F0`) each list's OIDs are
+  looked up (`0x0017E1B8`), and the counts (+0x84, +0x90) become the number found. Because other worlds' tasks are
+  loaded, only an OID missing from the whole file is dropped.
+- **Restore (`0x00188CB0`):** it reads the saved state (key at +0xE8) and the saved `from_memcard` flag (key +0xF0).
+  - If the flag is set, the task has a job and the saved state is 1 or 2, the per-job counters are reset and the
+    state becomes 1 when every prerequisite is at least 2, else 0.
+  - Otherwise a saved state of 0 becomes **1 (available) only when the task has no prerequisites at all**.
+  - The result goes to the state setter (`0x0018A3E8`), which appends the task to the available-task list.
+  - A task never written to the save reads 0, so at a new game **only tasks with an empty list A open**.
+- **Visit order** (`0x0018A900`, `0x00188B08`). The order starts at every root (no prerequisites) and walks down
+  the successors. A task joins the order once all its prerequisites have been visited. Each visit records:
+  - +0x104, the visit count;
+  - +0x108, the **depth**: the largest depth arriving over any path (each step adds 1);
+  - +0x10C, the **job-change depth**: the largest value arriving over any path. A step adds 1 when it goes from a
+    task with a job to a task of a different job.
+
+  Both are kept as separate maxima (`slt` / `movz` / `movn` at `0x00188B48` to `0x00188B5C`), so equal paths change
+  nothing. The +0x10C kept need not come from the deepest path. A task's successors are visited only after its
+  last prerequisite, with the task's final maxima.
+
+  The order is then sorted (`0x0018A890`) by +0x10C, then the job's OID (−1 for none), then +0x108, then the task's
+  OID. The restore appends to the available list in this order.
+- **The 1399 pick** is "the last in the available list with 1399 set that is not current", with no job,
+  episode or job-key filter. That is safe because at a new game the list holds only the roots.
+- **New game in v_ext (world 3)** [D, simulated from the decoded records]. 150 tasks are loaded (all of `v_macro`).
+  The only root is **2064 `t1_intro`** (no job, no 1399; successors 2083 `t1_intro_outside_safehouse` and 2408).
+  So the available list holds only 2064. The 1399 pass picks nothing, and the job and task keys are −1
+  ([saving.md](saving.md) 3), so **no task is current after the world start**. The episode's macro module then
+  plays the intro and advances 2064, which opens 2083 (Sly 2's episode-intro rule [R]).
+- Before the first world load, the game initialisation (`0x00184968`) sets the job, task and checkpoint keys to −1.
+  Starting episode 3 chooses no task, so the world loads at point 424 ([level-flow.md](level-flow.md) 3) [X].
+- **2091 in v_interpol and 2123 in v_ext** keep their prerequisites, 2089 and 2116 (both present, loaded as
+  other-world tasks). Each opens through the ordinary propagation when its prerequisite is done, and not at load.
+  The earlier "in-world prerequisites only" reading was wrong.
+
+**Back-filling prerequisites: on every request, not on the restore** [X]:
+
+- Every state change made by a request goes through `0x00189B08`. That routine first collects the affected tasks
+  (`0x001899F0`), then sets each to its pending state (+0xF8) through `0x0018A670`. The callers are:
+  - ordinary requests (`0x00189300`);
+  - forced requests (`0x00189500`, used by the task methods 1314 to 1317 and by state −1 / 4 forcing);
+  - the job routines `0x00187118` and `0x00187270`;
+  - `0x0018A0D0`.
+- The restore (`0x00188CB0`) and step 2 of the world start call the state setter directly, without back-fill.
+- **The collector**, for a new state n. Each prerequisite p that has no pending state yet and whose state is below
+  the target is raised to the target, and the same is done for p's own prerequisites:
+
+| New state n | Target for each prerequisite p |
+|---|---|
+| 1 or 2 | p has no job: 3 (closed). p has the **same** job as the task: 2 (done). p has another job: 3, unless that job's 1361 (keep open) is set, then 2 |
+| 3 | 3 |
+| 0, 4, 5 | none |
+
+- **Ordinary (checked) requests** (`0x00189300`) allow only these moves; anything else is refused and announced
+  (`0x00188868`):
+  - 0 → 1, only when the prerequisites hold (`0x00189008`);
+  - 1 → 2 and 1 → 3;
+  - 2 → 3.
+
+  A closed task (3) never changes. A request for 3 on a task that has a job is turned into a request for 2. State
+  −1 means 4 (make current), and 5 means stop being current.
+- **Command `0x1E` is a checked request, not a forced one.** Its handler (`0x0022776C`) passes its one (task,
+  state) pair to `0x00185908`, which issues `0x00189078`, an ordinary request. Use-point pairs (option 1170) take the
+  same path [X]. Exit and arrival pairs (options 841 and 847) are expected to as well [I: through the same pair
+  routine, not traced].
+- **Script 2061's (2418, 3) at a new game** [D]. Task 2418 `t1_title_after_chalktalk3` has no job and prerequisite
+  1827 `t1_chalktalk3`, which in turn has prerequisites 2405, 2166, 2184 and 2221. At a new game 2418 is locked
+  (0), so 0 → 3 is **refused**, and nothing is closed or back-filled. Later, when 2418 is available, closing it
+  closes 1827 and the tasks before it. That is the game's rule: turning off back-fill is not needed once 0x1E is
+  treated as a checked request.
+
+**So yes:** after a load, or on arriving at a checkpoint (which is a world start), an available task with 1399 set
+becomes current even though it did not just change to available. For `t1_recon_cell_dialog` (2091) in
+v_interpol: once 2089 is done, 2091 is restored as available, and step 3 makes it current.
+
+During play, outside the world start, the checkpoint tasks are applied as ordinary requests
+(`0x00185908`, per pair (task, state)). A task reaching state 1 that way goes through the normal "becomes
+available" rule.
+
+An engine whose rules make a task current only on the change to available must add step 3 to its world-start or
+restore pass. The four rules: scan the available tasks; take the last one with 1399 set that is not current; make
+it current with a forced request; repeat while requests are pending.
+
 ### 4.2 Mission waypoints (class 120) [X]
 
 The object that task option 1407 names (for example object 121540) is a **mission waypoint**, class 120 (Sly 2's
@@ -210,14 +334,14 @@ waypoint as the object (`0x001854C8` on the game state at `0x0036C700`). These a
 
 1. `0x001855F0` (code 12 only; the defeat path).
 2. The level values (`0x00171AA0`, which reacts only to codes 12, 16, 32 and 41).
-3. Every task in the task list (`0x00479498`, linked through +0x78) whose job (+0x6C, option 1391) **equals the
+3. Every task in the available-task list (`0x00479498`, linked through +0x78; 4.1a) whose job (+0x6C, option 1391) **equals the
    current job** (`0x004794A4`; both may be none). The task must also pass `0x001880F0`: its +0x40 is 0 and its
    state is not 3. Such a task gets **script event 20** with the values (code, object) (`0x00189DF8`). This is
    Sly 2's event 17.
 4. Every object in the **task-event listener list** (`0x00479B98`) gets the same script event 20 with (code, object)
    (`0x001772D8`). Only **class 147**, the macro-package objects of the `*_macro` groups, joins this list: its
-   enter-world and leave-world methods (`0x00177258`, `0x00177220`, vtable `0x357200` slots 12 and 11) add and remove
-   it.
+   enter-world method (`0x00177220`, vtable `0x357200` slot 11) appends it (`0x0011AF60`), and its leave-world
+   method (`0x00177258`, slot 12) removes it (`0x0011B028`).
 5. The current job, if there is one (`0x00186730`).
 6. The sequence at `0x004BC230` (`0x002849A8`).
 
@@ -240,6 +364,32 @@ data to decompile].
 The waypoint's own script is a second possible handler. It receives events 5 and 6 before the broadcast. Object
 35785 names **module 0 of its group `mission_start_jt`**, and placement 121540 names none [D: the records' module
 indices]. So decompile that module too.
+
+**Custom properties of waypoints: option 8, 1990 to 1992, and 1485** [X] [D]:
+
+- **Option 8** on class 120 is a load-time method with two arguments: (property ID, value). Its handler
+  (`0x00100610`) calls `0x0013B750(object, ID, value)`, which stores a **custom property** on the object. IDs from
+  1,816 up live in the object's property store ([scripts.md](scripts.md) 5), where scripts read them back. A
+  loader that skips option 8 leaves these properties missing.
+- Values across the disc on class-120 bodies: (1843, 14259) ×43, (1990, −1) ×16, (1992, −1) ×15, (1991, 24) ×7.
+- **Test vector, v_ext** (decompressed `03_v_ext`):
+  - Waypoint body 35785 (`mission_start_jt`) carries three option-8 entries, near `0x139156` to `0x139176`:
+    1990 = −1, 1992 = −1, 1991 = 24. The entry bytes are `08 00 15 00 c7 07 06 00 18 00 00 00`: option 8, a
+    `u16`-tagged ID, then an `s32`-tagged value.
+  - Placement 121540 (`v_ext_recon`) carries one entry, `08 00 15 00 c6 07 06 00 26 08 00 00`: **1990 = 2086**,
+    the task `t1_recon_intro`. Placement options apply to the placed copy (Sly 2's rule [R]).
+  - So the loaded waypoint should have 1990 = 2086, 1991 = 24 and 1992 = −1.
+- Meanings, as the enter handler uses them:
+  - **1990** is the task this waypoint starts.
+  - **1991** is the character allowed to start it. 24 is Sly's owner code (25 Bentley, 26 Murray, as in the item
+    table), compared with the player's option 30 [I: that option 30 returns this code].
+  - **1992** is an override object whose method 247 runs instead of the normal path. −1 means none, so the normal
+    path runs.
+- **1485** (script ID 1364, field +0x140, an object of class 169) has **no stream value** on any disc object. No
+  write to +0x140 was found in the waypoint code (`0x00281000` to `0x00283000`) or the task code (`0x00184000` to
+  `0x0018C000`), and the load-time setup does not set it. It therefore stays empty (reads as none / −1) unless a
+  script writes it through script ID 1364 (not searched). A handler that reads it must cope with none, for example
+  by using the task in 1990 [I].
 
 **Game-object checks used by waypoint handlers** [X]. The game object is class 1 in the class option map. Script
 option IDs 984 and 1000 are script methods with one integer argument, the player index n:

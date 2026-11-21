@@ -704,7 +704,7 @@ fn limits_and_garbage() {
     let f1 = it.lookup(0, 1).unwrap();
     assert!(matches!(it.call(&mut h, f1, vec![]), Value::Error(ScriptError::OutOfSteps)));
     let f2 = it.lookup(0, 2).unwrap();
-    assert!(matches!(it.call(&mut h, f2, vec![]), Value::Error(ScriptError::TooDeep)));
+    assert!(matches!(it.call(&mut h, f2, vec![]), Value::Error(ScriptError::TooDeep(_))));
     let f3 = it.lookup(0, 3).unwrap();
     it.collect_garbage();
     let base = it.live_environments();
@@ -1097,7 +1097,7 @@ fn stack_use_at_the_depth_limit() {
             let f = it.lookup(0, 2).unwrap();
             let top = 0u8;
             let top = core::hint::black_box(&top) as *const u8 as usize;
-            assert!(matches!(it.call(&mut h, f, vec![]), Value::Error(ScriptError::TooDeep)));
+            assert!(matches!(it.call(&mut h, f, vec![]), Value::Error(ScriptError::TooDeep(_))));
             let used = top - h.stack_low.unwrap();
             std::eprintln!(
                 "stack at depth limit {}: {} KiB ({} bytes per level)",
@@ -1340,6 +1340,39 @@ fn sly2_rest_replacement_scheduling_and_lookup() {
     assert_eq!(it.scheduled()[0].id, b as u32);
     assert_eq!(show(&it.lookup(0, 8).unwrap()), "9", "the procedure's own parameter");
     assert_eq!(show(&it.lookup(0, 9).unwrap()), "77");
+}
+
+#[test]
+fn sly2_handlers_calling_their_shadowed_definition() {
+    // ((op133 (quote s0)) obj) inside handler s0 (every op133 call on the disc): the running handler's own binding
+    // is passed over, so an outer module's s0 runs; with no outer module the result is operation 134 (nothing).
+    let sup = || L(vec![call(133, vec![kw(kind::QUOTE, vec![S(0)])]), S(1002)]);
+    let inner = || begin(vec![define(0, lambda(&[1002], vec![call(40, vec![sup(), I(1)])]))]);
+    let outer = begin(vec![define(0, lambda(&[1002], vec![I(5)]))]);
+    let mut it = Interpreter::new(program_sly2(&[inner(), outer, inner()]), None);
+    let mut h = Mock::default();
+    it.load(&mut h);
+    assert!(it.attach_with_outer(ObjectId(1), 0, Some(1)));
+    it.attach(ObjectId(2), 2);
+    let r = it.raise_event(&mut h, ObjectId(1), 0, &[]).unwrap();
+    assert_eq!(show(&r), "(5 1)", "the outer module's handler ran once");
+    let r = it.raise_event(&mut h, ObjectId(2), 0, &[]).unwrap();
+    assert!(!matches!(r, Value::Error(_)), "no outer module: operation 134 does nothing ({r:?})");
+    assert_eq!(it.error_count(), 0);
+}
+
+#[test]
+fn too_deep_names_the_handler() {
+    // A handler that calls itself by name reaches the depth limit; the error names its object, event and module.
+    let m = begin(vec![define(3, lambda(&[1002], vec![L(vec![S(3), S(1002)])]))]);
+    let mut it = Interpreter::new(program_sly2(&[m]), None);
+    it.limits.max_steps = 10_000_000;
+    let mut h = Mock::default();
+    it.load(&mut h);
+    it.attach(ObjectId(9), 0);
+    let r = it.raise_event(&mut h, ObjectId(9), 3, &[]).unwrap();
+    let want = crate::Site { object: Some(ObjectId(9)), event: Some(3), module: Some(0) };
+    assert!(matches!(r, Value::Error(ScriptError::TooDeep(site)) if site == want), "{r:?}");
 }
 
 #[test]

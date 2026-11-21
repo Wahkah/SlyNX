@@ -556,15 +556,18 @@ For hardware tests every Switch program (the viewer and the Sly 1, 2 and 3 game 
   it, the GPU time, draw commands and triangles. Averages over about 16 frames.
 - **GPU time** comes from deko3d timestamp reports: one at the top of the pipe when a frame's commands start, one
   at the end of the pipe before its fence; read when the frame slot comes round again, so the number is three
-  frames old. The reports are 32 bytes per slot (`SlynxRenderStats::gpu_ns`, `FrameStats::gpu_ns`); the timer runs
-  at 614.4 MHz (ticks x 625 / 384 = ns). OpenGL reports none.
-- **Log:** `perf.log` in the user folder (`sdmc:/switch/SlyNX/user/perf.log`), written whether the overlay is shown
-  or not, one line every five seconds: time, frames, FPS, average and worst frame time, average and worst CPU time,
-  average and worst GPU time, average draw commands. The file keeps its header and its newest 32 to 64 KiB and is
-  rewritten (atomically) each time a line is added.
+  frames old. The reports are 32 bytes per slot (`SlynxRenderStats::gpu_ns`, `FrameStats::gpu_ns`), in GPU-uncached
+  memory so they reach memory without a cache flush before the fence; the timer runs at 614.4 MHz (ticks x 625 /
+  384 = ns). OpenGL reports none.
+- **Log:** `perf.log` in the user folder (`sdmc:/switch/SlyNX/user/perf.log`), one line every five seconds: time,
+  frames, FPS, average and worst frame time, average and worst CPU time, average and worst GPU time, average draw
+  commands. The lines are kept all along, but the file is written only while the overlay is shown
+  (`PerfMeter::log_due`), so normal play never writes to the card from the game thread; turning the overlay on
+  writes what was kept. It keeps its header and its newest 32 to 64 KiB and is rewritten (atomically) each time.
 - **Cost:** the averages every frame; while shown, one text update (about 60 glyph instances). The text is the
-  renderer's own (`Renderer::enable_perf_text`, `set_perf_text`), added with every level commit, so programs need no
-  level resources for it.
+  renderer's own (`Renderer::enable_perf_text`, `set_perf_text`), enabled before the first level is loaded and
+  added with every level commit, so programs need no level resources for it. It is optional: a level whose
+  textures already use every pool (`MAX_POOLS`) or instance it needs is committed without it rather than failing.
 
 ## Not yet verified on Switch hardware
 
@@ -650,18 +653,22 @@ held items) are not static. Their scene draws stay instances (`SceneInput::dynam
 characters' skipped ranges since these records nest in theirs) and are listed in `Prepared::dynamic`. Each keeps
 its placement relative to its object at load. Several objects can share a record (a pool's copies are proxies of
 it), so each object sharing it gets an instance of the record's draws. Every frame, `AttachedParts::update`
-moves each part to its object's world transform and shows it while the object is in the world, active and visible.
-Two cases the engine does not signal yet are held back:
+moves each part to its object's world transform and shows it while the object is in the world, active and visible,
+and:
 
-- a gadget object (classes 100 to 102) in a group directly under a character is its pool's template: not drawn;
-- a bomb's blast volumes (kinds 2 and 3 under a class-101 object) show only while the bomb is out of the characters
-  (placed), and only the volume of its blast's size (option 1104: 300 or 600; the meshes are 325 and 620). Two
-  volumes of each size exist on the disc (red and green at 325; purple and green at 620); which one a bomb shows is
-  not established, so both draw and the first painted wins.
+- a gadget object (classes 100 to 102) only while a copy of it is out of its pool (`World::shared.gadget_copies`,
+  `engine::gang::pool`); the templates left in the pools' groups are not drawn;
+- a bomb's mesh groups (gadgets.md 7.1.1: per bomb kind a sphere and four light cards, all hidden at load) only for
+  the copy's own kind (3968 Trigger, red 325; 3965 Snooze, green 325; 3962 Reduction, green 620; 3947 Rage, purple
+  620), told apart by the cards' transforms (15–18, 11–14, 7–10, 3–6) and the spheres' radius and colour
+  (`attached::bomb_group`): hidden while held or flying, shown while landed (armed, state 2), blinking for
+  `BLINK_TIME` (1.87 s; hidden over frames 20–30, 50–59, 68–75, 84–90, 98–103 and from 108) once triggered (state
+  3), hidden after. The other kinds' groups never show.
 
-The harness option `place_bomb=1` (Sly 2 app) takes Bentley's Trigger Bomb out of his pool and places it between
-him and the player, which shows the bomb and its red blast volume in the cellar (row 3). Drawn in place at the spawn
-instead (before this), these objects made a flat green shape over Sly's head there.
+The harness options `place_bomb=1` and `trigger_bomb=FRAME` (Sly 2 app) have Bentley take a Trigger Bomb and place
+it between him and the player (`gang::pool`), then trigger it: in the cellar (row 3) the red sphere shows while
+armed and blinks in the countdown. Drawn in place at the spawn instead (before this), these objects made a flat
+green shape over Sly's head there.
 
 ## Hooking up `crates/game`
 

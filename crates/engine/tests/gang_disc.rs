@@ -540,7 +540,47 @@ fn bentley_takes_places_and_returns_a_bomb() {
     pool::release(&mut w, copy, [100.0, 200.0, 0.0], 0.0, true);
     assert_eq!((w.parent(copy), pool::copy_of(&w, 7).map(|g| g.state)), (None, Some(2)));
     assert_eq!(w.world_transform(copy).map(|t| t.t), Some([100.0, 200.0, 0.0]));
-    // Returned: back in the pool's group, out of the world.
-    pool::return_copy(&mut w, copy);
+    // Triggered: state 3 and counting down 1.87 s, still placed; then it goes off and returns to the pool's group,
+    // out of the world.
+    pool::trigger(&mut w, copy);
+    assert!(pool::step(&mut w, 1.8).is_empty());
+    assert_eq!((pool::copy_of(&w, 7).map(|g| g.state), w.in_world(copy)), (Some(3), true));
+    assert_eq!(pool::step(&mut w, 0.1), vec![copy]);
     assert_eq!((w.parent(copy), w.in_world(copy), pool::copy_of(&w, 7)), (Some(pool_group), false, None));
+}
+
+#[test]
+fn canes_and_throw_marker_follow_the_state() {
+    use engine::gang::{Character, parts, sly};
+    let Some(_) = disc_path() else {
+        eprintln!("skipped: SLYNX_DISC_SLY2 is not set");
+        return;
+    };
+    let opts = Sly2Options { row: Some(hub().row as i16), ..Sly2Options::default() };
+    let mut w = EngineWorld::load_sly2(hub().data.clone(), &hub().options, opts).unwrap();
+    let sly_h = w.handles().find(|&h| w.class(h) == Some(53)).expect("Sly");
+    let find = |w: &EngineWorld, id: i32| w.find_sly2_id(id, Some(sly_h)).unwrap();
+    let (shaft, second, marker) = (find(&w, parts::CANE), find(&w, parts::CANE_AIR), find(&w, parts::THROW_MARKER));
+    // characters.md 9.3.1: one cane at a time, 318 in the air; none while hiding; the marker only while aiming.
+    let mut c = Character::new(Who::Sly, [0.0; 3], 0.0);
+    parts::update(&mut w, sly_h, &c, false);
+    assert_eq!((w.in_world(shaft), w.in_world(second), w.in_world(marker)), (true, false, false));
+    // An ordinary jump keeps the first cane; the pipe climb, after its grip, takes the second.
+    c.state = sly::AIR;
+    parts::update(&mut w, sly_h, &c, false);
+    assert_eq!((w.in_world(shaft), w.in_world(second)), (true, false));
+    c.state = sly::CLIMB;
+    c.state_time = 0.5;
+    parts::update(&mut w, sly_h, &c, false);
+    assert_eq!((w.in_world(shaft), w.in_world(second)), (false, true));
+    c.state = sly::STAND;
+    parts::update(&mut w, sly_h, &c, true);
+    assert_eq!((w.in_world(shaft), w.in_world(second)), (false, false));
+    c.state = sly::THROW_AIM;
+    c.aim_path = vec![[0.0; 3], [100.0, 0.0, 50.0]];
+    assert_eq!(parts::update(&mut w, sly_h, &c, false), Some(marker));
+    assert!(w.in_world(marker) && w.in_world(shaft));
+    c.state = sly::STAND;
+    parts::update(&mut w, sly_h, &c, false);
+    assert!(!w.in_world(marker));
 }

@@ -149,6 +149,17 @@ pub(super) fn menu_input(i: &FrameInput) -> (MenuInput, bool) {
     (m, pressed(Buttons::A))
 }
 
+/// The game's input while the job-failed screen shows: its dismiss button (Cross, B) is the screen's, not the
+/// player's.
+pub(super) fn without_dismiss(i: &FrameInput, failed_showing: bool) -> FrameInput {
+    let mut i = *i;
+    if failed_showing {
+        i.buttons &= !Buttons::B.0;
+        i.pressed &= !Buttons::B.0;
+    }
+    i
+}
+
 impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
     /// Whether a screen holds the game (the pause menu, the job help, the job-complete screen): the session gives
     /// the game no input then.
@@ -495,4 +506,19 @@ pub struct Sly3Ui {
     paused: bool,
     /// Quit Game was chosen.
     pub quit: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_failed_screen_keeps_its_dismiss_button_from_the_player() {
+        let both = Buttons::B.0 | Buttons::A.0;
+        let i = FrameInput { buttons: both, pressed: both, ..FrameInput::default() };
+        let held = without_dismiss(&i, true);
+        assert_eq!((held.buttons, held.pressed), (Buttons::A.0, Buttons::A.0));
+        let free = without_dismiss(&i, false);
+        assert_eq!((free.buttons, free.pressed), (both, both));
+    }
 }

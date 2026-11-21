@@ -46,9 +46,14 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         }
     }
 
-    /// Performs a load the job system asked for (an exit, a restart): takes the progress out and loads the row.
-    pub(super) fn follow_load_request(&mut self) -> Result<(), String> {
+    /// Performs a load the job system asked for (an exit, a restart): takes the progress out and loads the row. A
+    /// fired exit pauses the game until its load is requested, in a later update after its delay (level-flow.md
+    /// 5.5; `measured` is the update's real time). The wipe-out is not drawn, so the load follows the request at once.
+    pub(super) fn follow_load_request(&mut self, measured: f32) -> Result<(), String> {
         let Some(g) = self.game.as_mut() else { return Ok(()) };
+        if sly2_jobs::with(&mut g.world, |j, _| j.step_exit(measured)) == Some(true) {
+            g.clock.rate = 0.0;
+        }
         let Some(req) = sly2_jobs::with(&mut g.world, |j, _| j.load.take()).flatten() else { return Ok(()) };
         let (progress, carry) = sly2_jobs::detach(&mut g.world).unzip();
         self.pending = Pending { progress, carry, point: Some(req.point), task: req.task };

@@ -36,7 +36,8 @@ pub mod video;
 pub use backend::{Backend, ClipSpace, Limits, NullBackend, SubmitInfo};
 pub use frame::{Batch, DrawCmd, FramePacket, FrameStats, FrameUniforms, GpuInstance, View};
 pub use renderer::{
-    Camera, Fog, MAX_OUTLINE_EDGES, MAX_PANELS, MAX_PROJECTORS, Panel, PlacedPiece, Projector, Renderer,
+    Camera, Fog, MAX_BONES_PER_INSTANCE, MAX_OUTLINE_EDGES, MAX_PANELS, MAX_PROJECTORS, Panel, PlacedPiece, Projector,
+    Renderer,
 };
 pub use resources::{LevelUpload, PoolUpload};
 pub use types::{

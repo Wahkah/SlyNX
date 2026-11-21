@@ -30,8 +30,14 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (restoring tasks on load)
     used_for: the intro task becoming available on load; [R]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (task activation, job completion), frontend.cpp (exit state, firing and update), transition.cpp (load request and wipe)
+    used_for: section 5.5, timing of exits fired by tasks and jobs [R]
+  - kind: disc
+    what: 2026-11-20 read of row 14 task, job and exit option lists (task 2414, job 2406, exits 2379, 2381, 2442, 2532, 2604)
+    used_for: section 5.5, hack-station case [D]
 reviewed_by: pending
-date: 2026-11-17
+date: 2026-11-20
 ---
 
 # Sly 2 level flow
@@ -213,6 +219,28 @@ loads the menu world; all use wipe 777:
 
 The 16 opening and ending movies are the movie records 0 to 16 of the executable's file table, together with
 `0x7D5` ([disc.md](disc.md) 5) [D]. Which screen plays them, and the formats, are in [movies.md](movies.md).
+
+### 5.5 Exits fired by tasks and jobs: timing (added 2026-11-20) [R]
+
+- **Order on becoming current.** A task's exit (option 1278) is fired last: after the task is current, its
+  checkpoint is remembered, its job has begun, switch group 4 is applied and event 19 has gone to the task's script
+  (missions.md 4.2). A job's exit (option 1259) is fired when the job completes with no next task.
+- **Only an armed exit fires.** Firing does nothing unless the exit is in state 3 (5.2). The task or job first sets
+  the exit to update on the real clock; an exit the player is not inside arms on its own updates (0 → 1 → 3, with
+  option 781 at its default 0).
+- **Firing does not load.** It applies the option-788 task states, releases the camera's special views, sets state 4
+  (which pauses the game: pad locked, AI and subtitles paused, until the load) and records the load time as now +
+  option 785 (0 by default; never set on the disc). While an exit is pending, a job end does not start its own
+  return to the hub.
+- **The load request** is made by the exit's own update once that time is reached (the same update or a later one,
+  never inside the firing call): the extra records are queued as movies, then the destination is requested at the
+  option-779 point. With a wipe (option 780, which every exit on the disc has) the request starts the wipe-out
+  animation and the world loads only when the wipe-out has finished, frames later (section 9). Without a wipe, or if
+  the wipe object is missing, the request is set pending and taken by the transition step of the frame loop (section
+  7). A request while a wipe is already going out or loading is dropped.
+- **Hack station (row 14) [D].** Task 2414 (`t4_hack_station1`) has no option 1278, and no task or job of job 2406
+  names an exit; the only row-14 task and job exits are 2442, 2532, 2381 (to row 14) and 2604 (to row 1). Row 14's
+  exit to row 15 is the door 2379. Nothing should load row 15 when 2414 becomes current (missions.md 4.2).
 
 ## 6. Arrival points (class 42) and warp points (class 41)
 

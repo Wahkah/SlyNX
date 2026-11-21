@@ -345,12 +345,13 @@ fn the_jobs_graph_of_venice() {
     s.start_episode(3, &EpisodeProgress::default()).unwrap();
     let j = s.jobs.as_ref().expect("the job system attached");
     let g = &j.graph;
-    // v_ext holds Venice's 10 jobs (class 168) and 95 tasks (class 169).
-    assert_eq!((g.jobs.len(), g.tasks.len()), (10, 95));
+    // v_ext holds all of Venice's (`v_macro`) 11 jobs (class 168) and 150 tasks (class 169), other worlds' loaded
+    // off-world (missions.md 4.1a).
+    assert_eq!((g.jobs.len(), g.tasks.len()), (11, 150));
     // Every job's first and last task and its four save keys; every task's five keys.
-    // Every job names its first task (1364); one (2283) has a last-task value that names no task.
+    // Every job names its first task (1364) and, with other worlds' tasks loaded, its last task too.
     let last = g.jobs.iter().filter(|j| j.last.is_some()).count();
-    assert_eq!(last, 9);
+    assert_eq!(last, 11);
     for job in &g.jobs {
         assert!(job.first.is_some(), "job {}", job.id);
         let k = &job.keys;
@@ -382,9 +383,14 @@ fn the_jobs_graph_of_venice() {
     );
     assert!(scripts > 0 && done_now > 0);
     assert!(g.jobs.iter().all(|j| j.resume.is_none()), "only Kaine Island's jobs have a resume task");
-    // The restored states: nothing done on a new game, some tasks open.
-    assert!(j.states.iter().all(|&s| (0..=1).contains(&s)));
-    assert!(j.states.contains(&1), "a task is available");
+    // A new game in v_ext (missions.md 4.1a): every task of the episode is loaded (other worlds' marked off-world),
+    // only the root 2064 `t1_intro` opens, it has no 1399, and no task or job is current after the world start.
+    let open: Vec<i32> = (0..j.states.len()).filter(|&t| j.states[t] == 1).map(|t| g.tasks[t].id).collect();
+    let off_world = g.tasks.iter().filter(|t| !t.active).count();
+    eprintln!("new game: {} tasks ({off_world} off-world), available {open:?}", g.tasks.len());
+    assert_eq!(open, [2064]);
+    assert!(j.states.iter().all(|&s| s == 0 || s == 1), "{:?}", j.states);
+    assert_eq!((j.current, j.job), (None, None));
 }
 
 #[test]
@@ -413,8 +419,12 @@ fn the_take_out_script_runs() {
     assert_eq!(use_point(&s), Some(false), "the use point is removed while the character walks out");
     let j = s.jobs.as_ref().unwrap();
     let state = |id: i32| j.graph.task_ids.get(&id).map(|&t| j.states[t]);
-    assert_eq!((state(2138), state(2227), state(2418)), (Some(3), Some(3), Some(3)));
-    assert_eq!(j.current.map(|t| j.graph.tasks[t].id), Some(2083), "task 2083 made current");
+    // Its requests (2083 current, 2138, 2227, 2418 and 2083 closed) are checked (command 0x1E, missions.md 4.1a). On a
+    // new game without the intro all five tasks are locked, so each is refused: 2083 waits for 2064 `t1_intro`,
+    // which the intro advances (not run here; the Venice route stands in for it).
+    assert_eq!((state(2138), state(2227), state(2418), state(2083)), (Some(0), Some(0), Some(0), Some(0)));
+    assert_eq!(state(2064), Some(1));
+    assert_eq!(j.current, None, "no task made current");
     // ...and its finish block puts the use point back when it ends.
     for _ in 0..600 {
         if !s.scripts.is_running(2061) {
@@ -425,6 +435,57 @@ fn the_take_out_script_runs() {
     assert!(!s.scripts.is_running(2061), "the script ended");
     assert_eq!(use_point(&s), Some(true), "the use point is back");
     eprintln!("commands not run: {:?}", s.scripts.unhandled);
+}
+
+#[test]
+fn a_use_point_makes_its_task_current() {
+    let Some(path) = require_disc(Game::Sly3, "a_use_point_makes_its_task_current") else { return };
+    let mut s = session(&path);
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    s.load_slot(s.find_world("v_interpol").expect("v_interpol")).unwrap();
+    // The world start's task script may hold the pad (a dialogue); the use button waits for it.
+    for _ in 0..60 * 60 {
+        if !s.script_paused && !s.screens_hold() {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    assert!(!s.script_paused, "the pad is free");
+    // Use point 138235's pairs (1170) are (2105, −1): `t1_recon_go_to_key` made current, as a checked request, so
+    // the task is opened first here.
+    {
+        let (j, g) = (s.jobs.as_mut().unwrap(), s.game.as_mut().unwrap());
+        let t = j.graph.task_ids[&2105];
+        j.force_state(t, 1);
+        j.apply(&mut g.world);
+        let point = g.world.find_sly3_id(138235, None).expect("use point 138235");
+        let at = g.world.world_transform(point).unwrap();
+        g.systems.player.place(&mut g.world, at);
+    }
+    frames(&mut s, 2);
+    let current = |s: &Session| {
+        let j = s.jobs.as_ref().unwrap();
+        j.current.map(|t| j.graph.tasks[t].id)
+    };
+    assert_ne!(current(&s), Some(2105), "nothing happens before the use button");
+    let press =
+        FrameInput { pressed: platform_api::Buttons::A.0, buttons: platform_api::Buttons::A.0, ..Default::default() };
+    // Pressed once the pad is free (the dialogue script holds it now and then).
+    for _ in 0..60 * 60 {
+        if !s.script_paused {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    assert!(!s.script_paused, "the pad is free");
+    s.update(&press, 1.0 / 60.0);
+    frames(&mut s, 2);
+    let j = s.jobs.as_ref().unwrap();
+    let t = j.graph.task_ids[&2105];
+    // 2105 sets 1405 (done when current), so it is finished as it becomes current, and its successor follows.
+    let next: Vec<i32> = j.graph.tasks[t].succ.iter().map(|&k| j.graph.tasks[k].id).collect();
+    eprintln!("2105: state {}, current {:?}, successors {next:?}", j.states[t], current(&s));
+    assert_eq!(j.states[t], 2, "the use point's pair applied");
 }
 
 #[test]

@@ -275,7 +275,7 @@ fn sort(it: &mut Interpreter, host: &mut dyn ScriptHost, c: &Call<'_>) -> Result
 /// evaluated head with its evaluated elements; anything else is itself.
 fn eval_value(it: &mut Interpreter, host: &mut dyn ScriptHost, v: &Value, depth: u32) -> Result<Value, ScriptError> {
     if depth >= EVAL_DEPTH {
-        return Err(ScriptError::TooDeep);
+        return Err(it.too_deep());
     }
     it.charge(1)?;
     Ok(match v {
