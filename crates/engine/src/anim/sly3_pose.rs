@@ -3,7 +3,7 @@
 //!
 //! - **Which clip** ([`sly3_motion`], characters.md 12.2 and 12.3):
 //!   - standing: the idle state machine (Sly 172, Bentley and Murray 451);
-//!   - moving: the full-speed gait (+0x1470: Sly 173/174, Bentley and Murray 449/447) at weight 1 in the run states,
+//!   - moving: the full-speed gait (characters.md 12.3: Sly 173/174, Bentley and Murray 449/447) at weight 1 in the run states,
 //!     the stick-driven gait (Sly 307/308, Bentley and Murray 535/534) at the stick's deflection in the walk states,
 //!     Murray's carry gait 528/529; each at Sly 2's footfall-weighted speed, played at the actual speed over it (Sly
 //!     832 / 640 = 1.3);
@@ -55,11 +55,11 @@ pub const MACHINE_CLASS: i16 = 132;
 pub mod clip {
     /// The idle state machine.
     pub const IDLE: [i32; 3] = [172, 451, 451];
-    /// The full-speed gait (+0x1470, slow and fast clips), played at weight 1.
+    /// The full-speed gait (characters.md 12.3; slow and fast clips), played at weight 1.
     pub const FULL: [[i32; 2]; 3] = [[173, 174], [449, 447], [449, 447]];
-    /// The stick-driven gait (the one `0x00173068` returns; Sly's from his second table).
+    /// The stick-driven gait (characters.md 12.2 and 12.3; Sly's from his second table).
     pub const STICK: [[i32; 2]; 3] = [[307, 308], [535, 534], [535, 534]];
-    /// Murray's carry gait (+0x15A0).
+    /// Murray's carry gait (characters.md 12.2 and 12.3).
     pub const MURRAY_CARRY: [i32; 2] = [528, 529];
     /// Jump and fall clips by sub-kind 0 to 4 (−1: none).
     pub const JUMP: [[i32; 5]; 3] = [[200, 204, 203, 201, 202], [696, 700, 699, 697, 698], [696, 700, 699, 697, 698]];

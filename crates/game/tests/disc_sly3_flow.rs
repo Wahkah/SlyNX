@@ -513,6 +513,85 @@ fn a_use_point_makes_its_task_current() {
 }
 
 #[test]
+fn the_cell_lock_opens_with_the_stick() {
+    let Some(path) = require_disc(Game::Sly3, "the_cell_lock_opens_with_the_stick") else { return };
+    let mut s = session(&path);
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    s.load_slot(s.find_world("v_interpol").expect("v_interpol")).unwrap();
+    frames(&mut s, 2);
+    // `t1_recon_open_cell` (2112) current (m1_recon begins) and done, as in play: `t1_recon_tumble_lock` (2115) opens,
+    // and its switches bring in use point 138208.
+    assert!(s.start_task("t1_recon_open_cell"));
+    frames(&mut s, 2);
+    {
+        let (j, g) = (s.jobs.as_mut().unwrap(), s.game.as_mut().unwrap());
+        let t = j.graph.task_ids[&2112];
+        j.force_state(t, 2);
+        j.apply(&mut g.world);
+        game::sly3::jobs::mirror(j, &mut g.world);
+        assert_eq!(j.task_state(2115), Some(1));
+    }
+    frames(&mut s, 2);
+    // The use routine (interactables.md 5; the reach test belongs to the interaction search, not traced yet): the
+    // user is stored, then the point's event 5 calls method 247 on lock 138191 with it (missions.md 4.1a).
+    let (point, lock, player) = {
+        let w = &s.game.as_ref().unwrap().world;
+        let point = w.find_sly3_id(138208, None).expect("use point 138208");
+        let lock = w
+            .slots_with_sly3_id(138191)
+            .iter()
+            .filter_map(|&k| w.handle(k))
+            .find(|&h| w.class(h) == Some(79))
+            .expect("lock 138191 (class 79)");
+        (point, lock, w.player.unwrap())
+    };
+    {
+        let g = s.game.as_mut().unwrap();
+        engine::behavior::sly3::interactables::use_point_use(&mut g.world, point, player);
+    }
+    frames(&mut s, 3);
+    let l = s.lock.as_ref().expect("the lock started");
+    assert_eq!((l.handle, l.user), (lock, Some(player)), "with its user");
+    assert_eq!(s.game.as_ref().unwrap().world.shared.driving, Some(lock), "player 0 controls the lock");
+    // The intro (1868) ends and the solving view (state 3) opens.
+    for _ in 0..600 {
+        if s.lock.as_ref().is_some_and(|l| l.state == 3) {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    assert_eq!(s.lock.as_ref().map(|l| l.state), Some(3), "the solving view");
+    // The stick turns the dial up to 85, down to 20, up to 75 (game::sly3::lock).
+    let mut at = 0.0f32;
+    for i in 0..3 {
+        for _ in 0..3000 {
+            if s.lock.as_ref().is_none_or(|l| l.dial.active != i) {
+                break;
+            }
+            at += 0.15 * game::sly3::lock::Dial::direction(i);
+            let input = FrameInput { left: [at.cos(), at.sin()], ..Default::default() };
+            s.update(&input, 1.0 / 60.0);
+        }
+        assert_eq!(s.lock.as_ref().map(|l| l.dial.active), Some(i + 1), "tumbler {i} set");
+    }
+    for _ in 0..600 {
+        if s.lock.as_ref().is_some_and(|l| l.state == 5) {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    // Solved (4, script 1871), then control back to the user (5).
+    assert_eq!(s.lock.as_ref().map(|l| l.state), Some(5), "solved, control handed back");
+    assert_eq!(s.game.as_ref().unwrap().world.shared.driving, None);
+    // On solving, the lock receives event 5 (game::sly3::lock's stand-in for the untraced link, interactables.md 5),
+    // which broadcasts task event 29 from it. 2115's module answers by asking for its own state 2, which opens
+    // `t1_recon_escape` (2116).
+    frames(&mut s, 3);
+    let j = s.jobs.as_ref().unwrap();
+    assert_eq!((j.task_state(2115), j.task_state(2116)), (Some(2), Some(1)));
+}
+
+#[test]
 fn a_script_fires_its_exit() {
     let Some(path) = require_disc(Game::Sly3, "a_script_fires_its_exit") else { return };
     let mut s = session(&path);

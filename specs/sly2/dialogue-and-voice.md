@@ -45,7 +45,7 @@ sources:
     what: re-walk of all 43 worlds (121,153 bodies), raw argument bytes of options 596, 597, 601, 606 and 636 (2026-11-18)
     used_for: argument types and value counts of those commands
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-21
 ---
 
 # Sly 2 dialogue, subtitles and voice
@@ -87,9 +87,9 @@ object**, which the sequence's commands use as their default target [R]. The way
 
 | Start | How it is written | On the disc [D] |
 |---|---|---|
-| **Script call: start with an object** | option 613 (script ID 235 in the class map), called with one argument, the starter: `((op111 sequence 235) starter)`; with no argument there is no starter | 1,357 calls: 810 with an object literal, 75 with a computed object, 437 without |
+| **Script call: start with an object** (starting a sequence that is already running does nothing: `0x001DFD68`, 2026-11-21 [D]) | option 613 (script ID 235 in the class map), called with one argument, the starter: `((op111 sequence 235) starter)`; with no argument there is no starter | 1,357 calls: 810 with an object literal, 75 with a computed object, 437 without |
 | **Script call: start with the current character** | option 614 (script ID 638), no arguments; the starter is the character the player controls now | 2,363 calls |
-| **Script call: stop** | option 615 (script ID 530), no arguments | 103 calls |
+| **Script call: stop** | option 615 (script ID 530), no arguments; calls the sequence stop `0x001DFEB8`, which stops every run of the sequence and retracts the clips they wait on (2026-11-21, [animation.md](animation.md) 2) [D]. Command 631 in a sequence stops another sequence the same way [R] | 103 calls |
 | **Trigger volume** | a class-24 volume whose option 441 names the sequence; started when an object the volume accepts enters it, with that object as the starter [R] | 40 volumes, all naming class-114 objects |
 | **Interaction spot** | a class-35 spot whose option 1070 names the sequence; started when a character uses the spot, with that character as the starter [R] | 82 spots, all naming class-114 objects |
 | **Animation event** | a timed event of type 4 in a clip (animation.md 2) whose object ID names a sequence; started when the clip crosses the event's frame, with no starter [R] | 168 timed type-4 events name class-114 objects (the other 252 type-4 events, all in retract lists, name clips and play them) |

@@ -45,6 +45,7 @@ pub mod front; // Sly 3 hook: the title, the save slots, the episode menu and th
 pub mod grid; // Sly 3 hook: the gadget assignment screen.
 pub mod jobs;
 pub mod layer; // Sly 3 hook: the 2D layer (fonts, HUD, pause menu, job screens; `ui::sly2`).
+pub mod lock; // Sly 3 hook: the cell lock minigame (class 79).
 pub mod safehouse;
 pub mod waypoints;
 
@@ -279,6 +280,8 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     frame_dt: f32,
     /// A script paused the run (`0x1F`): the game gets no pad input while one of these scripts runs.
     pub script_paused: bool,
+    /// Sly 3 hook (interactables.md 5): the cell lock started by method 1600, while one runs.
+    pub lock: Option<lock::Lock>,
     paused_by: alloc::collections::BTreeSet<i32>,
     /// The world's mission waypoints (class 120) and, by base class, the classes deriving from it.
     pub waypoints: Vec<waypoints::Waypoint>,
@@ -359,6 +362,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             front: front::Front::default(),
             frame_dt: 0.0,
             script_paused: false,
+            lock: None,
             paused_by: alloc::collections::BTreeSet::new(),
             waypoints: Vec::new(),
             derived: alloc::collections::BTreeMap::new(),
@@ -809,7 +813,8 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         if let Some(g) = self.game.as_mut() {
             g.world.shared.sly3_holds = holds;
             g.frame(input, measured);
-            // Sly 3 hook (use points): the use button (Circle) uses the nearest point within reach.
+            // Sly 3 hook (use points): the use button (Circle) uses the nearest active point within reach. Working
+            // choice (the candidate search is not traced): nearest horizontally, reach as `UsePoint::user_of` has it.
             if input.pressed & platform_api::Buttons::A.0 != 0
                 && let Some(p) = g.world.player.and_then(|h| g.world.position(h))
             {
@@ -817,11 +822,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 let w = &g.world;
                 let mut points: Vec<(f32, engine::object::Handle)> = w
                     .handles()
-                    .filter(|&h| w.class(h) == Some(class::USE_POINT))
+                    .filter(|&h| w.class(h) == Some(class::USE_POINT) && w.is_active(h))
                     .filter_map(|h| {
                         let q = w.position(h)?;
-                        let d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
-                        Some((d[0] * d[0] + d[1] * d[1] + d[2] * d[2], h))
+                        let d = [q[0] - p[0], q[1] - p[1]];
+                        Some((d[0] * d[0] + d[1] * d[1], h))
                     })
                     .collect();
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -831,6 +836,24 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 }
             }
             let touched = input.buttons != 0 || input.left != [0.0; 2] || input.right != [0.0; 2];
+            // Sly 3 hook (missions.md 4.1a): task event 29 for every object that received script event 5 (mission
+            // waypoints broadcast their own, with 30 on leaving).
+            let fifth: Vec<_> = core::mem::take(&mut g.world.shared.sly3_event5)
+                .into_iter()
+                .filter(|&h| g.world.class(h) != Some(waypoints::WAYPOINT_CLASS))
+                .collect();
+            if let Some(j) = self.jobs.as_mut() {
+                for h in fifth {
+                    j.task_event(waypoints::TASK_ENTER, Some(h));
+                }
+            }
+            // Sly 3 hook: a cell lock started (method 1600) takes player 0's control and runs with the pad.
+            for (h, user) in core::mem::take(&mut g.world.shared.sly3_lock_starts) {
+                self.lock = Some(lock::Lock::start(h, user, &mut g.world, &mut self.scripts));
+            }
+            if let Some(l) = self.lock.as_mut() {
+                l.update(input, measured, &mut g.world, &mut self.scripts);
+            }
             if let Some(j) = self.jobs.as_mut() {
                 jobs::step(j, &mut g.world, measured, touched);
                 // Vehicles hook: a job's machine is handed to the player while the job runs.

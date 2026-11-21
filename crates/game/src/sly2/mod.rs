@@ -65,6 +65,13 @@ fn apply_world_cue(
             world.raise(seq, SEQUENCE_VALUE, alloc::vec![script::Value::Int(v)]);
             None
         }
+        // Command 631: stop the named sequence (all its runs; their waited playbacks are retracted).
+        talk::SeqCommand::StopSequence(id) => {
+            if let Some(h) = world.find_sly2_id(id, Some(seq)) {
+                world.shared.sequence_requests.push(engine::behavior::sly2_commands::SequenceRequest::Stop(h));
+            }
+            None
+        }
         // Command 635: the clip on the object given, else on the clip's own rig (its parent), at the clip's speed
         // (option 109); its events (the add and remove of camera objects) fire as it is applied and retracted.
         talk::SeqCommand::PlayClip { clip, object, flags, .. } => {
@@ -580,6 +587,18 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         &self.silent
     }
 
+    /// Whether a sequence run waits for a clip that ends by itself (played once, not looping or holding): a cutscene
+    /// that will go on (for the smoke tool's stall rule).
+    pub fn waits_on_ending_clip(&self) -> bool {
+        let Some(anim) = self.game.as_ref().and_then(|g| g.world.sly2.as_deref()).map(|l| &l.anim) else {
+            return false;
+        };
+        let ends = |p: engine::object::Handle| {
+            anim.clips.get(&p.index()).is_some_and(|c| c.wrap == engine::game::sly2_anim::Wrap::Once)
+        };
+        self.silent.iter().filter_map(|r| r.waiting).any(ends) || self.clip_waits.iter().any(|w| ends(w.2))
+    }
+
     /// Enters the hub's safe house (false when the world has none; safehouse-and-shop.md 2): it becomes the current
     /// player, shows the current character's state, and raises script event 5 and task event 26.
     pub fn enter_safe_house(&mut self) -> bool {
@@ -746,6 +765,8 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             for r in requests {
                 use engine::behavior::sly2_commands::SequenceRequest as Q;
                 match r {
+                    // Starting a sequence that runs does nothing (dialogue-and-voice.md 2.1, animation.md 2).
+                    Q::Start { sequence, .. } | Q::StartWithPlayer(sequence) if self.running.contains(&sequence) => {}
                     Q::Start { sequence, .. } | Q::StartWithPlayer(sequence) => {
                         if let Some(s) = self.sound.as_mut() {
                             s.start_sequence(&g.world, sequence);

@@ -77,6 +77,20 @@ pub mod task_method {
 const START_SCRIPT: u16 = 747;
 /// Command scripts.
 const COMMAND_SCRIPT_CLASS: i16 = 135;
+/// Use points, and their user (script ID 555; interactables.md 5).
+const USE_POINT_CLASS: i16 = 33;
+const USE_USER: u16 = 1162;
+/// Tumble locks, and their start method (script ID 247; missions.md 4.1a).
+const LOCK_CLASS: i16 = 79;
+const LOCK_START: u16 = 1600;
+/// The cell lock's part (class 47, nested in the lock; interactables.md 5) reads its owner, the lock, through script
+/// ID 34 (stream 20), and its event 5 calls script ID 12 (stream 11) on it, which raises event 5 on the lock.
+const PART_CLASS: i16 = 47;
+const OWNER_REF: u16 = 20;
+const RAISE_FIVE: u16 = 11;
+/// Script ID 32 (stream 18), on any object: whether the object is the one with the given ID or a copy of it, as task
+/// 2115's handler tests the lock (missions.md 4.1a).
+const IS_ID: u16 = 18;
 
 impl WorldHost<'_> {
     /// The root of the copy placement `slot` (class 8) made: the first object of that copy, below the placement.
@@ -177,9 +191,31 @@ impl WorldHost<'_> {
             let id = self.world.sly3_id(h)?;
             return self.world.shared.sly3_task_states.get(&id).map(|&s| Value::Int(s as i32));
         }
-        // A command script's start method.
-        if option == START_SCRIPT && self.world.class(h) == Some(COMMAND_SCRIPT_CLASS) {
+        // Whether the object is the one with an ID (or a copy of it): same object ID.
+        if option == IS_ID {
             return Some(Value::Method { object, option });
+        }
+        // A command script's start method, a lock's start and event-5 methods.
+        if (option == START_SCRIPT && self.world.class(h) == Some(COMMAND_SCRIPT_CLASS))
+            || (matches!(option, LOCK_START | RAISE_FIVE) && self.world.class(h) == Some(LOCK_CLASS))
+        {
+            return Some(Value::Method { object, option });
+        }
+        // The lock part's owner: the first enclosing object that is not a placement (working choice for the field
+        // at +0x10).
+        if option == OWNER_REF
+            && self.world.class(h) == Some(PART_CLASS)
+            && self.world.options(h).and_then(|o| o.get(OWNER_REF)).is_none()
+        {
+            let owner = core::iter::successors(self.world.parent(h), |&q| self.world.parent(q))
+                .find(|&q| self.world.class(q) != Some(PLACEMENT_CLASS));
+            return Some(Value::Object(owner.map(Handle::to_script)));
+        }
+        // A use point's user, stored when it was used.
+        if option == USE_USER && self.world.class(h) == Some(USE_POINT_CLASS) {
+            let slot = self.world.slot(h)?;
+            let user = self.world.shared.sly3_use_users.get(&slot).copied();
+            return Some(Value::Object(user.map(Handle::to_script)));
         }
         // Value types 0x2000 + c hold the ID of an object of class c: scripts get the object (as Sly 2's read
         // does), found by Sly 3 ID from the object's copy.
@@ -225,6 +261,33 @@ impl WorldHost<'_> {
                 _ => None,
             };
         }
+        if option == IS_ID {
+            let h = self.obj(object)?;
+            let id = args.first().and_then(|a| a.as_i32());
+            return Some(Value::Bool(id.is_some() && self.world.sly3_id(h) == id));
+        }
+        // Event 5 raised on the lock (its part forwards its own).
+        if option == RAISE_FIVE {
+            let h = self.obj(object)?;
+            if self.world.class(h)? != LOCK_CLASS {
+                return None;
+            }
+            self.world.raise(h, 5, Vec::new());
+            return Some(Value::Void);
+        }
+        // A tumble lock started with its user, queued for the session (missions.md 4.1a).
+        if option == LOCK_START {
+            let h = self.obj(object)?;
+            if self.world.class(h)? != LOCK_CLASS {
+                return None;
+            }
+            let user = match args.first() {
+                Some(Value::Object(Some(o))) => self.obj(*o),
+                _ => None,
+            };
+            self.world.shared.sly3_lock_starts.push((h, user));
+            return Some(Value::Void);
+        }
         // A command script started by a script, queued for the session's runner (missions.md 4.1a).
         if option == START_SCRIPT {
             let h = self.obj(object)?;
@@ -236,7 +299,11 @@ impl WorldHost<'_> {
                 Some(Value::Object(Some(o))) => self.obj(*o).and_then(|o| self.world.sly3_id(o)).unwrap_or(-1),
                 _ => -1,
             };
-            self.world.shared.sly3_script_starts.push((script, with));
+            // One start per script per frame, however often a script loops over the call.
+            let starts = &mut self.world.shared.sly3_script_starts;
+            if !starts.iter().any(|&(s, _)| s == script) {
+                starts.push((script, with));
+            }
             return Some(Value::Void);
         }
         if !matches!(option, REQUEST | FORCE | SIGNAL | MAKE_CURRENT)

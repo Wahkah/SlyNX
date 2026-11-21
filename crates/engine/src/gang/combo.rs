@@ -31,9 +31,9 @@ use crate::world::World;
 
 /// The combo definitions' class.
 pub const CLASS: i16 = 148;
-/// The press window set by every definition (field +0x70) [X].
+/// The press window set by every definition (Sly 3 characters.md 5) [X].
 pub const WINDOW: f32 = 0.35;
-/// The steering speed set by every definition (field +0x74) [X].
+/// The steering speed set by every definition (Sly 3 characters.md 5) [X].
 pub const STEER: f32 = 800.0;
 /// Sly 3's state number of the combo attack (generic 9) [X].
 pub const SLY3_STATE: i32 = 23;

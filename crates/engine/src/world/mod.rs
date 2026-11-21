@@ -755,7 +755,11 @@ impl World {
             return;
         }
         self.set_flag(s, flags::IN_WORLD, on);
-        self.raise(h, if on { script::event::ADDED } else { script::event::REMOVED }, Vec::new());
+        // Sly 3 hook: Sly 2's added and removed events (4, 5) are not Sly 3's (sly3/scripts.md 6: event 4 takes two
+        // values, and event 5 is the use and activation event), so a Sly 3 world raises neither.
+        if self.sly3.is_none() {
+            self.raise(h, if on { script::event::ADDED } else { script::event::REMOVED }, Vec::new());
+        }
     }
 
     pub(crate) fn clear_in_world_flag(&mut self, slot: u32) {
@@ -900,6 +904,10 @@ impl World {
 
     /// Queues script event `event` for object `h` with extra arguments (scripts.md 6).
     pub fn raise(&mut self, h: Handle, event: u32, args: Vec<script::Value>) {
+        // Sly 3 hook (missions.md 4.1a): an object receiving event 5 has task event 29 broadcast for it, handler or not.
+        if event == 5 && self.sly3.is_some() {
+            self.shared.sly3_event5.push(h);
+        }
         if self.module(h) < 0 {
             return;
         }

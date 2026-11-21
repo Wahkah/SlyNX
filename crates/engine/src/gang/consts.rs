@@ -265,7 +265,7 @@ pub struct GangTunables {
     /// Sly 3: how far ahead of Bentley the Fishing Pole's tip is (the tip part's position is not given).
     pub fishing_range: f32,
     /// Sly 3: the time allowed for the next press of a cane combo: 0.35 s, set by each combo definition (class 148,
-    /// field +0x70); option 1668 would override it, but no record uses it (characters.md 5) [X] [D].
+    /// the definition's press window); option 1668 would override it, but no record uses it (characters.md 5) [X] [D].
     pub combo_window: f32,
     /// Sly 3: a combo attack's or follow-up's length (the clips' lengths are not given).
     pub combo_clip_time: f32,

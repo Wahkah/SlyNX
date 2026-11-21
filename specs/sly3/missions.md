@@ -281,6 +281,32 @@ macro group is therefore present in every world of the episode.
   `(if (op117 (op118 2064 obj0) 1278) …)`, using task script ID 1278 (stream 1395, read by `0x00188A38`). It then
   calls the game object's method 983 with (0, safe house 15065). That is the safe-house arrival, not the intro.
 
+**`t1_recon_tumble_lock` (2115): done when the cell lock receives event 5** [D] [X]:
+
+- Task 2115 (`m1_recon`; prerequisite 2112, successor 2116) names v_macro module 21, decoded:
+  `(define s20 (lambda (s1240 s1579 s1580) (case s1579 ((29) (if ((op117 s1580 32) 138191) ((op117 s1240 1309) 2 s1240))) ((18) ((op117 (op117 s1240 1295) 1260) 1563 2101)))))`.
+  - Event 20 is the task event of 4.2: (code, object). It reaches 2115 while it is available, live, and of the
+    current job.
+  - **Code 29:** script method 32 (stream option 18, `0x001008D8` → `0x001C8768`) asks whether the object is
+    138191 itself or a copy named 138191. If so, the task **requests its own state 2** (script ID 1309, 3.2),
+    which opens 2116 `t1_recon_escape`.
+  - **Code 18:** it calls the job's (1295 → 2085) method 1260 with (1563, 2101): a job method (3.2) [I: the
+    restart / failure path].
+- Task event 29 with object X is broadcast whenever **X receives script event 5**. The shared event handler
+  (`0x001C86B8`, 4.2) does this for every class that uses it, the lock (class 79) included.
+- **The chain:**
+  1. 2115's switches add use point 138208 and trigger 138189.
+  2. Script 2113 makes Sly use 138208.
+  3. The point's module starts lock 138191 with the user, and player 0 controls the lock.
+  4. When the lock gets event 5, 2115 is requested done.
+- **Partly settled** (the lock minigame is in [interactables.md](interactables.md) 5): `lock_sequences` object 113853 passes an event 5 on to its owner, the lock, through script method 12 (raise event 5). What raises event 5 on 113853 is still open. Earlier notes: The lock's own code (`0x001C9B00` to `0x001CB400`) raises no
+  event 5. On entering state n it runs the command script at +0x19C + 4n with the user (`0x001CAC30` →
+  `0x00225EE8`). No script in v_interpol uses `0x12` on 138191, and `v_cell_lock` holds no command scripts.
+  The likely sources are the lock's completion state or the control hand-back. The lock's states run 0 to 5:
+  losing control below 4 resets to 0, and losing control at 4 or 5 goes to state 5 (`0x001CAAC0`). State 3 runs
+  the solve effects (`0x001CAD10`, `0x001CB008`). Tracing which of these raises event 5 is still open.
+- The trigger 138189 runs script 2098, which is a guard's dialogue loop, not the completion.
+
 **Back-filling prerequisites: on every request, not on the restore** [X]:
 
 - Every state change made by a request goes through `0x00189B08`. That routine first collects the affected tasks

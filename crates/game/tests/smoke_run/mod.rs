@@ -288,6 +288,21 @@ fn route_target(s: &game::sly3::Sly3Session<NullBackend, DiscFile>) -> Option<en
             if let Some(h) = g.handles().find(|&h| matches!(g.class(h), Some(21 | 33)) && g.is_active(h) && names(h)) {
                 return Some(h);
             }
+            // Or a use point the next task's switches bring in while it is available (its own script answers the
+            // use), then such a trigger shape.
+            let brought: Vec<engine::object::Handle> = next
+                .iter()
+                .filter_map(|id| j.graph.task_ids.get(id))
+                .flat_map(|&k| j.graph.tasks[k].switches.iter())
+                .filter(|sw| sw.states.contains(&1))
+                .filter_map(|sw| g.find_sly3_id(sw.object, None))
+                .filter(|&h| g.is_active(h))
+                .collect();
+            for class in [33, 21] {
+                if let Some(&h) = brought.iter().find(|&&h| g.class(h) == Some(class)) {
+                    return Some(h);
+                }
+            }
         }
         let at = g.position(g.player?)?;
         let d = |w: &&game::sly3::waypoints::Waypoint| {
@@ -395,6 +410,9 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
     let mut target: Option<engine::object::Handle> = None;
     let mut steering = 0u32;
     let mut placed = false;
+    // The cell lock's stick angle and last state seen.
+    let mut lock_stick = 0.0f32;
+    let mut lock_state = 0;
     for f in 0..frames {
         let t = Instant::now();
         let now = route_target(&s);
@@ -424,6 +442,23 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
                 journal.push(format!("{:.1} s: placed at the waypoint (no path-finding)", f as f32 / FPS as f32));
             }
         }
+        if placed && steering == 10 * FPS + 30 {
+            // Half a second after placing at a use point: how far the character is from it, against its reach.
+            if let Some(h) = target {
+                use engine::behavior::sly3::interactables::{UsePoint, class};
+                let g = &s.game.as_ref().unwrap().world;
+                if g.class(h) == Some(class::USE_POINT) {
+                    let (p, q) = (g.position(h), g.player.and_then(|p| g.position(p)));
+                    let d = p.zip(q).map(|(p, q)| [q[0] - p[0], q[1] - p[1], q[2] - p[2]]);
+                    journal.push(format!(
+                        "{:.1} s: at use point {:?}: character offset {d:?}, reach {}",
+                        f as f32 / FPS as f32,
+                        g.sly3_id(h),
+                        UsePoint::new(g, h).radius
+                    ));
+                }
+            }
+        }
         let mut input = steer.unwrap_or_else(|| gang_pattern(f));
         // At a use point within reach: stand and press the use button (Circle) twice a second.
         if let Some(h) = target {
@@ -442,6 +477,30 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
                     ));
                 }
             }
+        }
+        // A cell lock running (game::sly3::lock): the stick turns the dial through the combination, up the marks for
+        // tumblers 0 and 2 and down for tumbler 1, a little over the dead zone each frame.
+        if let Some(l) = s.lock.as_ref().filter(|l| (1..=4).contains(&l.state)) {
+            input = FrameInput::default();
+            if l.state == 3 && l.dial.active < 3 {
+                lock_stick += 0.15 * game::sly3::lock::Dial::direction(l.dial.active);
+                input.left = [lock_stick.cos(), lock_stick.sin()];
+            }
+            if l.state != lock_state {
+                journal.push(format!("{:.1} s: lock state {}", f as f32 / FPS as f32, l.state));
+                if l.state == 4 {
+                    journal.push(format!(
+                        "{:.1} s: lock solved; stand-in: it raises event 5 on itself (the link from its part 113853 is not traced)",
+                        f as f32 / FPS as f32
+                    ));
+                }
+            }
+            lock_state = l.state;
+        } else if let Some(l) = s.lock.as_ref()
+            && l.state != lock_state
+        {
+            journal.push(format!("{:.1} s: lock state {}", f as f32 / FPS as f32, l.state));
+            lock_state = l.state;
         }
         s.update(&input, 1.0 / FPS as f32);
         for (k, w) in s.waypoints.iter().enumerate() {
@@ -624,7 +683,7 @@ impl platform_api::FileSystem for MemFs {
 
 /// A task with no progress for this long is looked at (what would finish it) and then finished by request.
 pub const SLY2_STALL_AFTER: f32 = 12.0;
-/// While a sequence plays, a task is looked at only after this long.
+/// While a sequence waits for a clip that ends by itself, a task is looked at only after this long.
 pub const SLY2_CUTSCENE_STALL: f32 = 60.0;
 /// Jobs to play through: episode 1's intro job and the first hub job.
 pub const SLY2_JOBS: usize = 2;
@@ -690,9 +749,10 @@ fn sly2_play_for(s: &mut Sly2, t: usize, visited: &mut Vec<engine::object::Handl
     };
     // Volumes removed at level start (option 26) that a sequence has since added (command 670) are where the
     // player is being sent next (missions.md 4.1: 1690 adds 150620, whose sequence 1697 finishes 1696 by script).
+    // Also those whose own script answers the entry (animation.md 2: 150312 starts 1676, 150314 stops it).
     let added_volume = |h: engine::object::Handle| {
         matches!(w.class(h), Some(24 | 25))
-            && w.options(h).and_then(|o| o.i32(441)).is_some()
+            && (w.options(h).and_then(|o| o.i32(441)).is_some() || w.module(h) >= 0)
             && w.sly2.as_deref().is_some_and(|l| l.actions.iter().any(|a| Some(a.0) == w.slot(h) && a.1 == 26))
     };
     let fallback = w.handles().find(|&h| !visited.contains(&h) && w.in_world(h) && added_volume(h));
@@ -868,6 +928,7 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
     let mut visited: Vec<engine::object::Handle> = Vec::new();
     let mut played = 0u32;
     let mut hold_until = 0u32;
+    let mut in_cutscene = false;
     let mut advanced = 0u32;
     let mut seen_sequences: Vec<engine::object::Handle> = Vec::new();
     let mut namers: std::collections::BTreeMap<i16, u32> = std::collections::BTreeMap::new();
@@ -914,6 +975,10 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
                 journal.push(format!("{:.1} s: sequence {id:?} started", f as f32 / FPS as f32));
             }
         }
+        for &h in seen_sequences.iter().filter(|h| !s.running.contains(h)) {
+            let id = s.game.as_ref().and_then(|g| g.world.sly2_id(h));
+            journal.push(format!("{:.1} s: sequence {id:?} ended", f as f32 / FPS as f32));
+        }
         seen_sequences.retain(|h| s.running.contains(h));
         let row = s.current().map(|c| c.row);
         if row != last_row {
@@ -952,12 +1017,19 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
             current.push(n);
             last_task = task;
             since = 0.0;
-        } else if s.running.is_empty() {
-            since += 1.0 / FPS as f32;
-        } else {
-            // A sequence playing (a cutscene that waits for its clips) counts slowly: idle sequences that hold looping
-            // clips until something stops them play on for good.
+        } else if s.waits_on_ending_clip() {
+            // A cutscene waiting for a clip that ends by itself counts slowly (up to SLY2_CUTSCENE_STALL).
+            if !in_cutscene {
+                journal.push(format!(
+                    "{:.1} s: a sequence waits for a clip that ends: stall counted slowly",
+                    f as f32 / FPS as f32
+                ));
+                in_cutscene = true;
+            }
             since += 1.0 / FPS as f32 * SLY2_STALL_AFTER / SLY2_CUTSCENE_STALL;
+        } else {
+            in_cutscene = false;
+            since += 1.0 / FPS as f32;
         }
         if jobs_done.len() >= SLY2_JOBS {
             break;

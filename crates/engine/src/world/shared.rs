@@ -221,6 +221,13 @@ pub struct Shared {
     /// Sly 3 hook: command scripts started by scripts (method 747 on class 135): (script, object ID or −1), for the
     /// session's runner.
     pub sly3_script_starts: Vec<(i32, i32)>,
+    /// Sly 3 hook (interactables.md 5): each use point's last user, by the point's slot (option 1162 for scripts).
+    pub sly3_use_users: BTreeMap<u32, Handle>,
+    /// Sly 3 hook (missions.md 4.1a): the objects that received script event 5 since the session last looked; task
+    /// event 29 is broadcast for each.
+    pub sly3_event5: Vec<Handle>,
+    /// Sly 3 hook: tumble locks (class 79) started by method 1600 (script ID 247), with their user, for the session.
+    pub sly3_lock_starts: Vec<(Handle, Option<Handle>)>,
     /// Sly 2 sequence starts, stops and alarms for the game's sequence player.
     pub sequence_requests: Vec<crate::behavior::sly2_commands::SequenceRequest>,
     /// Sly 2 meshes hidden by scripts (options 44 and 45): (object slot, mesh object ID).
@@ -325,6 +332,9 @@ impl Default for Shared {
             sly3_holds: 0,
             sly3_task_states: BTreeMap::new(),
             sly3_script_starts: Vec::new(),
+            sly3_use_users: BTreeMap::new(),
+            sly3_event5: Vec::new(),
+            sly3_lock_starts: Vec::new(),
             sequence_requests: Vec::new(),
             hidden_meshes: Vec::new(),
             music_requests: Vec::new(),

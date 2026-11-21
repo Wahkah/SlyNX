@@ -1811,12 +1811,14 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   this way, by sequence 1697's module); 635 plays a clip (on the object given, else the object its first channel
   animates) at the clip's speed (option 109); with the no-wait flag 0 the sequence goes on only after the clip is
   retracted (animation.md 2: a looping, back-and-forth or holding clip only when its run stops). Threads (625 … 626)
-  run beside the line that opens them; 627 stops a thread, and a stopped run retracts the playback it waits for; a
-  sequence ends when none of its runs is left. Without a sound engine the session runs the commands itself
+  run beside the line that opens them; 627 stops a thread of its own run, and a stopped run retracts the playback it
+  waits for; 631 stops another sequence by name (all its runs, like script ID 530); a sequence ends when none of its
+  runs is left, and starting one that runs (636, script IDs 235 and 638) does nothing (animation.md 2). Without a sound engine the session runs the commands itself
   (`SilentRun`): lines are skipped, clips are waited for.
 - **Clips that move objects** (missions.md 4.1, a marked hook in `anim::sly2_pose`): a script clip's channel on an
   object's transform 0 moves the object itself (its loaded local transform times the change), carrying what is placed
-  under it, and the object keeps its last place when the clip ends (the van's carrier 150849 along the street).
+  under it, and the object keeps its last place when the clip ends (the van's carrier 150849 along the street). The
+  loaded transforms are kept with the handle they were read for, so a freed or reused slot reads its own.
 - **Trigger volumes that watch objects**: the objects a volume's option 432 names are tested by their positions as
   well as the characters (150658 waits for 150849).
 - **Clip add and remove events** (camera.md 7.2.1): a clip's events of kind 7 add an object to the world and kind 8
@@ -1852,8 +1854,9 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   characters' lookup tables mark with flag `0x200` (the second cane 318, the throw marker 586, object 685, the
   target-ring placements) are taken out of the world when the world loads, each only below its own character. The
   cane swap, the marker while aiming and the ring copies on targets are the gang's and the prompts'.
-- **The route** now plays episode 1's intro and first hub job with no task finished by request: the stall timer
-  runs only while no sequence plays (cutscenes wait for their clips).
+- **The route** now plays episode 1's intro and first hub job with no task finished by request. The stall timer runs
+  at normal speed, slowly only while a sequence waits for a clip played once (journalled); the route also walks Sly
+  through volumes added at run time that have a script module (150312 and 150314, which start and stop 1676).
 - **Hack station** (vehicles-and-minigames.md 10.3): with the script host's recursion fixed and the job system's
   exit ordering (event 19 before the exit's load), `t4_hack_station1`'s handler starts sequence 2410 in row 14, its
   command 670 adds the ship, and the job hands it over; the vehicles stand-in in `shots::follow_job` is gone.
@@ -2730,15 +2733,46 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
          exit 2046, and v_interpol loads at point 138289. Then `t1_recon_key_intro` (2099) becomes current.
       9. The route heads for use point 138235 and presses Circle. 2105 becomes current and is done at once (1405),
          and `t1_recon_get_key` (2106) becomes current.
-      10. 2106 is done and `t1_recon_get_to_cell` (2109) becomes current. The 60 s run ends heading for use point
-          138214, which names `t1_recon_open_cell_intro` (2111).
+      10. 2106 is done and `t1_recon_get_to_cell` (2109) becomes current. Use point 138214 (pair (2111, −1))
+          makes `t1_recon_open_cell_intro` (2111) current. It is done at once (1405), and `t1_recon_open_cell`
+          (2112) becomes current and is done by its script 2113.
+      11. `t1_recon_tumble_lock` (2115) opens. Nothing names it, but its switches bring in use point 138208, and the
+          route heads for a use point or trigger the next task brings in. Using 138208 starts the cell lock (below).
+          The route turns the stick through 85, 20 and 75, and the lock is solved.
+      12. Solving completes 2115 (through the stand-in below), and `t1_recon_escape` (2116) runs script 2119. Its
+          exit 2045 loads v_ext at 51427.
+      13. `t1_recon_chase_start` (2123) and trigger 140652 lead to `t1_recon_chase_complete` (2128). Its exit 2135
+          loads v_ext at 424 with movie 305, and `t1_chalktalk1` (1825) is reached with no job running: m1_recon is
+          done (a 300 s run).
+      - The cell lock (class 79, `game::sly3::lock`; interactables.md 5):
+        - Use point 138208's event-5 handler calls method 247 (stream 1600) on lock 138191 with the point's user.
+          The use routine stores the user, read as option 1162 (script ID 555). The lock stores the user, enters
+          state 1 and takes player 0's control (`World::shared.driving`).
+        - States 1 (intro 1868), 3 (solving view 1870), 2 (quit, Triangle; 1869) and 4 (solved, 1871). 2 and 4
+          hand control back when their script ends. Losing control gives 0 below 4, else 5.
+        - The dial turns with the stick's rotation (0.1 rad dead zone a frame, smoothed speed, 100 marks). Tumblers
+          run −1 to 6, one step a frame.
+        - Working choices: the gate bands (8 and 4 marks before the gate give 3 and 4, crossing it gives 5), the
+          direction by tumbler parity, and the smoothing rate.
+        - The completion chain: the lock's part 113853 (class 47) forwards its event 5 to its owner (script ID 34,
+          stream 20) through script ID 12 (stream 11), which raises event 5 on the lock. An object receiving event
+          5 has task event 29 broadcast for it (`World::shared.sly3_event5`). 2115's module tests the object with
+          script ID 32 (stream 18, the object's ID) and asks for its own state 2.
+        - **Stand-in** for an untraced link (interactables.md 5, open question: what raises event 5 on 113853): the
+          lock raises event 5 on itself when it enters state 4. The route journals it.
+      - A Sly 3 world no longer raises Sly 2's added and removed events (4 and 5) from `World::set_in_world`. In
+        Sly 3, event 4 takes two values and event 5 is the use and activation event (sly3/scripts.md 6). Before this,
+        every object switched out fired its use handler: 138208's started the lock with no use.
+      - The default run is 60 s; `SLYNX_ROUTE_SECONDS` runs it longer. Script starts by method 747 are kept to
+        one per script per frame.
       - Use points (class 33, interactables.md 5): option 1170 holds up to 4 (task, state) pairs and 1164 is the
         command script. The use button (Circle) uses the nearest point within its radius
         (`behavior::sly3::interactables::use_point_used`, a marked session hook). In order, it applies the pairs
         as checked task requests (−1 makes the task current), raises event 5 on the point and starts the script
-        with the user. 138235 has no 1163; an unset radius is 100 (working choice). `disc_sly3_flow` checks that
-        using 138235 finishes 2105 (1405) and moves on to its successor. The route heads for a use point whose
-        pairs name the next task and presses Circle there.
+        with the user. An unset reach (1163) is 200. Working choice (the use button's candidate search is not
+        traced): the nearest active point horizontally, in reach horizontally and within 300 units vertically.
+        `disc_sly3_flow` checks that using 138235 finishes 2105 (1405) and moves on to its successor. The route
+        heads for a use point whose pairs name the next task and presses Circle there.
       - Every world loads all of the episode's jobs and tasks (missions.md 4.1a). The loader
         (`world::sly3::load`, Sly 3 hook) creates classes 168 and 169 whatever their world filter or conditions.
         Other worlds' jobs and tasks are out of the world, so they get no task events and no switches. v_ext holds

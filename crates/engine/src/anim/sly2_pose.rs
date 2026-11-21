@@ -85,8 +85,9 @@ pub struct Sly2Poser {
     pub fired: Vec<PoseEvent>,
     /// Object slots posed this frame.
     pub posed: Vec<u32>,
-    /// Object-model hook: the loaded local transforms of objects whose transform 0 clips move (missions.md 4.1).
-    pub bases: BTreeMap<u32, Affine>,
+    /// Object-model hook: the loaded local transforms of objects whose transform 0 clips move (missions.md 4.1), with
+    /// the handle each was read for: an entry whose slot was freed or reused is dropped.
+    pub bases: BTreeMap<u32, (Handle, Affine)>,
     /// How many times each object's pose has changed (for caches of what is drawn).
     pub version: BTreeMap<u32, u32>,
     /// Driven playbacks for the next step (consumed by it).
@@ -291,12 +292,14 @@ pub fn step(world: &mut World) {
             rig.apply_clip(c, id, t);
         }
     }
-    // The loaded local transform of every moved object, kept once.
+    // The loaded local transform of every moved object, kept once per object (a freed or reused slot starts over).
+    p.bases.retain(|_, (h, _)| world.contains(*h));
     for &s in &moved {
         if !p.bases.contains_key(&s)
-            && let Some(l) = world.handle(s).and_then(|h| world.local(h))
+            && let Some(h) = world.handle(s)
+            && let Some(l) = world.local(h)
         {
-            p.bases.insert(s, l);
+            p.bases.insert(s, (h, l));
         }
     }
     let mut moves: Vec<(u32, Affine)> = Vec::new();
@@ -314,7 +317,7 @@ pub fn step(world: &mut World) {
         // the list is kept relative to the new transform 0.
         let bind0 = rig.nodes.first().and_then(|n| affine_inverse(&n.bind)).unwrap_or(Affine::IDENTITY);
         let base = if moved.contains(&slot)
-            && let (Some(w0), Some(load)) = (rig.world.first(), p.bases.get(&slot))
+            && let (Some(w0), Some((_, load))) = (rig.world.first(), p.bases.get(&slot))
         {
             moves.push((slot, load.mul(&bind0.mul(w0))));
             affine_inverse(w0).unwrap_or(Affine::IDENTITY)

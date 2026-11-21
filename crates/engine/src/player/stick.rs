@@ -6,7 +6,7 @@
 
 use crate::math::sqrt;
 
-/// The calibration directions (the table at Sly 1 `0x00262A30`, Sly 3 `0x00345108`).
+/// The calibration directions (Sly 1 player-moves.md 1.2, Sly 3 characters.md 11).
 pub const DIRECTIONS: [[f32; 2]; 4] = [[1.0, 0.0], [0.0, 1.0], [0.7, 0.7], [0.7, -0.7]];
 /// Each direction's range when the pad is (re)connected.
 pub const START_RANGE: f32 = 0.75;

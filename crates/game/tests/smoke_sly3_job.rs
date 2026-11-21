@@ -1,6 +1,6 @@
 //! The Sly 3 job route on the player's own Sly 3 disc (`SLYNX_DISC_SLY3`; skipped without it): episode 3 from a new
-//! game, the safe house, then scripted play, journalling how far the first Venice job gets. The `smoke` example
-//! runs it longer after the Sly 3 route.
+//! game, the safe house, then scripted play, journalling how far the first Venice job gets. `SLYNX_ROUTE_SECONDS`
+//! runs it longer (60 s by default).
 
 mod smoke_run;
 
@@ -10,7 +10,8 @@ use smoke_run::{Config, run_sly3_job};
 #[test]
 fn the_first_venice_job_as_far_as_it_goes() {
     let Some(disc) = require_disc(Game::Sly3, "the_first_venice_job_as_far_as_it_goes") else { return };
-    let cfg = Config { disc, seconds: 60.0, worlds: Vec::new(), vehicles: Vec::new() };
+    let seconds = std::env::var("SLYNX_ROUTE_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(60.0);
+    let cfg = Config { disc, seconds, worlds: Vec::new(), vehicles: Vec::new() };
     let a = run_sly3_job(&cfg);
     for line in &a.journal {
         eprintln!("{line}");

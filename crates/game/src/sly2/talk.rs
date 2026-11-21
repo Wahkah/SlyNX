@@ -77,6 +77,9 @@ pub enum SeqCommand {
     },
     /// Option 627: stop the named thread (a sequence run), retracting the playback it waits for.
     StopThread(i32),
+    /// Option 631 (record kind 6): stop the named sequence: all its runs stop and retract their waited playbacks
+    /// (animation.md 2).
+    StopSequence(i32),
     /// Option 625: a thread (its ID) runs the commands up to the matching 626 beside the line that reaches it
     /// (animation.md 2); `end` is the index of that 626.
     Thread {
@@ -136,6 +139,8 @@ pub const SCRIPT_VALUE: i16 = 634;
 pub const PLAY_CLIP: i16 = 635;
 /// Option 627: stop a thread.
 pub const STOP_THREAD: i16 = 627;
+/// Option 631: stop a sequence.
+pub const STOP_SEQUENCE: i16 = 631;
 /// Option 625: open a thread.
 pub const THREAD: i16 = 625;
 /// Option 626: close a thread.
@@ -231,6 +236,9 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
             }
             if o.id == THREAD_END {
                 return Some(SeqCommand::ThreadEnd);
+            }
+            if o.id == STOP_SEQUENCE {
+                return Some(SeqCommand::StopSequence(int_of(typed_args(v)?.first()?.1)));
             }
             if o.id == STOP_THREAD {
                 return Some(SeqCommand::StopThread(int_of(typed_args(v)?.first()?.1)));
@@ -416,11 +424,14 @@ impl Sly2Sound {
         }
     }
 
-    /// Starts sequence object `h` (restarting it when it runs). Returns whether it has dialogue commands.
+    /// Starts sequence object `h`; one already running is left as it is (animation.md 2). Returns whether it has
+    /// commands.
     pub fn start_sequence(&mut self, world: &World, h: Handle) -> bool {
+        if self.sequences.iter().any(|s| s.object == h) {
+            return true;
+        }
         let commands = sequence_commands(world, h);
         let any = !commands.is_empty();
-        self.sequences.retain(|s| s.object != h);
         if any {
             let end = commands.len();
             self.sequences.push(Sequence { object: h, commands, at: 0, started_sub: false, end, thread: MAIN });
@@ -535,7 +546,7 @@ impl Sly2Sound {
         for seq in &mut running {
             self.run(seq, confirm);
         }
-        // Threads the lines stopped (627), and every thread of a sequence whose main line ended.
+        // Runs that passed their end or that a 627 stopped; a sequence ends when none of its runs is left.
         let stops = core::mem::take(&mut self.stop_threads);
         // A sequence ends when none of its runs is left: its threads may outlast its main line.
         for s in &running {
@@ -618,6 +629,7 @@ impl Sly2Sound {
                 SeqCommand::AddObject(_)
                 | SeqCommand::RemoveObject(_)
                 | SeqCommand::Value(_)
+                | SeqCommand::StopSequence(_)
                 | SeqCommand::PlayClip { .. } => {
                     // Done by the session (it has the world), in order with the task requests.
                     self.world_cues.push((seq.object, seq.thread, cmd));

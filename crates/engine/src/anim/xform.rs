@@ -422,7 +422,7 @@ impl XformRig {
     }
 }
 
-/// The bend axis of a straight limb (animation.md 6, the routine at 0x0011E390): from u's smallest component pick a
+/// The bend axis of a straight limb (animation.md 6): from u's smallest component pick a
 /// coordinate axis e (if |x| ≤ |y|: X when |x| ≤ |z|, else Z; if |x| > |y|: Y when |y| ≤ |z|, else Z), take
 /// p = u × e for X or Z and p = e × u for Y, and return normalise(u × p).
 pub fn perpendicular_axis(u: Vec3) -> Vec3 {

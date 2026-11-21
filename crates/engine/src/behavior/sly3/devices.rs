@@ -345,7 +345,7 @@ pub struct Safe {
     pub repeat: f32,
     /// Solved (scripts see it through the state [I]).
     pub solved: bool,
-    /// Set on leaving (field +0x1D0).
+    /// Set on leaving (pickpocket-and-pickups.md 6.1, state 3).
     pub left: bool,
 }
 

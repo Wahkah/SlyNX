@@ -60,6 +60,15 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 (sequence record start, record-done test, sequence run loop)
     used_for: what the record fields mean (section 2) [R]
+  - kind: disc
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), machine code of 0x00106DF8 / 0x001E0420 (command 631), 0x00106788
+      (option 615), 0x001DFD58 (running test at 0x001DFD68) and 0x001DFEB8; level row 0 sequences 1674 and 1676,
+      clip 7629, task 1583, volumes 150310, 150312 and 150314 and the modules of `jb_intro_rig` (2026-11-21)
+    used_for: what stops sequence 1676's looping wait (section 2) [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9 (sequence start and stop, sequence record start)
+    used_for: what record kind 6 does (section 2) [R]
 reviewed_by: pending
 date: 2026-11-21
 ---
@@ -186,6 +195,39 @@ its own**: not at once, and not after the first cycle [D unless marked].
 - **For an engine.** Keep a 635 wait until the playback is retracted, and retract a looping playback when its run
   stops. Not waiting would let the thread run to its end at once, which stops it and retracts the loop too early
   [I].
+
+**What stops sequence 1676's loop in row 0 (added 2026-11-21).** Sequence 1676 ends its wait only when the whole
+sequence is stopped. In play that happens when Sly walks into trigger volume 150314 [D unless marked].
+
+- **The sequence** [D]. A thread (625 … 626) plays loop 150340 on 150338 (apply flags 8). The main line then plays
+  clip 7629 on object 8 (Bentley) with apply flags 8 and the no-wait flag 0. 7629 (3.33 s, option 109) has only
+  type-0 events and no type-6 event, so it never retracts itself.
+- **Two ways to stop a sequence.** Both stop every run of the named sequence, and so retract each run's waited
+  playback (the stop path above):
+  - **command 631**: its handler (`0x00106DF8`) appends a record of kind 6 (`0x001E0420`) naming the sequence, and
+    that record stops it [D for the record, R for its effect];
+  - **script ID 530** (option 615): its handler `0x00106788` calls the sequence stop `0x001DFEB8` [D].
+
+  Command 627 is different: it stops only a thread of its own run.
+- **Starting a running sequence does nothing** [D]. The start routine `0x001DFD58` returns at once if the sequence
+  is running (test at `0x001DFD68`). This holds for command 636 and script IDs 235 and 638. The stop routine likewise
+  does nothing to a sequence that isn't running.
+- **The route** [D for the data, I for event 5's meaning].
+  1. **Task 1583** (`t0_security_shutdown`, option 1272, starts with Sly) switches in volume 150310 in state 1. That
+     volume is Sly only and has option 441 = 1674, so entering it starts sequence 1674.
+  2. **Sequence 1674** starts 1676 with command 636 (no-wait 1) three times; the later two do nothing while it runs.
+     Midway it stops 1676 with command 631. Its last commands start 1676 again and set task 1583 to state 2.
+     1674 does not wait on 1676 and does not stop it when 1674 ends, so 1676 is left running with Bentley's loop
+     held.
+  3. **Task 1583 in states 2 and 3** switches in two Sly-only volumes of `jb_intro_rig`. Both carry option 26, so
+     they are absent until then:
+     - **150312**, a 700 × 500 × 500 box centred on (5106.2, 438.0, 1246.6). Its module 1 handles event 5 (Sly
+       entered [I]): it calls Bentley's script ID 39, then starts 1676 (script ID 235; nothing happens while 1676
+       runs).
+     - **150314**, the same size, right next to it at (5106.2, 999.8, 1246.6). Its module 2 handles event 5: it
+       stops 1676 with **script ID 530**, which retracts 7629 and 150340, then calls Bentley's script ID 40.
+  4. Walking back into 150312 starts 1676 and the loop again, and 150314 stops it again. If Sly never enters
+     150314, the loop holds until the world is left [R].
 
 ## 3. Curves
 

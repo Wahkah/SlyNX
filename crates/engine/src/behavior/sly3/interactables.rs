@@ -160,9 +160,12 @@ impl ClassBehavior for Barrier {
     }
 }
 
-/// The use radius of a point without option 1163 (138235, `t1_recon_go_to_key`'s point, has none). Working choice:
-/// the specs give no default; 100 is the middle of the disc's values (50, 100, 150).
-pub const USE_RADIUS_DEFAULT: f32 = 100.0;
+/// The reach of a point without option 1163 (interactables.md 5).
+pub const USE_RADIUS_DEFAULT: f32 = 200.0;
+/// How far above or below a point its user may stand. Working choice: the use button's candidate search is not
+/// traced, so a point is in reach when the character is within its reach horizontally and within this height
+/// (v_interpol's cell points sit about 210 units above the floor).
+pub const USE_HEIGHT: f32 = 300.0;
 
 /// A Sly 3 use point (class 33).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -195,7 +198,8 @@ impl UsePoint {
         }
     }
 
-    /// The nearest playable character within the radius of the use point's position.
+    /// The nearest playable character in reach of the point: within its reach horizontally and [`USE_HEIGHT`]
+    /// vertically (working choice).
     pub fn user_of(&self, world: &World, me: Handle) -> Option<Handle> {
         let p = world.position(me)?;
         let r2 = self.radius * self.radius;
@@ -204,7 +208,7 @@ impl UsePoint {
             .filter_map(|(h, _)| {
                 let q = world.position(h)?;
                 let d = crate::math::sub(q, p);
-                Some((d[0] * d[0] + d[1] * d[1] + d[2] * d[2], h))
+                (d[2].abs() <= USE_HEIGHT).then_some((d[0] * d[0] + d[1] * d[1], h))
             })
             .filter(|&(d2, _)| d2 <= r2)
             .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -222,17 +226,26 @@ impl ClassBehavior for UsePoint {
     }
 }
 
-/// Sly 3 hook (use button): player 0's character uses point `me` if it is within the radius. In order: the user (the
-/// one the behaviour tracks), each (task, state) pair goes to the job system as a checked request (−1 making the task current), event 5
-/// is raised on the point, and its command script (1164) is returned for the caller to start. None when the point is
-/// out of reach.
+/// Sly 3 hook (use button): player 0's character uses point `me` if it is within reach ([`use_point_use`]). None
+/// when the point is out of reach.
 pub fn use_point_used(world: &mut World, me: Handle) -> Option<Option<i32>> {
-    let p = UsePoint::new(world, me);
     let player = world.player?;
-    p.user_of(world, me).filter(|&u| u == player)?;
+    UsePoint::new(world, me).user_of(world, me).filter(|&u| u == player)?;
+    Some(use_point_use(world, me, player))
+}
+
+/// What using point `me` by `user` does (interactables.md 5), in order: the user is stored (scripts read it as
+/// option 1162, script ID 555), each (task, state) pair goes to the job system as a checked request (−1 making the
+/// task current), event 5 is raised on the point, and its command script (1164) is returned for the caller to start
+/// with the user.
+pub fn use_point_use(world: &mut World, me: Handle, user: Handle) -> Option<i32> {
+    let p = UsePoint::new(world, me);
+    if let Some(slot) = world.slot(me) {
+        world.shared.sly3_use_users.insert(slot, user);
+    }
     world.shared.task_requests.extend(p.tasks.iter().copied());
     world.raise(me, 5, Vec::new());
-    Some(p.script)
+    p.script
 }
 
 /// One pace of a treasure-map clue, in units (gadgets.md 6.10).
