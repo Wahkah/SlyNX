@@ -356,6 +356,17 @@ impl PlayerSystem for GangPlayer {
                 kind: TargetKind::Guard { robbable: !g.pocket.entries.is_empty(), launched: false },
             });
         }
+        // Reactive props (class 98) with events left: an attack contact is a hit (interactables.md 3.2; the cellar's
+        // vent panel, missions.md 4.3).
+        for h in world.handles() {
+            let Some(Behavior::Sly2Prop(p)) = world.behavior(h) else { continue };
+            if p.done() || !world.in_world(h) {
+                continue;
+            }
+            let Some(p) = world.position(h).filter(|&p| dist(p, at) <= TARGET_RANGE) else { continue };
+            let kind = TargetKind::Object { liftable: false, attackable: true };
+            targets.push(Target { id: h.index(), position: p, yaw: 0.0, kind });
+        }
         // Interaction spots (class 35) that start a sequence (option 1070).
         for &s in world.slots_of_class(SPOT_CLASS) {
             let Some(h) = world.handle(s).filter(|&h| world.in_world(h)) else { continue };
@@ -453,18 +464,9 @@ impl PlayerSystem for GangPlayer {
                     }
                 }
                 GangEvent::Interact(id) => {
-                    // An interaction spot starts its sequence with the character using it.
-                    if let Some(h) = world.handle(id)
-                        && world.class(h) == Some(SPOT_CLASS)
-                        && let Some(seq) = world
-                            .options(h)
-                            .and_then(|o| o.i32(SPOT_SEQUENCE))
-                            .and_then(|sid| world.find_sly2_id(sid, Some(h)))
-                    {
-                        world.shared.sequence_requests.push(engine::behavior::sly2_commands::SequenceRequest::Start {
-                            sequence: seq,
-                            starter: Some(me),
-                        });
+                    // An interaction spot runs its "used by" routine with the character using it.
+                    if let Some(h) = world.handle(id).filter(|&h| world.class(h) == Some(SPOT_CLASS)) {
+                        engine::behavior::sly2_commands::use_spot(world, h, Some(me));
                     }
                 }
                 GangEvent::Pickpocket(id) => {
@@ -546,7 +548,11 @@ impl PlayerSystem for GangPlayer {
             let who = g.player;
             g.get_mut(who)
         }) {
+            // Placed at rest, facing the transform's heading (an arrival point, a warp): a fall in progress does not
+            // carry on through the new floor.
             c.position = transform.t;
+            c.velocity = [0.0; 3];
+            c.yaw = engine::math::atan2(transform.cols[0][1], transform.cols[0][0]);
             c.leave_ground();
         }
         self.write_back(world);

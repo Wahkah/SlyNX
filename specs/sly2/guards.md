@@ -36,8 +36,14 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release (alo.cpp collision-part loader, so.cpp contact dispatch, asegevent.cpp events 13-16, aihit.cpp, guardstart.cpp boss options, sly.cpp and gang.cpp clip slots)
     used_for: what the collision-part fields mean, how hits are delivered, which move uses which slot [R]
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), noise template table (709: 2,500, 0.35 s), clone-pool lease test 0x001CA8F4 (2026-11-21)
+    used_for: section 4.2, noises from idle projectiles [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/ainoise.cpp (own-noise test), projectile.cpp (update, contacts, end)
+    used_for: section 4.2, which noise is "its own" and when a projectile makes noise [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-21
 ---
 
 # Sly 2 guards and swarming creatures
@@ -198,6 +204,28 @@ Investigating [R]:
    300–400 units from a point 350 behind the noise, chosen on a turning fan.
 4. A guard with a home object (option 327) and a walking gait only goes if the noise is no more than 50 units
    farther than its home.
+
+**"Not its own" and projectiles** (added 2026-11-21) [R unless marked]:
+
+- **What counts as its own.** A guard skips a noise only when the noise's owner is the guard's own root object. A
+  noise owned by anything else is taken, even an object of the guard's own package or copy.
+- **A projectile's noise.** A projectile (classes 79 to 82) makes a noise only when it **ends**, as one of its final
+  actions. That noise is the fixed template 709 (kind 1, radius 2,500, 0.35 s [D]), placed at the impact and owned by
+  the thrower: the projectile's launcher, or the launcher's parent for a class-112-derived launcher, or else the
+  projectile itself. Unless the guard itself threw it, the guard will investigate.
+- **When a projectile ends:**
+  - its end time passes;
+  - its speed falls below option 392 (+0x158, 0 by default, so never at rest);
+  - a contact is accepted;
+  - for kind 0 (option 385), any contact at all.
+
+  A copy freshly taken from the pool has no end time and its contacts switched on. So an **idle** projectile left in
+  the world makes no noise until something touches it, but a kind-0 one touching the ground, or the guard holding it,
+  ends at once and makes the noise.
+- **In the game, a character's bullet is not in the world until fired.** Its placement in the character's package is
+  fixed (option 1178 = 1, classes/placement.md 2.1 [D]), and its stored template is a pool object. An engine that
+  puts the template, or a copy, in the world at load gets exactly the problem of a kind-1 noise beside the character,
+  who then investigates and drops his command list [I].
 
 ### 4.3 Alarms
 

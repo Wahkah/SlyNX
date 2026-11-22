@@ -290,7 +290,7 @@ pub fn attach(world: &mut World) {
 /// Queues a Sly 2 task event (missions.md), for the job system.
 pub fn task_event(world: &mut World, event: u32) {
     if let Some(l) = world.sly2.as_deref_mut() {
-        l.task_events.push(event);
+        l.task_events.push((event, None));
     }
 }
 

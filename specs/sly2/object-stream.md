@@ -27,7 +27,16 @@ sources:
   - kind: disc
     what: same disc and worlds, every-depth body walk on 2026-11-14
     used_for: value type 22 and argument tag 15 counts, the option-26 count, the corrected test-vector offset
-date: 2026-11-13
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), the class range table at 0x002BAAE8 (199 entries of 20 bytes) and the class test 0x00132B10 (2026-11-21)
+    used_for: the class tree and the class test (section 3.1) [D]
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), the script option read 0x00200BA0 (test at 0x00200BA4) and 0x001FFD98 (flag test at 0x001FFDD8) (2026-11-21)
+    used_for: method, field and getter entries (section 1.1) [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9, src/spliceobj (option read and write)
+    used_for: the field and getter branches (section 1.1) [R]
+date: 2026-11-21
 ---
 
 # Sly 2 world file: the object stream
@@ -66,6 +75,24 @@ simple layouts (classes/simple-layouts.md), and as size-prefixed blocks inside p
 | Entry +0 | `u32` **value type** (section 1.2) |
 | Entry +4 | `u32` flags; if bit `0x400` is set the value is a **typed argument list** (section 1.3) |
 | Entry +24 | `s32` **argument count** for typed argument lists |
+
+**Method, field or getter** (added 2026-11-21). When a script reads an option (`op111`, read routine `0x00200BA0`),
+the entry decides what it gets:
+
+- **Script IDs of 1233 and above** are not looked up in this table at all. They are the object's custom properties,
+  which scripts add with `op108` (test at `0x00200BA4`) [D].
+- **Flag bit `0x1` set: a method** [D, test at `0x001FFDD8`]. The read returns a callable bound to the object, with
+  the handler at entry +16 and the required argument count at +24. The script then calls it, `((op111 x id) args…)`.
+  This holds for every flag-1 entry, **including those with 0 arguments**. The value type (+0) is then only the type
+  of what the call returns. For example, 1177 (class 6: flags 1, 0 arguments, type `0x2002` an object) is a method
+  that returns an object, and scripts call it as `((op111 placement 1021))`.
+- **Otherwise, flag bit `0x2` set: a field** [R]. The read returns the object's field at the offset in +8, converted
+  by the value type. With bit `0x2000` it first moves to a related object through a member function.
+- **Otherwise: a getter** [R]. +8 holds `0xFFFF0000` and +12 the getter function, which is called with no arguments.
+  For example, 789 (a door's destination row, getter `0x00228518`) and 1176 (a placement's leased copy, getter
+  `0x001CB2E0`).
+
+So the rule is the flag bit: `0x1` means method. The argument count and value type do not tell method from value.
 
 The packager reads the table from the player's own executable after checking its SHA-256 [D]. Test vectors: see
 section 6.
@@ -242,6 +269,58 @@ package names and name strings in the data [D] or the earlier research [R]; "?" 
 | 132, 133 | mission | 388, 4,080 | | | jobs and tasks (macro packages) |
 
 Only classes with the solid layout carry drawable geometry [D]. The record count over all worlds is 42,097 [D].
+
+### 3.1 The class tree and the class test (added 2026-11-21)
+
+**The test is "is-a", not exact match** [D]. The class test `0x00132B10` answers true when the object's class
+number c satisfies **C ≤ c < end(C)** for the asked class C. Script ID 3 (stream option 2, handler `0x00100228`)
+uses it, as do the engine's own class checks. end(C) is the third word of entry C in the class table at
+`0x002BAAE8`. The table has 199 entries of 20 bytes: parent entry address, class number, end, object size,
+constructor. Every class's descendants follow it directly in the numbering, so the range is exactly the class and
+everything derived from it. A leaf class (end = C + 1) is matched exactly.
+
+Every class with descendants, its parent and its range [D]:
+
+| Class | Parent | Range |
+|---:|---:|---|
+| 0 | — | 0–198 (everything) |
+| 2 | 0 | 2–133 |
+| 3 | 2 | 3–47 |
+| 6 | 3 | 6–7 |
+| 8 | 3 | 8–9 |
+| 10 | 3 | 10–14 (curves) |
+| 18 | 3 | 18–19 |
+| 22 | 3 | 22–27 (volumes, including 24–25 and the doors, 26) |
+| 24 | 22 | 24–25 |
+| 30 | 3 | 30–33 |
+| 32 | 30 | 32–33 |
+| 35 | 3 | 35–37 |
+| 48 | 2 | 48–108 (all solids) |
+| 50 | 48 | 50–78 |
+| 51 | 50 | 51–68 |
+| 52 | 51 | 52–55 (the three playable characters are 53–55) |
+| 56 | 51 | 56–67 (guards and other characters) |
+| 58 | 56 | 58–59 |
+| 71 | 50 | 71–76 |
+| 79 | 48 | 79–82 |
+| 80 | 79 | 80–82 |
+| 84 | 48 | 84–85 |
+| 90 | 48 | 90–95 (pickups 91–95) |
+| 100 | 48 | 100–102 |
+| 109 | 2 | 109–110 |
+| 126 | 2 | 126–131 (screens) |
+| 138 | 0 | 138–144 |
+| 148 | 0 | 148–150 |
+| 155 | 0 | 155–198 |
+| 157 | 155 | 157–163 |
+| 160 | 157 | 160–163 |
+| 166 | 155 | 166–168 |
+
+All other classes are leaves. Each leaf's parent is the nearest class above it whose range contains it, for
+example 26 → 22, 53 → 52, 57 → 56, 59 → 58, 81 → 80, 92 → 90, 127 → 126.
+
+Among the values scripts pass, **26, 81 and 92 are leaves** and match exactly. **52** covers 52–55, **56** covers
+56–67, **90** covers 90–95, **48** covers every solid (48–108) and **22** every volume (22–27).
 
 ## 4. Object identity
 

@@ -12,7 +12,15 @@ sources:
   - kind: reference-project
     what: Games/Sly2-RE-notes.md, tools/sly2_world.py (earlier research); sly2-decomp @ 33e2bab9, nonmatching/new_1c90d0
     used_for: field order, the fresh/copy rule and the meaning of the package set ID; marked [R] where not checked
-date: 2026-11-13
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), class 6's script map (script IDs 1017-1025 → stream options 1174-1181) and the handlers
+      0x0010E248, 0x0010E2B8, 0x0010E328, 0x0010E398, 0x0010E420 with the routines they call (2026-11-21)
+    used_for: section 2.1 [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9, nonmatching and src/new_1c90d0 (lease routines)
+    used_for: what the lease routines do (section 2.1) [R]
+date: 2026-11-21
 ---
 
 # Prefab placement layout (Sly 2)
@@ -75,6 +83,52 @@ Example: row 0, the kind-1 placement at `0x1B7069` inside Bentley's body (class 
   it, once per placement, at the placement's matrix [R]. The earlier research rendered all 43 levels this way and
   matched the levels' expected layout [R].
 - Objects carrying option 26 are removed at level start, also inside copies (object-stream.md 1.4) [R].
+- A copy placement's patch (1.2) adds options to the copied object even when the package's own record lacks them. For
+  example, row 0's placement 150360 gives spot 80398 options 1070 = 1675 and 26 (dialogue-and-voice.md 2.1) [D].
+
+### 2.1 Placements of shared packages: the leased copy (added 2026-11-21)
+
+A placement of a **shared** package (for example `npc_dimitri`, whose objects are pooled) does not own its object.
+It **leases** one from the package's pool of copies [R]. Scripts reach the leased object through the placement's
+own methods. These are class-6 script IDs; the class-59 character itself has none of them [D for the map]:
+
+| Script ID | Stream option | Handler [D] | What it does [R] |
+|---:|---:|---|---|
+| 1017 | 1174 | `0x0010E248` → `0x001CB2C0` | whether a copy can be leased now |
+| 1019 | 1175 | `0x0010E2B8` → `0x001CB250` | lease a copy and return it (0 if the pool has none) |
+| 1020 | 1176 | getter `0x001CB2E0` | the copy currently leased by this placement (0 if none) |
+| 1021 | 1177 | `0x0010E328` → `0x001CB328` | **the leased copy, leasing one first if there is none**; returns it |
+| 1023 | 1179 | `0x0010E398` → `0x001CB488` | **lock** the lease of the given copy, so the pool keeps it for this placement |
+| 1024 | 1180 | `0x0010E420` → `0x001CB4B8` | **unlock** that lease, so the pool may hand the copy out again |
+
+So "make the copy", "attach" and "release" are close but not exact: 1021 gets (or leases) the live copy, 1023 locks
+it and 1024 unlocks it.
+
+**Leasing adds the copy to the world** [D for the calls, R for the rest]. Taking a lease (`0x001CAEC8`, reached from
+1019 and from 1021 when no copy is leased yet) does the following:
+
+1. Re-applies the placement's option blocks to the copy's objects. The root block (target 5) is skipped; target 6 and
+   other targets are applied.
+2. For each object of the copy:
+   - sets its parent and matrix to the placement's;
+   - **adds it to the world**, through the same virtual slot (`0x40`) that script ID 39 uses (call at `0x001CB178`);
+   - raises script event 14 on the placement and on the object.
+
+So a script that calls 1021 gets a copy that is already in the world at the placement's position, whatever the
+placement's own option 26 says. Unlocking (1024) does not remove it. Scripts remove it with script ID 40 on the copy.
+
+**Automatic leases and option 1178** (script ID 1022, field +0xE4, a flag) [D for the test, R for the rest].
+
+- When a placement enters the world and +0xE4 is 0, it queues a lease for itself (`0x001CA8E0`, test at
+  `0x001CA8F4`), so its copy appears with it.
+- With 1178 = 1 the placement is **fixed**: it takes no lease on its own. A copy appears only when something asks for
+  one.
+- Example: the bullet placements inside `npc_dimitri` (12734 → package `npc_dimitri_bullet`, and → `bullet`) set 1178
+  to 1 in their root block. So Dimitri's copy comes with no bullet in the world; a bullet is taken from the pool only
+  when one is fired [I for "when fired"].
+- The stored objects of a shared package (for example 122335, the class-81 bullet in `npc_dimitri_bullet`) are pool
+  templates, not placed objects (section 2), so they are not in the world from load [R]. The placement's own option overrides apply to the copy; for example, Dimitri's placement
+122332 in row 2 sets the copy's option 273 (its route) to command list 1826 [D] ([missions.md](../missions.md) 4.3).
 
 ## 3. Test vectors
 

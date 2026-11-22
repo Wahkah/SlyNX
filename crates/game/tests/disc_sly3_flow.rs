@@ -274,11 +274,15 @@ fn the_safe_house_and_the_shop() {
     let mut s = session(&path);
     for name in ["v_ext", "o_ext", "h_ext", "c_ext", "p_ext", "p_at_sea", "m_ext", "v_apt"] {
         s.load_slot(s.find_world(name).unwrap()).unwrap();
-        // p_at_sea's safe house is placed inside `p_boat_hero` by a mode-1 placement with world filter 32 and
-        // condition 17, which the fresh load context does not meet.
-        let has = ["v_ext", "o_ext", "h_ext", "c_ext", "p_ext"].contains(&name);
+        // The six safe-house worlds (characters.md 6). p_at_sea's safe house is placed inside `p_boat_hero` by a
+        // mode-1 placement with world filter 32 and condition 17, which its first option set adds (option 1029).
+        let has = ["v_ext", "o_ext", "h_ext", "c_ext", "p_ext", "p_at_sea"].contains(&name);
         assert_eq!(s.safe_house.is_some(), has, "{name}");
         let Some(h) = &s.safe_house else { continue };
+        // The ship's safe house offers only the computer: no placement actions (safehouse-and-shop.md 1).
+        if name == "p_at_sea" {
+            continue;
+        }
         // safehouse-and-shop.md 5 gives (25, 27, 24); the stored list has a fourth entry, Murray (26).
         assert_eq!(h.states, [25, 27, 24, 26], "{name}");
         let shop = Action { state: 27, buttons: 0x40, target: safehouse::SHOP_SCREEN };
@@ -288,8 +292,10 @@ fn the_safe_house_and_the_shop() {
         let all = take.iter().all(|a| h.actions.contains(a));
         assert!(all, "{name}: the placement's actions");
     }
-    // In v_ext: the first state is Bentley (Cross would take him out); right reaches the computer and the shop.
+    // In v_ext: the first state is Bentley (Cross would take him out); right reaches the computer and the shop. A new
+    // game plays the intro first, which holds the pad.
     s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    assert!(play_intro(&mut s), "the intro script ran to its end");
     assert!(s.enter_safe_house());
     let h = s.safe_house.as_ref().unwrap();
     assert_eq!(h.press(0x40), Some(Pressed::TakeOut { member: engine::gang::sly3::Member::Bentley, script: 44602 }));
@@ -574,14 +580,16 @@ fn the_cell_lock_opens_with_the_stick() {
         }
         assert_eq!(s.lock.as_ref().map(|l| l.dial.active), Some(i + 1), "tumbler {i} set");
     }
+    // Solved (4, script 1871), then control back to the user (5), after which the lock no longer runs.
+    let mut solved = false;
     for _ in 0..600 {
-        if s.lock.as_ref().is_some_and(|l| l.state == 5) {
+        solved |= s.lock.as_ref().is_some_and(|l| l.state == 4);
+        if s.lock.is_none() {
             break;
         }
         frames(&mut s, 1);
     }
-    // Solved (4, script 1871), then control back to the user (5).
-    assert_eq!(s.lock.as_ref().map(|l| l.state), Some(5), "solved, control handed back");
+    assert!(solved && s.lock.is_none(), "solved, control handed back");
     assert_eq!(s.game.as_ref().unwrap().world.shared.driving, None);
     // On solving, the lock receives event 5 (game::sly3::lock's stand-in for the untraced link, interactables.md 5),
     // which broadcasts task event 29 from it. 2115's module answers by asking for its own state 2, which opens

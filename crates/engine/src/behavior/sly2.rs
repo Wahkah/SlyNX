@@ -565,7 +565,14 @@ impl Sly2Guard {
         world.set_world_transform(me, Affine { cols: [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]], t: p });
     }
 
-    fn knock_out(&mut self, cx: &mut Cx<'_>) {
+    fn knock_out(&mut self, cx: &mut Cx<'_>, by: Option<Handle>) {
+        // Task event 24 with the creature (missions.md 4.3): a swarming creature killed by an accepted hit, a guard
+        // knocked out by the current player character; 23 for a guard knocked out by anything else. Once each.
+        if !self.knocked_out() {
+            let by_player = by.is_some() && by == cx.world.player;
+            let e = if self.swarmer || by_player { KILLED_BY_PLAYER } else { KILLED_OTHERWISE };
+            super::sly2_props::send_task_event_from(cx.world, e, Some(cx.me));
+        }
         self.job = Job::KnockedOut;
         self.hit_points = 0.0;
         self.sight = 0;
@@ -607,15 +614,17 @@ impl Sly2Guard {
                     let surprise = cx.time - self.last_seen > SURPRISE_WINDOW && self.sight != 1;
                     // Bosses are not knocked out by surprise: their fights are staged (vehicles-and-minigames.md 7).
                     if surprise && !no_surprise && !self.boss {
-                        self.knock_out(cx);
+                        self.knock_out(cx, by);
                     } else {
                         // The block absorbs the hit first (option 257; what is left of it, 258).
                         let through = (GANG_HIT - self.block).max(0.0);
                         self.block = (self.block - GANG_HIT).max(0.0);
                         self.hit_points = (self.hit_points - through).max(0.0);
                         if self.hit_points <= 0.0 {
-                            self.knock_out(cx);
+                            self.knock_out(cx, by);
                         } else {
+                            // Task event 21 on entering a hit reaction, with the guard (missions.md 4.3).
+                            super::sly2_props::send_task_event_from(cx.world, task_events::HIT_REACTION, Some(cx.me));
                             self.job = Job::Pursue;
                             self.last_seen = cx.time;
                         }
@@ -652,6 +661,22 @@ impl Sly2Guard {
             .map(|n| n.position)
     }
 }
+
+/// Task events a guard raises about itself (missions.md 4.3).
+pub mod task_events {
+    /// Its detector's entry for the player went to "seen".
+    pub const SEEN: u32 = 19;
+    /// It entered a hit reaction.
+    pub const HIT_REACTION: u32 = 21;
+    /// It entered investigate (state 12).
+    pub const INVESTIGATING: u32 = 22;
+}
+
+/// Task event 24: a swarming creature killed, or a guard knocked out by the current player character (missions.md
+/// 4.3).
+pub const KILLED_BY_PLAYER: u32 = 24;
+/// Task event 23: a guard knocked out by something else.
+pub const KILLED_OTHERWISE: u32 = 23;
 
 fn libm_hypot(x: f32, y: f32) -> f32 {
     length([x, y, 0.0])
@@ -869,6 +894,11 @@ impl ClassBehavior for Sly2Guard {
         // Sight (3).
         if let Some(p) = target {
             if self.sees(cx, p, player) {
+                // Task event 19 when the detector's entry goes to "seen", with the detector's owner (missions.md
+                // 4.3: the follow job fails when Dimitri sees the player).
+                if self.sight != 1 {
+                    super::sly2_props::send_task_event_from(cx.world, task_events::SEEN, Some(cx.me));
+                }
                 self.sight = 1;
                 self.last_seen = cx.time;
                 if self.job != Job::Pursue {
@@ -984,6 +1014,8 @@ impl ClassBehavior for Sly2Guard {
             && let Some(at) = self.pick_noise(cx, me)
         {
             let look = cx.rng.range(5.5, 6.5);
+            // Task event 22 on entering investigate (state 12), with the guard (missions.md 4.3).
+            super::sly2_props::send_task_event_from(cx.world, task_events::INVESTIGATING, Some(cx.me));
             self.job = Job::Investigate { at, look, time: 0.0 };
         }
     }

@@ -307,6 +307,236 @@ macro group is therefore present in every world of the episode.
   the solve effects (`0x001CAD10`, `0x001CB008`). Tracing which of these raises event 5 is still open.
 - The trigger 138189 runs script 2098, which is a guard's dialogue loop, not the completion.
 
+**The task mode, event 24 and requests during the restore** [X]:
+
+- **Script ID 1280 on a task is the mode.** It is stream option 1411, value type `0x1048` at +0xFC (3.2). The
+  values are:
+  - **0** in live play;
+  - **1** while the restore sets the task, and in step 2 of the world start;
+  - 3 for silent changes (no events, `0x001880F0`).
+
+  The implementer's reading is right: `(s1280 = 1)` means "being restored".
+- **Event 24 during the restore.**
+  - Each task starts at state −1 (load-time setup `0x00187E90`). The restore calls the state setter
+    (`0x0018A3E8`) for every task in the world, once.
+  - The setter returns at once when the new state equals the current one (`0x0018A408`), so no event fires on
+    an unchanged state.
+  - Otherwise it raises event 42 (before) and event 25 on the task, sets the state, then raises event 41 and
+    **event 24**. All of this is gated only by the live test: in this world (+0x40 = 0) and mode ≠ 3.
+  - So during the restore **every in-world task receives event 24 once, whatever state it gets, 0 included**,
+    because −1 → 0 is a change. Other-world tasks (+0x40 = 1) receive nothing.
+- **Requests made by those handlers are deferred until step 3** (`0x00189240`).
+  - A request is queued as {kind, task, state, mode, requester}, and the **mode recorded is the task's mode at
+    the time of the request** (+0xFC).
+  - It runs at once only when the queue's run flag (`0x0036C6E8`) is 1 and it is the only entry.
+  - The world start-up (`0x0025C2A8`) resets the flag to 0 (`0x00189118`, at `0x0025C850`) before the task
+    world start (`0x00184B60`, at `0x0025C8C0`). So requests made during the restore and step 2 wait.
+  - At step 3 the flag is set to 1 and the queue runs in order (`0x00189180` → `0x00189300` for checked requests,
+    `0x00189500` for forced ones). Each request runs with its recorded mode, so 1.
+  - Then the 1399 pass runs. After the world start the flag stays 1, so live requests run immediately (or after
+    the one in progress).
+- **For 2136:** restored as available in mode 1, its handler (`state = 1` and `s1280 = 1`) requests state 4.
+  The request is queued, then runs at the start of step 3, in mode 1, and makes the task current
+  (`0x00188540`). The 1399 pass that follows takes the last available task with 1399 set that is not current,
+  so it can still move "current" to another task.
+- 2138's `(state = 3) and (s1280 = 0)` therefore fires only on a live close, not when a closed task is restored.
+
+**Starting command scripts from modules** [X]:
+
+- Script ID **247** on a command script (class 135) is stream option 747, handler `0x00108918`. It starts the
+  script **with a context object**, its one argument (`0x00225EE8(script, context)`).
+- Script ID **733** is stream option 748, handler `0x001089A0`, with no argument. It starts the script with
+  its default context (`0x00226010`, the same routine a task's 1408 script uses, section 4).
+- **Starting a script** (`0x00225EE8(script, context)`) stores the context at +0x58 and then **raises script event 5
+  on the script** (vtable slot 3, `0x00225F14`). It then starts its runners. The default start (`0x00226010`) uses
+  **player 0's controlled object** (`0x001F4AD0`) as the context.
+  - So every command script gets event 5 when it starts. Through the shared handler (4.2) that also broadcasts
+    task event 29 with the script.
+  - Script ID **740** on class 135 is stream option 756, the object at **+0x58**, i.e. **the context the script
+    was started with**.
+  - Take-out script 2061's `(op117 itself 740)` is therefore the character it was started for. Its event-5 handler
+    runs at start, stores that character, and hands it control through method 983.
+
+**Task 2268 `t1_follow_listen_to_lion_boss`** [D]:
+
+- 2268's module (v_macro) answers task event 29 from object **139626** by starting script **2269** (ID 733).
+- **139626 is in v_ext.** It is a **path (class 10)** nested inside the ferris-wheel object 139617 (group
+  `v_ferris_wheel`, record at `0x007210EC`, 180 bytes: a transform and curve points, no options). A loader that
+  skips nested records under class-47 objects misses it.
+- Script 2269 is the scene where the lion boss talks at the ferris wheel. It:
+  - holds the player (`0x1F`) and sets the context to the wheel;
+  - plays camera keys `0x45` and turns the characters to face points;
+  - gives the lion boss lists 2271 and 2270;
+  - plays dialogues 1354 and 1355;
+  - drives the wheel's state machine (`0x19` 139617 / 139618 → 93932);
+  - places the player on 139627 (`0x22`) and removes 93224 and 93167.
+- **Load condition 14** [D]. The ferris wheel (group `v_ferris_wheel`, root 139617) is a mode-1 record with
+  condition 14. v_ext's option sets are 22, 19, 20 and 23, and **condition 14 is an extra condition (option 1029)
+  of sets 22 and 19**:
+  - 22 adds 14 and 17;
+  - 19 adds 14 and 16;
+  - 20 adds 15 and 16;
+  - 23 adds 15 and 17.
+
+  Table B gives condition 12 to every m1_follow task (2237 to 2266), and v_ext has no set 12. So by the
+  first-set rule the world loads **set 22**, and the wheel loads ([conditions.md](conditions.md) 3) [I for the
+  choice rule]. Condition 23 (sets 23 / 20, extra 15) belongs to later tasks (1826, 2141 …), and 20 to 1811 and
+  table A's 2409.
+
+  An engine that does not add a set's 1029 conditions to the match, or that picks set 20 or 23, misses the wheel.
+  The choice is made at world load. No code was found that re-evaluates conditions during play [I]. So a later
+  task that needs another set relies on a reload, for example an exit or checkpoint.
+- **Open question:** what raises script event 5 on path 139626. The code-29 broadcast follows from any event 5
+  on it (4.2). No script uses `0x12` on 139626, 139617 or 139637 in v_ext, and the path carries no options.
+  *Interpretation:* a character's path movement raises it on reaching or entering the path, the listening spot
+  on the wheel [I, not traced].
+
+**Crew members removed by scripts** [D] [X]:
+
+- In v_ext the crew records are placements in `v_ext_rig`: 24 Sly (class 52 body in `jt`), 25 Bentley, 26 Murray.
+- The Venice intro (script 2065) ends by removing 24 and 25 and adding **15152**, a class-33 use point in
+  `v_ext_rig`, the safe-house door. The rig's arrival module then gives player 0's control to the **safe house**
+  15065 with the game object's method 983 (`0x0010A9D8` → `0x001F4B00`).
+- So after the intro the player is the safe house, and Sly is out of the world on purpose. A crew member comes
+  back when the player leaves the safe house with a character (the safe house's own choice, Sly 2 rules [R]), or
+  when a later script adds him (`0x38`). The game does not skip crew members on a take-out.
+
+**Simuldoors (v_gauntlet, tasks 2289, 2293, 2318): a two-button timing test** [D] [X]:
+
+- **Starting it.** Trigger 140793 (for 2289; 140795 for 2293) is a class-21 trigger present while its task is
+  available (1416). Its module (v_gauntlet_gauntlet modules 11 / 10) starts script 2292 with method 247. Per the
+  implementer's reading, the triggers make the task current and leaving them resets an unfinished attempt.
+- **The task script 2290** (2289's 1408):
+  1. dialogue 1278, then starts **2291** and waits for it (`0x17` with the wait flag);
+  2. dialogue 1287;
+  3. opens the door: state machine 4935 on 139703 → 13759 (`0x19`). 2289's 1417 entries give the same door state
+     13758 in states 0 / 1 and 13759 in states 2 / 3;
+  4. walks Bentley (25) through the door (`0x33`, `0x34` and `0x30` toward 139704 to 139706);
+  5. requests **2289 → 2** (`0x1E`). That completion is the script's last step.
+- **The test, script 2291** (module 71 of v_macro):
+  - **Module state.** t1 and t2 are times. The window starts at 0.25 plus a term from the player's adaptive
+    difficulty: the module computes `(op0 0.25 (op3 (op107) 2.0))` (built-in 107 = the adaptive-difficulty value).
+    `success` is false at start (event 5).
+  - Its event-4 hooks, raised by the script's `0x15` commands, are:
+    - 50517: reset t1 and t2;
+    - 139707: set the calling runner's context to a marker chosen by the current task (2289 → 139711,
+      2293 → 139712, 2318 → 139713);
+    - 50526: t1 = now (built-in 101);
+    - 139710: t2 = now;
+    - 50521: success = |t1 − t2| compared with the window, then window × 1.25. It returns success and is used as
+      the `if` condition.
+  - Custom method 2095 returns `success`.
+  - **Runner A** (Bentley's side), after hint 1293 for 20 s (`0x60`):
+    1. hook 50517, then countdown dialogues 1288 to 1290;
+    2. hook 139707;
+    3. Bentley's interaction object 36937 (`0x29`);
+    4. **hook 50526 (t1)**, and press button 139708 (`v_button_gauntlet`, state machine 50519 → 50520);
+    5. wait for the dialogue;
+    6. **if 50521 succeeds**, rendezvous of runners 24 and 25 at 50522 and finish; otherwise a fail line
+       (1279 to 1286) and repeat.
+  - **Runner B** (Sly's side): loops on "wait for **alarm 139709**", then **hook 139710 (t2)**.
+- **Who sets alarm 139709.** The buttons placed for Sly carry it. Placements 145224, 145562 and 145571 (in
+  `v_gauntlet_gauntlet`) set custom properties **2199 = 2291** (the script) and **2200 = 139709** (the alarm)
+  with option 8. The button templates' module (in `v_button_signal` and `v_button_gauntlet`) handles **event 4**:
+  it reads its owner's (+0x10) 2199 and 2200 and calls the script's ID **735** with the alarm. ID 735 is stream
+  option 751, handler `0x00108A90` → `0x002261A0`, which **sets that alarm on the script**.
+  - So Sly pressing his button at the marker sets alarm 139709.
+  - **Open:** what raises event 4 on the button (the press interaction and its prompt) was not traced. The
+    button-press animation's hook is the likely source [I].
+- **Script ID 741 on a command script** (stream option 757, accessors `0x002262F0` / `0x00226320`) reads and
+  writes **the context object (+0x1C) of the runner that is calling the module**. The script's current runner is
+  at +0x54, and the call only applies while that runner is executing a `0x15` hook. So 139707's `(op116 s1240
+  741 marker)` makes Bentley's runner act relative to the marker.
+- **Commands:**
+  - `0x60` (string, seconds) shows a hint (`0x0021E870`); `0x61` clears it (`0x0021E930`).
+  - `0x33` is a character's movement step along a path (it starts AI job kind 243); `0x34` is a step toward an
+    object's aim point (job kind 244).
+
+**Waits and rendezvous** [X, the commands' done-checks; jump table at `0x00326840`, by kind − 12]:
+
+- **`0x0E` (alarm, clear)** passes when the alarm is set (`0x00226270`). When its second argument is non-zero it
+  **clears the alarm** as it passes (`0x002261F0`). So a loop that waits with a non-zero second argument waits
+  again for the next setting.
+- **`0x0D` (runners, ID)** is a rendezvous. Each named runner other than this one must currently be at a `0x0D`
+  whose **ID word is the same** (2291's 50522). When all the others are there (count − 1), each is marked
+  released (+0x108) and every one continues. The trailing word is therefore the **meeting ID**, which tells
+  rendezvous points apart.
+
+**Bomb doors (v_gauntlet, task 2302 `t1_gauntlet_bomb_door_1`): blow the door open with one of Bentley's bombs**
+[D] [X]:
+
+- The door is copy 140958 (template `v_int_door_reinforced`, class 47), placed by placement 140800. The
+  placement's option-8 properties are:
+  - 2731 = the task;
+  - 2728 = 145149 and 2729 = 145147, two class-145 objects of `v_gauntlet_pz`, the AI path-zone nodes on either
+    side. *Interpretation:* they let the AI route through once the door is open [I].
+- **The door's module handles script event 12 (a hit), with values (door, hit record):**
+  `(if (and task-found (op12 (op117 hit 556) door) ((op117 (op117 hit 276) 3) 114)) (begin door state machine
+  4935 → 13759 ; task 1309 → 2)))`.
+  - The hit record s1253 is an internal class-196 record, not a world object. Its script ID 556 (stream option
+    1646, +0x1C) is the object hit; its ID 276 (stream option 1644, +0x14) is the hitting object.
+  - Script ID 3 (stream option 2, `0x00100228` → `0x0013B500`) is "derives from class n".
+  - So the three tests are: the task exists; the hit's target is this door; **the hitter is a class-114
+    object, one of Bentley's bombs** (gadgets.md 2).
+  - Then the door opens (state machine 4935 → 13759) and the task requests state 2. Task 2302's own 1417 entries
+    keep the door at 13758 in states 0 / 1 and 13759 in states 2 / 3.
+- **Script 2303** (2302's 1408, run when it becomes current; 2302 has 1399):
+  - Sly walks to 139722 and turns to Bentley (`0x77` = turn a character to face an object);
+  - state machine 5099 on 139723 to 139725 → 1765 (the markers);
+  - Bentley runs `0x76`, then seven `0x36` steps through 139726 to 139732 (`0x36` = move a character to an
+    object, or where it stands; the second argument 0 or 1 chooses), and the characters face each other again.
+  - The scene ends there, and play goes on.
+- **How it is played** [I for the input, from gadgets.md]: the player, as Bentley, uses a bomb gadget (class 114,
+  on one of the L1 / L2 / R2 slots) by the door. The bomb's explosion hits the door. The hit raises event 12 on the
+  door with a hit record whose hitter is the bomb, so the door opens and 2302 is done.
+- `0x76` (`wbbbb`, 1,331 uses) is still not established.
+
+**Laser rooms (v_gauntlet, task 2314 `t1_gauntlet_lasers_2`)** [D] [X for the IDs]:
+
+- **Becoming current.** Trigger 140810 (present in state 1 through 2314's 1416) carries option 489 (2314, −1).
+  So Sly (class 52, its counted class) entering it **requests 2314 make-current**.
+- **Script 2315** (2314's 1408):
+  1. takes instances of placements 139751 and 139752 (`0x6F`), two guards (class 58, template 56250, removed at
+     the start);
+  2. gives each the command list **2316**, a single command 740, kind 13 "**use an object**": object 140811
+     (class 3, an anchor point in `v_gauntlet_gauntlet`), flags (1, 1). Each guard goes to that point and uses it
+     (Sly 2's use command [R]);
+  3. **adds trigger 139753** (`0x38`).
+- **What finishes 2314: trigger 139753, once no guard is left inside it** (correction) [D] [X].
+  - The trigger counts **class 58 (guards)** (option 483 = 58) and keeps its member set (option 478 = 1).
+  - **Event 9 on a trigger means "the set of members changed"** (`0x0015D510`). Each frame, with the set kept, the
+    trigger collects the members inside (up to 64, `0x0015D2F0`), sorts them, and compares them with the stored
+    set (+0x23C count, +0x240 array). On any difference it stores the new set and raises event 9. It also raises
+    event 9 with an empty set when it leaves the world (`0x0015CD50`). So event 9 covers both entering and
+    leaving.
+  - On a trigger, script ID 43 is stream option 28, the **in-world flag** (byte +0x2F bit 0, `0x002BE5E0`). ID 586
+    is stream option 479, **the current member set** (`0x0015D6A0`, from +0x23C / +0x240). Built-in 25 is "is the
+    empty list".
+  - The module, `(if (and in-world (empty? members)) (begin (start 2317) (remove self)))`, therefore fires when
+    **the last guard leaves the trigger** (or is taken out). Event 18 also removes the trigger.
+  - In play the two guards walk to anchor 140811 inside 139753 and stay there. **The player has to get both
+    guards out of the zone**, by knocking them out or luring them away, to open the way.
+- **Script 2317:**
+  1. removes **139754**, a class-47 object of `v_gauntlet_rig` that 2314's 1416 keeps in states 0 and 1. It is the
+     laser barrier [I];
+  2. Bentley (25), under `0x76` (25, 0, …) … `0x76` (25, 1, …, 16), uses 139755 and walks 139756 → 139757
+     (`0x33` / `0x34`, speed 40);
+  3. requests **2314 → 2** (`0x1E`).
+- **`0x6F` / `0x70`** (handlers `0x00228FB8` / `0x00229040`) take or release a run-time **instance of a
+  placement** (class 8, found by OID). `0x6F` takes the current instance (flag 1) or a new one, through
+  `0x001FBF08` / `0x001FBE30` or `0x001FBEC0` / `0x001FC090` / `0x001FC0E0`. `0x70` releases it. The instance
+  is the placement's template copy, placed at the placement. Flag 2 locks its row [R: the reference's
+  description; the instance counts were not traced].
+- **Guard command 740** (kind 13, guards.md 4a) makes the guard go to the object and use it, holding the list until
+  the use ends [R].
+
+**Control at the bomb door (2302)** [D]: script 2303 contains no `0x13` and no game-object method 983. It only
+walks Sly (24) and Bentley (25), turns them to face each other (`0x77`), and steps Bentley with `0x36`, between
+`0x76` (25, 0, −1, −1, 0) and `0x76` (25, 1, −1, −1, 16). So **2303 does not hand the player Bentley**.
+*Interpretation:* Bentley is an AI partner here, and `0x76` toggles a scripted mode on him [I]. **Open
+question:** how a class-114 bomb comes to hit the door in play (Bentley's AI, or the player switching). Neither
+was traced. Nor was the gadget-slot pad path (gadgets.md).
+
 **Back-filling prerequisites: on every request, not on the restore** [X]:
 
 - Every state change made by a request goes through `0x00189B08`. That routine first collects the affected tasks

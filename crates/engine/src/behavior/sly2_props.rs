@@ -40,8 +40,14 @@ pub mod task_event {
 
 /// Sends a task event to the job system (`Sly2Level::task_events`, oldest first).
 pub fn send_task_event(world: &mut World, e: u32) {
+    send_task_event_from(world, e, None);
+}
+
+/// Sends a task event concerning `object` (missions.md 4.3: the object that raised script event 5 or 6 goes with
+/// task event 26 or 27).
+pub fn send_task_event_from(world: &mut World, e: u32, object: Option<Handle>) {
     if let Some(l) = world.sly2.as_deref_mut() {
-        l.task_events.push(e);
+        l.task_events.push((e, object));
     }
 }
 
@@ -197,7 +203,11 @@ impl Prop {
                     None
                 }
                 1030 => {
-                    p.events.push(PropEvent { hits: -1, items: Vec::new() });
+                    // With no hit count (option 1032) one hit advances the event. An inference [I] from one prop
+                    // (missions.md 4.3: the vent panel 120985 breaks at the first hit); it changes every such prop's
+                    // events, in Sly 2 and in Sly 3 (whose props use this behaviour). An explicit −1 or 0 never
+                    // advances (interactables.md 3.2).
+                    p.events.push(PropEvent { hits: 1, items: Vec::new() });
                     cur = Some(p.events.len() - 1);
                     in_every = false;
                     None
@@ -341,6 +351,9 @@ impl ClassBehavior for Prop {
     }
 }
 
+/// Sly 3: the most members a tracking trigger keeps (interactables.md 6, option 478).
+const MAX_MEMBERS: usize = 64;
+
 /// A trigger volume (classes 24 and 25).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TriggerVolume {
@@ -350,6 +363,8 @@ pub struct TriggerVolume {
     pub hold: f32,
     /// Members inside (tracking).
     pub members: Vec<Handle>,
+    /// Sly 3 hook: in the world at the last update (leaving it raises script event 9 once with an empty set).
+    pub was_in: bool,
     /// The objects option 432 names, resolved on the first update.
     pub named: Option<Vec<Handle>>,
     /// The played character counts as inside next frame (a route standing in for the player walking in; the smoke
@@ -378,6 +393,20 @@ impl ClassBehavior for TriggerVolume {
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
+        // Sly 3 hook: a trigger out of the world does nothing and forgets who was inside, so being added counts as
+        // an entry for whoever stands in it (v_ext's 140745, which 2245's switch brings in). A tracking trigger
+        // leaving the world raises script event 9 once more with an empty set (interactables.md 6, option 478).
+        if cx.world.sly3.is_some() {
+            let was_in = core::mem::replace(&mut self.was_in, cx.world.in_world(cx.me));
+            if !self.was_in {
+                self.state = 0;
+                self.members.clear();
+                if was_in && cx.world.options(cx.me).is_some_and(|o| o.bool_or(443, false)) {
+                    cx.raise(9, Vec::new());
+                }
+                return;
+            }
+        }
         let shape = volume_box(cx.world, cx.me);
         if shape.is_none() && !self.visit {
             return;
@@ -387,6 +416,25 @@ impl ClassBehavior for TriggerVolume {
                 // The characters, and the objects option 432 names (missions.md 4.1: 150658 waits for the van's
                 // carrier 150849), by their position.
                 let mut candidates = characters(cx.world);
+                // Sly 3 hook (missions.md 4.1a): the objects of the classes the shape counts (option 433) count by
+                // their position too (v_gauntlet's 139753 counts guards, class 58).
+                if cx.world.sly3.is_some() {
+                    let classes: Vec<i16> = cx
+                        .world
+                        .options(cx.me)
+                        .map(|o| o.all(433).filter_map(|v| v.as_i32()).map(|c| c as i16).collect())
+                        .unwrap_or_default();
+                    for c in classes.into_iter().filter(|&c| !matches!(c, 51..=54)) {
+                        for &s in cx.world.slots_of_class(c) {
+                            if let Some(h) = cx.world.handle(s)
+                                && cx.world.is_active(h)
+                                && let Some(p) = cx.world.position(h)
+                            {
+                                candidates.push((h, p));
+                            }
+                        }
+                    }
+                }
                 if self.named.is_none() {
                     let ids: Vec<i32> = cx
                         .world
@@ -421,6 +469,13 @@ impl ClassBehavior for TriggerVolume {
         let hold_time = o.and_then(|o| o.f32(434)).unwrap_or(1.0);
         let tracking = o.is_some_and(|o| o.bool_or(443, false));
         let stays = o.is_some_and(|o| o.bool_or(438, false));
+        // Sly 3 hook (interactables.md 6, option 478): the set is collected each frame (up to 64 members) and sorted,
+        // so only a change of who is inside raises script event 9, either way.
+        if tracking && cx.world.sly3.is_some() {
+            inside.sort_unstable();
+            inside.dedup();
+            inside.truncate(MAX_MEMBERS);
+        }
         if tracking && inside != self.members {
             self.members = inside.clone();
             cx.raise(9, Vec::new());
@@ -428,7 +483,7 @@ impl ClassBehavior for TriggerVolume {
         match self.state {
             0 if !inside.is_empty() => {
                 cx.raise(5, Vec::new());
-                send_task_event(cx.world, task_event::ENTERED);
+                send_task_event_from(cx.world, task_event::ENTERED, Some(cx.me));
                 // Option 441: the sequence it starts, with the entering object as starter.
                 if let Some(seq) = cx
                     .world
@@ -457,7 +512,7 @@ impl ClassBehavior for TriggerVolume {
             }
             1 if inside.is_empty() && !stays => {
                 cx.raise(6, Vec::new());
-                send_task_event(cx.world, task_event::LEFT);
+                send_task_event_from(cx.world, task_event::LEFT, Some(cx.me));
                 self.state = 0;
             }
             _ => {}

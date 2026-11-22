@@ -22,6 +22,9 @@ use crate::world::{LevelData, LoadError, NONE, World};
 /// Jobs and tasks: loaded whatever the world filter (missions.md 4.1a).
 const JOB_CLASS: i16 = 168;
 const TASK_CLASS: i16 = 169;
+/// The core crew's classes (Sly 52, Murray 53, Bentley 54), whose spawners are pooled.
+const CREW_FIRST: i16 = 52;
+const CREW_LAST: i16 = 54;
 
 /// Class IDs a Sly 3 world can hold (0 to 255); the per-class index is widened to this at load.
 pub const SLY3_CLASS_SLOTS: usize = 256;
@@ -438,6 +441,21 @@ impl<'b> Loader<'b> {
             self.level.stats.spawners += 1;
             for b in p.binds.iter().filter(|b| b.target == BIND_SELF) {
                 self.apply(w, slot, &b.options);
+            }
+            // Sly 3 hook, stand-in (a working choice [I]; the specs do not say how Sly 3 makes a gadget's objects):
+            // a core crew member's mode-2 spawner gets one copy of its group, out of the world, which the session uses
+            // as that member's gadget object. Basis: v_gauntlet's Bentley spawner 623 is the only source of
+            // `bentley_mine` (class 114, his bomb) in the world, and the bomb door needs one (missions.md 4.1a).
+            if cx.parent != NONE
+                && matches!(w.class_of_slot(cx.parent), CREW_FIRST..=CREW_LAST)
+                && cx.depth < self.max_depth
+                && let Some(g) = self.by_id.get(&p.group_id).copied()
+            {
+                let first = w.slot_count() as u32;
+                self.group(w, g, slot, world, cx.depth + 1)?;
+                for s in first..w.slot_count() as u32 {
+                    w.flags[s as usize] &= !flags::IN_WORLD;
+                }
             }
             return Ok(());
         }

@@ -119,11 +119,20 @@ fn walk(path: &std::path::Path, name: &str, frames: usize) -> (Vec<u64>, Vec<(i1
             input.pressed |= platform_api::Buttons::B.0;
             input.buttons |= platform_api::Buttons::B.0;
         }
-        match f {
-            120 => input.pressed |= platform_api::Buttons::RIGHT.0,
-            150 => input.pressed |= platform_api::Buttons::UP.0,
-            180 => input.pressed |= platform_api::Buttons::LEFT.0,
-            _ => {}
+        // The d-pad does not switch the crew member (characters.md 6); the game's hand-overs (the safe house,
+        // command 0x13) name the member instead.
+        if f == 100 {
+            input.pressed |= platform_api::Buttons::RIGHT.0;
+        }
+        use engine::gang::sly3::Member;
+        let switch = match f {
+            120 => Some(Member::Bentley),
+            150 => Some(Member::Murray),
+            180 => Some(Member::Sly),
+            _ => None,
+        };
+        if let Some(m) = switch {
+            s.game.as_mut().unwrap().world.shared.sly3_switch_to = Some(m);
         }
         s.update(&input, 1.0 / 60.0);
         s.render().unwrap();
@@ -143,8 +152,10 @@ fn sly_walks_v_apt_and_v_ext_deterministically() {
         let (b, trail_b) = walk(&path, name, 240);
         assert_eq!(a, b, "{name}: not deterministic");
         assert_eq!(trail, trail_b);
-        // Sly plays first, then Bentley (class 54), Murray (53), Sly (52) as the d-pad asks.
+        // Sly plays first (the d-pad at frame 100 changes nothing), then Bentley (class 54), Murray (53), Sly (52)
+        // as handed over.
         assert_eq!(trail[0].0, 52, "{name}: Sly starts");
+        assert_eq!(trail[110].0, 52, "{name}: the d-pad does not switch");
         assert_eq!(trail[130].0, 54, "{name}: switched to Bentley");
         assert_eq!(trail[160].0, 53, "{name}: switched to Murray");
         assert_eq!(trail[200].0, 52, "{name}: back to Sly");

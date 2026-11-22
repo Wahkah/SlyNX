@@ -152,6 +152,48 @@ Option **1189** is the "make a noise here" method (two arguments; it returns an 
 183, value type `0x20B7`; wrapper `0x0010C5D8`) [X], Sly 2's 1095 [R]. The executable constants of Sly 2 section 10 and the fixed noise
 template IDs were not re-located in Sly 3 (open question).
 
+## 4a. Guard command lists (class 134) and command `0x62` [X] [D]
+
+**Command `0x62`** (object, list), handler `0x00228A8C`, calls `0x00198540`, the reference's TellGuardCommands. It
+takes or creates the guard's AI job of kind 200 (`0x002387A8` on the AI at +0x29C), and sends it message
+{5, list} (`0x0019A2D0`). If the command's flag bit `0x100` is set, the runner keeps the guard and the list at
++0xFC / +0x100. `0x63` is the second kind (`0x001985A8`); its list may be −1.
+
+**A command list is a class-134 object** (Sly 2's class 113; 2,376 bodies). Each stream option appends one command
+when the object loads. The handlers (`0x00107E38` to `0x00108870`) call builders that append these kinds [X]:
+
+| Option | Kind | Arguments | Sly 2 command (options-by-class 2.2) [R] |
+|---:|---:|---|---|
+| 729 | 0 | object | set the context object |
+| 730 | 1 | range | how long the list runs before a pause |
+| 731 | 2 | range | how long the guard then stands |
+| 732 | 3 | object, number | look at the object |
+| 733 | 4 | object | send a message to the object |
+| 734 | 5 | seconds, object | wait (Sly 3 adds an object) |
+| 735 | 6 | path, direction, face object, value, flag | follow a path (builder `0x001973B8`) |
+| 736 | 7 | object, speed, …, flag | go to the object at the speed (disc: 40) |
+| 737 | 8 | object | play the clip |
+| 738 / 739 | 9 / 10 | number | label / jump to the label |
+| 740 | 13 | object, flag, value | use an object (a ladder, rail or similar) |
+| 741 / 742 | 11 / 12 | — | lock / unlock |
+| **743** | **14** | clip, flags | play an animation and wait for its end |
+| **746** | **15** | script, alarm | **set the numbered alarm on a script** |
+| 744 / 745 | 17 / 18 | one value | new in Sly 3 (not established) |
+
+Commands 5, 6, 7, 13 and 14 hold the list until they are done (time, arrival, use, animation) [R]. Pathing,
+speeds and the arrival test are Sly 2's guard movement [R]; they are not re-traced here.
+
+**The lion in m1_follow** [D]. Script 2243 gives lion 139555 the list **2244**, then waits on alarm 139577
+(`0x0E`). List 2244 is:
+
+1. 743 (140742, 0): play clip 140742;
+2. 735 (140743, 1, −1, −1, 0): walk path 140743 forwards, facing along it;
+3. **746 (2243, 139577): set alarm 139577 on script 2243**;
+4. 743 (451, 0): play clip 451, the idle.
+
+So **the list itself sets the alarm when the lion reaches the path's end**. Script 2243 then goes on: it starts
+2246 and requests task 2242 → 2.
+
 ## 5. Test vectors [D]
 
 - 65 class-58 records in 28 worlds; v_ext holds four templates (`doberman_guard`, `endo_swarmer`, `ecto_swarmer`,

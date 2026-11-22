@@ -254,10 +254,11 @@ impl ScheduledCall {
 /// Value type `0x12` in the Sly 2 option table: a procedure of the game, never stored in an option list.
 pub const SLY2_VALUE_TYPE_PROCEDURE: u32 = 0x12;
 
-/// Whether a Sly 2 stream option reads as a method: a typed argument list (flag `0x400`), value type `0x12`, or
-/// flag `0x1` with arguments (the last two inferred from the disc: the scripts call them; `docs/script.md`).
+/// Whether a Sly 2 stream option reads as a method: flag `0x1`, whatever its argument count (specs/sly2/scripts.md 5,
+/// object-stream.md 1.1: for script IDs below the custom properties, bit `0x1` alone means a method; otherwise bit
+/// `0x2` is a field and neither a getter).
 pub fn is_sly2_method(e: &formats_sly2::exe::OptionEntry) -> bool {
-    e.is_typed() || e.value_type == SLY2_VALUE_TYPE_PROCEDURE || (e.flags & 0x1 != 0 && e.arg_count > 0)
+    e.flags & 0x1 != 0
 }
 
 /// What the interpreter needs only for Sly 2.
@@ -340,7 +341,8 @@ impl Interpreter {
     }
 
     /// Sly 3: the executable's built-in table and option table, as [`Interpreter::set_sly2_tables`] (both games
-    /// share the formats; specs/sly3/scripts.md 4.1, 5).
+    /// share the formats; specs/sly3/scripts.md 4.1, 5). Sly 3 therefore inherits Sly 2's method rule
+    /// ([`is_sly2_method`]: flag `0x1`); that the rule holds for Sly 3 is not confirmed.
     pub fn set_sly3_tables(&mut self, builtins: Option<BuiltinTable>, options: &formats_sly2::exe::OptionTable) {
         self.set_sly2_tables(builtins, options);
     }
@@ -1069,7 +1071,10 @@ impl Interpreter {
     fn map_option(&mut self, host: &mut dyn ScriptHost, object: ObjectId, id: u32) -> Result<u16, ScriptError> {
         let Some(map) = self.options.as_ref() else { return Err(ScriptError::NoOptionMap) };
         let class = host.class_of(object).ok_or(ScriptError::NoClass)?;
-        map.lookup(class, id).ok_or(ScriptError::NoOption { class, option: id })
+        // Engine hook: the host's fallback class, for an option the object's class does not list.
+        map.lookup(class, id)
+            .or_else(|| host.fallback_class(object).and_then(|c| map.lookup(c, id)))
+            .ok_or(ScriptError::NoOption { class, option: id })
     }
 
     fn is_action(&self, option: u16) -> bool {

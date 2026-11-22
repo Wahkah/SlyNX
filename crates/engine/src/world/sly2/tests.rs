@@ -57,3 +57,16 @@ fn typed_arguments_with_lists() {
     // An unknown tag fails.
     assert_eq!(decode_value(&entry(0, true, 1), &[3, 0, 0, 0]), None);
 }
+
+#[test]
+fn class_test_is_a() {
+    // object-stream.md 3.1: 26, 81 and 92 are leaves; 52, 56, 90, 48 and 22 cover their ranges.
+    use super::is_a;
+    assert!(is_a(26, 26) && !is_a(24, 26) && !is_a(42, 26));
+    assert!(is_a(53, 52) && is_a(55, 52) && !is_a(56, 52));
+    assert!(is_a(57, 56) && is_a(67, 56) && !is_a(68, 56));
+    assert!(is_a(92, 90) && is_a(95, 90) && !is_a(96, 90));
+    assert!(is_a(98, 48) && is_a(108, 48) && !is_a(109, 48));
+    assert!(is_a(26, 22) && is_a(24, 22) && !is_a(28, 22));
+    assert!(is_a(81, 81) && !is_a(82, 81) && is_a(127, 126));
+}

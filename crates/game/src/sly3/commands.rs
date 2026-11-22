@@ -76,16 +76,30 @@ pub enum Request {
     Music { push: Option<i16> },
     /// `0x22`, `0x30`: put `target` where `at` is (an interaction start or a walk, arriving at once).
     Place { target: i32, at: i32 },
+    /// `0x77`: a character turns to face an object (missions.md 4.1a).
+    Face { target: i32, at: i32 },
+    /// `0x6F` / `0x70`: take or release a run-time instance of a placement (class 8; missions.md 4.1a).
+    Instance { placement: i32, take: bool },
     /// `0x13`: player `player`'s control goes to `object`.
     Control { object: i32, player: i32 },
     /// `0x12`: activate `object` (scripts.md 7.3: by its class).
     Activate { object: i32 },
     /// `0x69`: return the player to the nearest suitable mission waypoint (scripts.md 7.3, interpretation).
     ReturnToWaypoint,
-    /// `0x15`: call `script`'s module with message 4 and `value`.
-    Module { script: i32, value: i32 },
+    /// `0x15`: call `script`'s module with message 4 and `value`; `copy` is the script object the run was started
+    /// on, when known (a script has one object per copy of its group).
+    Module { script: i32, value: i32, copy: Option<engine::object::Handle> },
+    /// `0x60` / `0x61`: show hint `string` for `seconds`, or clear it (missions.md 4.1a).
+    Hint { string: i32, seconds: f32 },
+    /// See [`Request::Hint`].
+    ClearHint,
     /// `0x1F`: `script` pauses (true) or resumes the run; a pause ends with its script.
     Pause { script: i32, on: bool },
+    /// `0x46` / `0x6E`: open the binocucom with a scripted view on `character`, looking at `look_at` (−1 none), or
+    /// close it (interactables.md 5a).
+    Binocucom { open: bool, character: i32, look_at: i32 },
+    /// `0x62`: send guard `guard` the command list `list` (guards.md 4a).
+    GuardList { guard: i32, list: i32 },
 }
 
 /// What scripts can ask about the world this frame.
@@ -111,7 +125,10 @@ enum Wait {
     Line,
     NoLine,
     Script(i32),
-    Alarm(i32),
+    /// An alarm, cleared when the wait passes if the flag is set.
+    Alarm(i32, bool),
+    /// `0x0D`: a rendezvous of the named runners, by meeting ID (missions.md 4.1a).
+    Meet(Vec<i32>, i32),
     Runners(Vec<i32>),
 }
 
@@ -138,7 +155,12 @@ pub struct ScriptRun {
     orders: BTreeMap<usize, LineOrder>,
     /// The default target (`0x14`) and context object (`0x18`), −1 none.
     target: i32,
-    context: i32,
+    /// See [`ScriptRun::target`]; a module's script ID 741 writes it (missions.md 4.1a).
+    pub context: i32,
+    /// The script object started on (its copy), when known.
+    pub copy: Option<engine::object::Handle>,
+    /// Rendezvous (`0x0D`) by meeting ID: the runners arrived, and whether it has opened.
+    meets: BTreeMap<i32, (BTreeSet<i32>, bool)>,
 }
 
 /// The running scripts of a world.
@@ -152,6 +174,14 @@ pub struct Scripts {
     pub requests: Vec<Request>,
     /// Commands completed without being run, by ID.
     pub unhandled: BTreeMap<u8, usize>,
+    /// The scripts started since the session last looked, with the script object each run started on (its own copy,
+    /// [`ScriptRun::copy`] when known); the session raises event 5 on that object.
+    pub started: Vec<(i32, engine::object::Handle)>,
+    /// Conditions that ask a script's module (sly3/scripts.md 7.1: any value but the fixed kinds): (script, its
+    /// copy, value), for the session to answer into [`Scripts::answers`] before the next frame.
+    pub questions: Vec<(i32, Option<engine::object::Handle>, i32)>,
+    /// See [`Scripts::questions`]: (script, value) → the module's answer, used once.
+    pub answers: BTreeMap<(i32, i32), bool>,
     rng: Rng,
     stopped: BTreeSet<i32>,
 }
@@ -172,6 +202,9 @@ impl Scripts {
             alarms: BTreeSet::new(),
             requests: Vec::new(),
             unhandled: BTreeMap::new(),
+            started: Vec::new(),
+            questions: Vec::new(),
+            answers: BTreeMap::new(),
             rng: Rng::new(seed),
             stopped: BTreeSet::new(),
         }
@@ -185,12 +218,17 @@ impl Scripts {
     /// Starts script `oid` (a command script of `world`) with `object` as its object. A running script is not
     /// started twice. False when there is no such script.
     pub fn start(&mut self, world: &World, oid: i32, object: i32) -> bool {
+        self.start_in(world, oid, object, None)
+    }
+
+    /// [`Scripts::start`], the script object found from `near` (its copy: a use point's command script, 1164).
+    pub fn start_in(&mut self, world: &World, oid: i32, object: i32, near: Option<engine::object::Handle>) -> bool {
         if self.is_running(oid) {
             return true;
         }
         let Some(level) = world.sly3.as_deref() else { return false };
         let Some(h) =
-            world.find_sly3_id(oid, None).filter(|&h| world.class(h) == Some(super::flow::COMMAND_SCRIPT_CLASS))
+            world.find_sly3_id(oid, near).filter(|&h| world.class(h) == Some(super::flow::COMMAND_SCRIPT_CLASS))
         else {
             return false;
         };
@@ -204,6 +242,7 @@ impl Scripts {
             .map(|c| world.level.bytes[c.args.0 as usize..(c.args.0 + c.args.1) as usize].to_vec())
             .collect();
         let child = (commands[0].child & 0x7FF) as usize;
+        self.started.push((oid, h));
         self.running.push(ScriptRun {
             oid,
             object,
@@ -220,6 +259,8 @@ impl Scripts {
             orders: BTreeMap::new(),
             target: -1,
             context: -1,
+            copy: near.map(|_| h),
+            meets: BTreeMap::new(),
         });
         true
     }
@@ -262,16 +303,27 @@ impl Scripts {
         }
     }
 
-    fn condition(&self, s: &ScriptRun, kind: i32, view: &View) -> bool {
-        let _ = s;
-        match kind {
+    /// A condition's value, or `None` while the script's module is being asked (the runner tries again next frame).
+    fn condition(&mut self, s: &ScriptRun, kind: i32, view: &View) -> Option<bool> {
+        Some(match kind {
             cond::TRUE => true,
             cond::ALARM_SET => !self.alarms.is_empty(),
             cond::ALARM_CLEAR => self.alarms.is_empty(),
             cond::NO_LINE => !view.line_playing,
             cond::LINE => view.line_playing,
+            // Any other value asks the script's own module (scripts.md 7.1).
+            k if !(cond::TRUE..=cond::LINE).contains(&k) => {
+                if let Some(b) = self.answers.remove(&(s.oid, k)) {
+                    b
+                } else {
+                    if !self.questions.iter().any(|q| q.0 == s.oid && q.2 == k) {
+                        self.questions.push((s.oid, s.copy, k));
+                    }
+                    return None;
+                }
+            }
             _ => false,
-        }
+        })
     }
 
     fn waited(&self, w: &Wait, s: &ScriptRun, view: &View, scripts: &BTreeSet<i32>, dt: f32) -> Option<Wait> {
@@ -285,7 +337,7 @@ impl Scripts {
             {
                 Some(w.clone())
             }
-            Wait::Alarm(a) if !self.alarms.contains(a) => Some(w.clone()),
+            Wait::Alarm(a, _) if !self.alarms.contains(a) => Some(w.clone()),
             Wait::Runners(n) if s.runners.iter().any(|r| n.contains(&r.name) && !r.stack.is_empty()) => Some(w.clone()),
             _ => None,
         }
@@ -304,10 +356,31 @@ impl Scripts {
         let mut spawned = Vec::new();
         let link = |v: u16| -> Option<usize> { Some((v & 0x7FF) as usize).filter(|&x| x != 0) };
         for _ in 0..STEP_LIMIT {
+            // A rendezvous opens once every named runner still running waits at the same meeting; all then go on.
+            if let Some(Wait::Meet(names, id)) = &r.wait {
+                let live: Vec<i32> = names
+                    .iter()
+                    .copied()
+                    .filter(|&n| n == r.name || s.runners.iter().any(|o| o.name == n && !o.stack.is_empty()))
+                    .collect();
+                let m = s.meets.entry(*id).or_default();
+                if !(m.1 || live.iter().all(|n| m.0.contains(n))) {
+                    return spawned;
+                }
+                m.1 = true;
+                m.0.remove(&r.name);
+                if m.0.is_empty() {
+                    s.meets.remove(id);
+                }
+                r.wait = None;
+            }
             if let Some(w) = r.wait.take() {
                 r.wait = self.waited(&w, s, view, scripts, dt);
                 if r.wait.is_some() {
                     return spawned;
+                }
+                if let Wait::Alarm(a, true) = w {
+                    self.alarms.remove(&a);
                 }
             }
             let Some(i) = r.pc else {
@@ -319,11 +392,18 @@ impl Scripts {
                     Some(Frame::Plain(p)) => r.pc = s.commands.get(p).and_then(|c| link(c.sibling)),
                     Some(Frame::Loop(l)) => {
                         let c = s.commands[l];
-                        if self.condition(s, word(&s.args[l], 0), view) {
-                            r.stack.push(Frame::Loop(l));
-                            r.pc = link(c.child);
-                        } else {
-                            r.pc = link(c.sibling);
+                        match self.condition(s, word(&s.args[l], 0), view) {
+                            Some(true) => {
+                                r.stack.push(Frame::Loop(l));
+                                r.pc = link(c.child);
+                            }
+                            Some(false) => r.pc = link(c.sibling),
+                            None => {
+                                // Asked: the loop's test runs again next frame.
+                                r.stack.push(Frame::Loop(l));
+                                r.pc = None;
+                                r.wait = Some(Wait::Time(0.0));
+                            }
                         }
                         // One pass of a loop per frame at most.
                         return spawned;
@@ -355,18 +435,31 @@ impl Scripts {
                         s.finish.push(ch);
                     }
                 }
-                0x04 => {
-                    if self.condition(s, word(&a, 0), view) {
+                0x04 => match self.condition(s, word(&a, 0), view) {
+                    Some(true) => {
                         r.stack.push(Frame::Loop(i));
                         r.pc = link(c.child);
                     }
-                }
+                    Some(false) => {}
+                    None => {
+                        r.pc = Some(i);
+                        r.wait = Some(Wait::Time(0.0));
+                        return spawned;
+                    }
+                },
                 0x06 => {
                     let mut b = link(c.child);
+                    let mut asked = false;
                     while let Some(k) = b {
                         let bc = s.commands[k];
                         let take = match bc.id {
-                            0x07 | 0x08 => self.condition(s, word(&s.args[k], 0), view),
+                            0x07 | 0x08 => match self.condition(s, word(&s.args[k], 0), view) {
+                                Some(t) => t,
+                                None => {
+                                    asked = true;
+                                    break;
+                                }
+                            },
                             0x09 => true,
                             _ => false,
                         };
@@ -376,6 +469,12 @@ impl Scripts {
                             break;
                         }
                         b = link(bc.sibling);
+                    }
+                    if asked {
+                        // A branch's test asked the module: the block runs again next frame.
+                        r.pc = Some(i);
+                        r.wait = Some(Wait::Time(0.0));
+                        return spawned;
                     }
                 }
                 0x0B => {
@@ -392,10 +491,20 @@ impl Scripts {
                 }
                 0x0C => {
                     let n = a.first().map_or(0, |&n| (n as i8).max(0) as usize);
-                    let names: Vec<i32> = (0..n).map(|k| word(&a[1..], k)).collect();
+                    let names: Vec<i32> = (0..n).map(|k| word(a.get(1..).unwrap_or(&[]), k)).collect();
                     r.wait = Some(Wait::Runners(names));
                 }
-                0x0E => r.wait = Some(Wait::Alarm(word(&a, 0))),
+                0x0D => {
+                    // The names as 0x0C has them (a count, then the names), then the meeting ID.
+                    let n = a.first().map_or(0, |&n| (n as i8).max(0) as usize);
+                    let names: Vec<i32> = (0..n).map(|k| word(a.get(1..).unwrap_or(&[]), k)).collect();
+                    let id = word(a.get(1..).unwrap_or(&[]), n);
+                    s.meets.entry(id).or_default().0.insert(r.name);
+                    r.wait = Some(Wait::Meet(names, id));
+                    return spawned;
+                }
+                // A non-zero second argument clears the alarm once the wait passes (missions.md 4.1a).
+                0x0E => r.wait = Some(Wait::Alarm(word(&a, 0), a.get(4).is_some_and(|&b| b != 0))),
                 0x0F => {
                     self.alarms.insert(word(&a, 0));
                 }
@@ -466,20 +575,35 @@ impl Scripts {
                 0x13 => {
                     self.requests.push(Request::Control { object: word(&a, 0), player: *a.get(4).unwrap_or(&0) as i32 })
                 }
-                0x15 => self.requests.push(Request::Module { script: s.oid, value: word(&a, 0) }),
+                0x15 => self.requests.push(Request::Module { script: s.oid, value: word(&a, 0), copy: s.copy }),
+                0x60 => self.requests.push(Request::Hint { string: word(&a, 0), seconds: float(&a, 1) }),
+                0x61 => self.requests.push(Request::ClearHint),
                 0x1F => self.requests.push(Request::Pause { script: s.oid, on: a.first().is_some_and(|&b| b != 0) }),
-                0x22 | 0x30 => {
+                // 0x36 moves a character to an object (missions.md 4.1a), arriving at once here like 0x30.
+                0x22 | 0x30 | 0x36 => {
                     let target = [c.object, s.context, s.target, s.object].into_iter().find(|&o| o != -1).unwrap_or(-1);
                     self.requests.push(Request::Place { target, at: word(&a, 0) });
                 }
+                0x6F | 0x70 => self.requests.push(Request::Instance { placement: word(&a, 0), take: c.id == 0x6F }),
+                0x77 => {
+                    let target = [c.object, s.context, s.target, s.object].into_iter().find(|&o| o != -1).unwrap_or(-1);
+                    self.requests.push(Request::Face { target, at: word(&a, 0) });
+                }
                 0x45 => {
                     // The key's time: the third float after the two vectors.
-                    let t = f32::from_bits(u32::from_le_bytes([a[32], a[33], a[34], a[35]]));
+                    let t = float(&a, 8);
                     if wait && t.is_finite() && t > 0.0 {
                         r.wait = Some(Wait::Time(t));
                     }
                 }
                 0x55 | 0x56 => {}
+                // The binocucom (interactables.md 5a): the character (24 Sly), the object looked at (the eleventh
+                // word; working reading of the layout).
+                0x46 => {
+                    self.requests.push(Request::Binocucom { open: true, character: word(&a, 0), look_at: word(&a, 10) })
+                }
+                0x6E => self.requests.push(Request::Binocucom { open: false, character: -1, look_at: -1 }),
+                0x62 => self.requests.push(Request::GuardList { guard: word(&a, 0), list: word(&a, 1) }),
                 id => *self.unhandled.entry(id).or_default() += 1,
             }
             // A command with children of its own (other than the blocks above) runs them next.
@@ -515,6 +639,8 @@ mod tests {
             orders: BTreeMap::new(),
             target: -1,
             context: -1,
+            copy: None,
+            meets: BTreeMap::new(),
         }
     }
 

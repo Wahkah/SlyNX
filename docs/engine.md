@@ -1857,6 +1857,74 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
 - **The route** now plays episode 1's intro and first hub job with no task finished by request. The stall timer runs
   at normal speed, slowly only while a sequence waits for a clip played once (journalled); the route also walks Sly
   through volumes added at run time that have a script module (150312 and 150314, which start and stop 1676).
+  `SLYNX_SLY2_JOBS` asks the route for more jobs than the default two; a task with option 1271 (done while
+  available) is walked on from, to its successors' volumes.
+- **Job worlds** (episode 1's `m1_recon`, the nightclub cellar, row 3):
+  - an exit with no volume (the hub's job door 1735) arms on its own updates and fires only when a task, job or
+    script fires it (level-flow.md 5.5): 123860's module sets its point (779 = 397) and fires it;
+  - the read-only job and task options of missions.md 3.1 are answered (task 1268 done, 1269 current; job 1251 last
+    task done, 1252 current), so the cellar's arrival point 397 makes 1773 current;
+  - script ID 3 (stream option 2) called with a class number is the class test "is-a" (object-stream.md 3.1;
+    `world::sly2::is_a` holds the class tree's ranges): `((op111 x 3) 26)` asks whether x is a door;
+  - task events 26 and 27 carry the volume that raised event 5 or 6 (missions.md 4.3), so the m1 jobs' door check
+    does not start 1751 on every volume entry; task events go to the job system with their object
+    (`Sly2Level::task_events`);
+  - command 639 shows a screen (user-interface.md 2.1). The job prompt (class 127, "Job Failed!") takes control from
+    the player (`World::shared.job_prompt`); after more than 0.5 s any face button gives it back, restarts the
+    current job at its checkpoint and hides the screen; a 639 with no-wait 0 waits until then. Other screens are not
+    drawn by sequences yet;
+  - a swarming creature killed raises task event 24 with itself; a guard knocked out raises 24 when the current
+    player character did it, 23 otherwise (missions.md 4.3: the brawl's rats);
+  - a reactive prop's event with no hit count advances on one hit; props with events left are attack targets of the
+    gang (the vent panel 120985);
+  - a copy placement's root patch with a script index binds the copy's root to that module of the placement's
+    package (the vent panel gets module 5 of `f_nightclub_cellar_rig`, whose event 5 asks 1789 for states 4 and 2);
+  - placing the played character (arrival points, warps, the route) puts it at rest facing the transform;
+  - the binocucom's photo mode (`sly2::photo`, on the shared `crate::photo`): class 46 targets with Sly 2's options
+    1195 to 1201, a 640 × 492.8 screen; a good picture asks the target's task for state 2;
+  - the binocucom raises task events 7 then 9 on opening, 8 then 11 on closing, and 10 for a picture accepted, with
+    no object (missions.md 4.3; radio-talk mode's 12 and 13 are not entered);
+  - **signals** (dialogue-and-voice.md 2.1): each sequence has a set of up to 8 values
+    (`World::shared.sequence_signals`); 630 adds a value to a named sequence's set, 629 waits until its own set holds
+    it (a non-zero flag removes it), script IDs 640 / 641 / 642 on a sequence add, remove [I] and test a value, guard
+    command 15 adds one; the set clears when the sequence ends or stops;
+  - doors: option 789 (script ID 771) answers the destination's level-table row, and firing a door broadcasts task
+    event 26 with it (missions.md 4.3);
+  - guard command 4 (599) raises event 4 on its list's module with its value; script ID 441 (317) on a character
+    (class 56 and derived) runs a command list; script ID 108 (366) on a volume (class 22 and derived) tells whether a
+    position is inside;
+  - an interaction spot used by a character (the gang's interaction, or script ID 235 / option 1071, which works out of
+    the world) runs the "used by" routine (`sly2_commands::use_spot`, dialogue-and-voice.md 2.1): event 5 on the spot
+    (task event 26 with it), then its sequence (1070) with the user. Row 0's 80398 gets 1070 = 1675 from 150360's copy
+    patch, so 1674's call starts 1675, which signals 1674. The user is stored (1068), the spot's state-machine goals
+    (1075) and task-state requests (1076) apply first; the notice (message 6) has no effect here;
+  - a fresh placement's blocks for targets other than 5 are read and applied: 6 to the copy's root (Dimitri's route,
+    273 = 1826), other IDs to that object of the copy;
+  - a placement's lease methods (1017 to 1024, stream 1174 to 1180) answer with its one copy's root; taking the
+    lease (1019, or 1021 with none) puts the placement and its copy in the world and raises event 14 on both
+    (`World::shared.leased`). A search for the placement's ID finds the copy's root, so the interpreter tries the
+    placement's class map (6) for an option the root's class does not list (`ScriptHost::fallback_class`). The
+    lease methods without arguments (1017, 1019, 1021: flag 1, no arguments) read as methods on a placement or its
+    root, since the scripts call them (`((op111 s3952 1021))`). In general a Sly 2 stream option reads as a method
+    exactly when its table entry has flag `0x1` (`script::is_sly2_method`, scripts.md 5);
+  - a fixed placement (its root block sets 1178 = 1) keeps its pool copy, its first child, out of the world at load:
+    Dimitri's bullets (`npc_dimitri_bullet`) are not in the world until fired (placement.md 2.1);
+  - a guard command's or generic action's object argument that names a placement means its copy (scripts.md 5): the
+    leash 123878 is parented to Dimitri's copy and moves with him;
+  - sequence command 711 has a character (a placement: its copy) run a command list; a list's module hears event 2
+    when a run starts and 3 when it ends.
+  - The route fights swarming creatures for a task the job's script names, attacks props whose script asks for the
+    task, takes a door whose script asks for a task of the job, photographs targets, and walks no more once placed
+    in a volume of a world; when a sequence waits for a signal it walks into the volume or uses the spot that sends
+    it, and it opens the binocucom when the job's photo targets wait. Episode 1's first three jobs play with no task
+    finished by request. In `m1_follow_dimitri` the route follows: while a trigger volume is attached to a character
+    (the leash) it sends no pattern input, records the character's trail (every 50 units) and keeps the played
+    character on it at least 400 units back (at its start while still far away), holds the stall timer (journalled),
+    and puts it inside the volume the character's list's script names when the list ends. Not finished: Dimitri
+    stops stepping list 1825 after its first leg;
+  - a guard raises task events about itself (missions.md 4.3): 19 when its detector's entry for the player goes to
+    "seen", 21 when it enters a hit reaction, 22 when it enters investigate (`behavior::sly2::task_events`), so being
+    seen fails the follow as in the game.
 - **Hack station** (vehicles-and-minigames.md 10.3): with the script host's recursion fixed and the job system's
   exit ordering (event 19 before the exit's load), `t4_hack_station1`'s handler starts sequence 2410 in row 14, its
   command 670 adds the ship, and the job hands it over; the vehicles stand-in in `shots::follow_job` is gone.
@@ -2744,6 +2812,166 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
       13. `t1_recon_chase_start` (2123) and trigger 140652 lead to `t1_recon_chase_complete` (2128). Its exit 2135
           loads v_ext at 424 with movie 305, and `t1_chalktalk1` (1825) is reached with no job running: m1_recon is
           done (a 300 s run).
+      14. 1825's exit loads v_ext before its own event 22 (which closes it) runs. In the new world, step 2 makes it
+          current again in mode 1, and its request for state 3 runs at step 3. That opens `t1_post_chalktalk1`
+          (2136), whose event-24 handler (state 1, mode 1) asks for state 4. 2136 becomes current, and its script 2137
+          opens the next jobs.
+      15. The route walks into waypoint 35785 (`t1_follow_intro`'s placement): m1_follow begins with
+          `t1_follow_intro` (2237).
+      16. `t1_follow_take_picture1` (2241) wants a picture of photo target 140741. The route walks to where the
+          target's 300 units fill the frame, opens the binocucom (R3) and aims with the stick (prompt 4, then 7). It
+          presses R: the shutter (8), accepted (9). 2241 is done.
+      17. `t1_follow_lion_move_to_dump_station_2` (2242): its script 2243 gives the lion 139555 command list 2244
+          (`0x62`). The lion walks path 140743 (about 46 s), and the list sets alarm 139577. 2243 then starts 2246 and
+          finishes 2242. 2241's event 24 at state 2 stops the lion's idle loop 2233 (method 749, script ID 583).
+      18. Trigger 140745, which 2245's switch brings in, makes `t1_follow_take_picture2` (2245) current.
+      19. 2245's own module adds its photo target 139578 when 2245 becomes current: event 22 calls method 41
+          (stream 26), add to world. Event 23 (no longer current) calls method 42 (stream 27), remove. The route takes
+          pictures 2 to 4 the same way, between the lion's walks (2247, 2252).
+      20. `t1_follow_pictures_complete` (2258), `t1_follow_move_to_ferris_wheel` (2260), then
+          `t1_follow_listen_to_lion_boss_intro` (2266).
+      21. `t1_follow_listen_to_lion_boss` (2268): its module answers task event 29 from path 139626 by calling
+          method 733 (stream 748) on script 2269, the lion-boss scene at the wheel. Method 733 starts a command script
+          with its default context, player 0's controlled object.
+          - 139626 is nested in ferris wheel 139617 (class 47, group `v_ferris_wheel`), a mode-1 record with
+            condition 14. v_ext's option sets add extra conditions through option 1029: set 22 adds 14 and 17, 19
+            adds 14 and 16, 20 adds 15 and 16, and 23 adds 15 and 17.
+          - m1_follow's tasks carry condition 12 in table B, and v_ext has no set 12, so the world loads set 22 and
+            the wheel. `World::context_for_set` read the 4-byte 1029 values as typed lists (giving 0, 0), which left
+            the wheel out; it now reads them as plain conditions.
+          - **Stand-in** (missions.md 4.1a, open question: what raises event 5 on the path, probably a character's
+            path movement reaching the listening spot): once 2268 is available, the route puts Sly at the path and
+            gives the path event 5. The route journals it.
+      22. 2269 plays the scene. `t1_follow_control_box` (2272) and `t1_follow_complete` (2274) follow: m1_follow is
+          done.
+      23. m1_gauntlet: `t1_gauntlet_intro` (2284) and `t1_gauntlet_enter` (2286) lead to exit 2049 (v_gauntlet at
+          139698), `t1_gauntlet_interior_intro` (1810), then `t1_gauntlet_simuldoor_1` (2289).
+      24. The simultaneous doors (2289, 2293; missions.md 4.1a). Each door's script (2290, 2294) runs the timing
+          script 2291:
+          - Bentley's runner shows hint 1293 for 20 s (`0x60`; `0x61` clears it) and plays the countdown lines 1288 to
+            1290. It takes the door's marker as its context (script ID 741, stream 757, written by its module), records
+            t1 and presses his button 139708.
+          - Sly's runner waits for alarm 139709 and records t2. Sly's button sets that alarm. Its copies (under
+            placements 145224, 145562 and 145571) hold custom properties 2199 = 2291 and 2200 = 139709. The
+            button's use point (50450, reach 50) starts its command script 50527. That script's `0x15` gives its module
+            message 4, which reads its owner's 2199 and 2200 and calls method 735 (stream 751) on 2291: set the alarm.
+          - The runners meet at a rendezvous (`0x0D`). The result condition 50521 asks 2291's module: success needs
+            |t1 − t2| within the tolerance, 0.25 to start (plus twice op107, the adaptive difficulty: 0 here, a working
+            default), ×1.25 per attempt.
+          - On success the door opens, Bentley walks through, and the task is done.
+          - The route puts Sly at his button and presses Circle 0.2 s after Bentley's last countdown line.
+      25. `t1_gauntlet_gauntlet_intro` (2296) and `t1_gauntlet_door_bomb_1` (2299, through use point 50450) lead to
+          `t1_gauntlet_bomb_door_1` (2302).
+      26. The bomb door (missions.md 4.1a): placement 140800 sets custom property 2731 = 2302 on its copy.
+          - The copy root 140958 handles script event 12, a hit, whose value is a hit record (class 196). When the
+            record's object hit (script ID 556, stream 1646) is the door and its hitter (276, stream 1644) derives from
+            class 114 (a bomb; script ID 3, stream 2), it opens the door and asks for 2302's state 2.
+          - Built: hit records (`World::sly3_hit_record`, `World::shared.sly3_hits`), event 12 for a bomb's blast,
+            and the class test (`World::shared.sly3_derived`, every class's derived classes, set at load).
+          - Stand-in (gadgets.md: the gadget slots' pad path is not traced): as Bentley, L plants the bomb and L again
+            sets it off. The blast (radius 300) hits every object with a script within that radius, standing in for
+            its rays. The route switches to Bentley (also a stand-in), waits for the set-up scene 2303 to free the
+            pad, puts him at the door and presses L twice.
+          - The bomb: `bentley_mine` (group 6763, class 114) comes from Bentley's placement 623, a mode-2 spawner. A
+            core crew member's spawner gets one copy of its group at load, kept out of the world as that member's
+            gadget pool (`world::sly3::load`, Sly 3 hook; `sly3_worlds` counts it). The bomb stand-in takes it.
+      27. Both bomb doors open (2302, then 2312 through 140808). Between them come `t1_gauntlet_tunnel_intro` (2304)
+          and `t1_gauntlet_lasers_1` (2306).
+      28. `t1_gauntlet_lasers_2` (2314; missions.md 4.1a): trigger 140810 makes it current.
+          - Script 2315 takes instances of guard placements 139751 and 139752 (`0x6F`) and gives each list 2316
+            (command 740: use anchor 140811). It adds trigger 139753, which counts guards (class 58) and tracks its
+            members.
+          - 139753's module answers event 9 (its members changed) by starting script 2317 (method 733) and removing
+            itself. Its condition is its flag (script ID 43, stream 28) and `(op25 members)` (ID 586, stream 479).
+            2317 removes the laser barrier 139754, moves Bentley and asks for 2314's state 2.
+          - Operation 25 is "is the empty list", so 2317 starts once the trigger is in the world and no guard is left
+            inside: the player knocks out or lures away the guards. The route knocks them out: Sly stands behind each
+            guard inside (put there, no path-finding) and jumps and attacks. Both of 2316's guards go down within
+            2 s, then the two of placements 140791 and 140792, which also stand inside.
+          - It stops there: a knocked-out guard stays in the world where it fell, so the trigger still counts it and
+            the set never empties. What takes a knocked-out guard out of the set is open with the spec (an 800 s run).
+      - Instances (`0x6F` / `0x70`): stand-in, one per placement, the copy the load made. Taking brings the
+        placement into the world (its copy stands at the placement), releasing takes it out. Flags 1 (the current
+        instance) and 2 (locked) change nothing here.
+      - Guard command 740 (use an object): the guard walks to the object, and the use waits as an animation does.
+      - A Sly 3 trigger shape also counts the in-world objects of the classes it counts (option 433), by position.
+        Scripts read its member set (script ID 586, stream 479) and its in-world flag (43, stream 28).
+      - Tracking (option 478, here 443; interactables.md 6): each frame the members inside are collected (up to 64)
+        and sorted. Any difference from the stored set stores the new set and raises script event 9. Leaving the
+        world raises event 9 once more, with an empty set.
+      - The crew's attacks (`game::sly3::crew`, as Sly 2's gang's): the in-world guards that are not knocked out are
+        its targets, and its punches, crossbow swings, air attacks, flop landings and darts reach them as attacks.
+        Knock-outs follow Sly 2's guard rules. The guards' strikes on the crew are not taken yet. A knocked-out
+        guard's command list stops.
+      - The command runner (`game::sly3::commands`):
+        - A condition other than the fixed kinds (1886 to 1895) asks the script's own module (scripts.md 7.1). The
+          runner queues the question and tries the command again next frame. The session answers it by raising the
+          module's event 4 with the value at once (`Game::raise_now`).
+        - `0x0D` is a rendezvous: the runners it names (`0x0C`'s layout: a count, then the names) wait at a meeting
+          (the ID after the names) until every one still running is there, then all go on.
+        - `0x0E` with a non-zero second argument clears its alarm when the wait passes (missions.md 4.1a).
+        - A module's `0x15` message goes to the copy of the script object its run was started on. A use point's
+          command script starts in the point's copy (`Scripts::start_in`).
+        - `0x36` moves a character to an object, arriving at once like `0x30`. `0x77` turns a character to face an
+          object. For a crew member other than the player, both go through the crew (`World::shared.sly3_crew_moves`),
+          because it writes the members' objects every frame.
+        - Not run yet: `0x33` / `0x34`, a character's path step and a step toward an aim point (guard AI jobs 243 and
+          244), which complete at once, and `0x76` (unknown).
+      - Every command script gets script event 5 when it starts (missions.md 4.1a), which also broadcasts task event
+        29 with the script. Script ID 740 (stream 756) is the script's context object, written by its start.
+      - Methods 41 and 42 (stream 26, 27) add any Sly 3 object to the world and take it out, the crew included.
+      - The crew and player 0's control (characters.md 6):
+        - Switching: the world object's method 983 (stream 985) and command 0x13 hand control over (`control_to`).
+          The safe house (class 69) is entered, a core crew member is switched to through
+          `World::shared.sly3_switch_to`, and anything else is driven.
+        - The safe house's take-out names the member the same way. The crew switches and brings the member into the
+          world.
+        - There is no free d-pad switching (characters.md 6, an inference), and the route no longer masks the d-pad.
+      - The take-out script 2061: its event-5 handler keeps its character, read as script ID 740 (the session mirrors
+        each running script's object in `sly3_script_objects`), and hands it control (983). Its message 50177 then
+        takes the other core characters out.
+      - Script event 23 is Sly 2's "no longer current" (and the job's end).
+      - The binocucom (shared `game::photo`, Sly 3's layer `game::sly3::photo`; interactables.md 5a):
+        - Eligible targets (Sly 3 class 43, up to 16): in the world, linked object (1309) out of it, task (1308)
+          available. The pick is the target in view (its radius sphere) nearest horizontally, with no distance limit
+          (the search starts from the largest float).
+        - Framing: centring 1 − (d − 128) / 128 from the reticle. The size (1303 or the radius) along the camera's up
+          × 1/120, folded above 1. A good shot is centred with a size of at least 1 − tolerance (1304).
+        - Prompt states 2, 4, 5, 6, 7, 8, 9. The shutter mask is 0x0A (R, ZR), 0xFA when ready (the face buttons too).
+        - Accepting plays 1307's line, makes a checked request for state 2 on 1308 and broadcasts task event 10. The
+          binocucom closes when no listed target (1306 ≥ 0) is pending.
+        - Sly 3's constants (`game::sly3::photo::params`): a 640 × 480 screen with the reticle at (320, 240), the eye
+          20 up, and the camera's own field of view. Sly 2's differ (640 × 492.8); each game gives its own `Params`
+          and option numbers (`photo::Options`).
+        - Opening: R3 on the controlled character, or command `0x46` with a scripted view (character in the first
+          word, the object looked at in the eleventh: working reading); `0x6E` closes it. While open it takes the pad
+          and the crew stands still.
+        - Working values: the aim speed and the flash and accept times. Not done: the line-of-sight rays, the clock
+          freeze during the flash, the title overlay.
+      - Guard command lists (`game::sly3::guards`; guards.md 4a): `0x62` gives a guard a class-134 list whose typed
+        options each append a command.
+        - Run here: 735 follows a path (`formats_sly3::stream::path_points`, walked point to point), 743 waits for an
+          animation, and 746 sets an alarm for the command scripts. The other commands are skipped and counted.
+        - Working values: the walking speed (400), the arrival distance (25) and the animation wait (1 s). The guard
+          AI job (kind 200) is not modelled.
+      - A Sly 3 trigger shape out of the world does nothing and forgets who was inside (`sly2_props`, Sly 3 branch).
+        Being added then counts as an entry for whoever stands in it. Before this, 140745 fired while out of the world,
+        so its request was refused.
+      - Task options 1416 (object switches) and 1417 (state-machine goals) were already read for Sly 3: 2241's
+        switches bring 140741 in at state 1.
+      - The task state setter (missions.md 4.1a): a change raises task event 42 and script event 25, sets the state,
+        then raises task event 41 and script event 24 (`jobs::task_codes`, `jobs::script_events`). Off-world tasks
+        get none.
+        - The restore's set counts as a change for every task (they start at −1 from the load) and raises these
+          events once per in-world task, in mode 1.
+      - A task's mode is script ID 1280 (stream 1411): 1 from the restore until world-start step 3, 0 in live play
+        (`World::shared.sly3_restore_mode`). Mode 3, a silent change, raises no events.
+      - World-start step 3 (`jobs::run_queued`, `jobs::finish_world_start`) runs after the frame that runs the
+        restore's events:
+        - the requests those events queued run in order in mode 1 (no back-fill, no follow-ups);
+        - the events they raise run while the mode still reads 1 (`Game::flush_events`, at most 16 rounds);
+        - then the "current when available" pass.
+      - The safe-house test plays the intro first, because a new game's intro holds the pad.
       - The cell lock (class 79, `game::sly3::lock`; interactables.md 5):
         - Use point 138208's event-5 handler calls method 247 (stream 1600) on lock 138191 with the point's user.
           The use routine stores the user, read as option 1162 (script ID 555). The lock stores the user, enters

@@ -10,7 +10,7 @@
 //!   - Losing control sends the lock to 0 below state 4, else to 5.
 //! - **The dial** turns with the stick's rotation. Each frame, the change of the stick's angle (atan2) has a dead
 //!   zone of 0.1 rad. Its rate per second is smoothed into the dial's speed, and the angle advances by speed × dt.
-//!   The dial has 100 marks, and v_interpol's combination is 85, 20, 75.
+//!   The dial has 100 marks. The combination, 85, 20, 75, is the game's constant, shared by every class-79 lock.
 //! - **Tumblers** run −1 to 6, one step per frame toward what the dial sets.
 //!   - The dial works on one tumbler at a time, turning up the marks for tumblers 0 and 2 and down for tumbler 1.
 //!   - Within 8 marks of the tumbler's gate the tumbler goes to 3, and within 4 to 4. Crossing the gate sets it (5),
@@ -43,7 +43,7 @@ pub const TUMBLER_MAX: i32 = 6;
 pub const OPEN: [i32; 2] = [5, 6];
 /// The dial's marks.
 pub const MARKS: f32 = 100.0;
-/// v_interpol's combination, in marks.
+/// The combination, in marks: the game's constant, the same for every class-79 lock.
 pub const COMBINATION: [f32; 3] = [85.0, 20.0, 75.0];
 /// The bands before a gate: within the first the tumbler goes to 3, within the second to 4.
 pub const TOLERANCES: [f32; 2] = [8.0, 4.0];

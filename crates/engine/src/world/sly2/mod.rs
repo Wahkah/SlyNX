@@ -155,8 +155,9 @@ pub struct Sly2Level {
     pub poser: crate::anim::sly2_pose::Sly2Poser,
     /// What the HUD shows (`game::sly2_hud`).
     pub hud: crate::game::sly2_hud::Sly2Hud,
-    /// Task events raised for the job system, oldest first (operation 139 raises 59).
-    pub task_events: Vec<u32>,
+    /// Task events raised for the job system, oldest first (operation 139 raises 59), with the object each concerns
+    /// (missions.md 4.3: a volume's 26 and 27 carry the volume).
+    pub task_events: Vec<(u32, Option<Handle>)>,
     /// Noise objects made by option 1095: (slot, game time it expires at; negative never).
     pub noise_objects: Vec<(u32, f32)>,
     objects: Vec<Sly2Object>,
@@ -308,6 +309,50 @@ impl World {
             self.set_local(h, bone.mul(&o.bone_local));
         }
     }
+}
+
+/// The Sly 2 classes with descendants and the end of each one's range (object-stream.md 3.1): class C covers
+/// C ≤ c < end. Every other class is a leaf and covers only itself.
+const CLASS_RANGES: [(i16, i16); 32] = [
+    (0, 199),
+    (2, 134),
+    (3, 48),
+    (6, 8),
+    (8, 10),
+    (10, 15),
+    (18, 20),
+    (22, 28),
+    (24, 26),
+    (30, 34),
+    (32, 34),
+    (35, 38),
+    (48, 109),
+    (50, 79),
+    (51, 69),
+    (52, 56),
+    (56, 68),
+    (58, 60),
+    (71, 77),
+    (79, 83),
+    (80, 83),
+    (84, 86),
+    (90, 96),
+    (100, 103),
+    (109, 111),
+    (126, 132),
+    (138, 145),
+    (148, 151),
+    (155, 199),
+    (157, 164),
+    (160, 164),
+    (166, 169),
+];
+
+/// The Sly 2 class test (object-stream.md 3.1): whether class `class` is `of` or derived from it.
+pub fn is_a(class: i16, of: i32) -> bool {
+    let Ok(of) = i16::try_from(of) else { return false };
+    let end = CLASS_RANGES.iter().find(|r| r.0 == of).map_or(of.saturating_add(1), |r| r.1);
+    (of..end).contains(&class)
 }
 
 /// The script program of a world: the Sly 2 packages' script blocks for a Sly 2 world, the Sly 3 groups' script

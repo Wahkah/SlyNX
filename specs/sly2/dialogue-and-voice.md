@@ -44,6 +44,15 @@ sources:
   - kind: disc
     what: re-walk of all 43 worlds (121,153 bodies), raw argument bytes of options 596, 597, 601, 606 and 636 (2026-11-18)
     used_for: argument types and value counts of those commands
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), commands 629 (0x00106CA8, record kind 4 via 0x001E03A0) and 630 (0x00106D50, kind 5 via
+      0x001E03E0), the record-done test's kind-4 case (jump table 0x002A7D90 → 0x001E3928), the signal removal
+      0x001E0070 and the clear 0x001E0120 called from the sequence stop 0x001DFEB8 (2026-11-21)
+    used_for: signals between sequences (section 2.1) [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9 (sequence record start, record-done test, signal set routines)
+    used_for: what the record fields hold (section 2.1) [R]
 reviewed_by: pending
 date: 2026-11-21
 ---
@@ -91,7 +100,7 @@ object**, which the sequence's commands use as their default target [R]. The way
 | **Script call: start with the current character** | option 614 (script ID 638), no arguments; the starter is the character the player controls now | 2,363 calls |
 | **Script call: stop** | option 615 (script ID 530), no arguments; calls the sequence stop `0x001DFEB8`, which stops every run of the sequence and retracts the clips they wait on (2026-11-21, [animation.md](animation.md) 2) [D]. Command 631 in a sequence stops another sequence the same way [R] | 103 calls |
 | **Trigger volume** | a class-24 volume whose option 441 names the sequence; started when an object the volume accepts enters it, with that object as the starter [R] | 40 volumes, all naming class-114 objects |
-| **Interaction spot** | a class-35 spot whose option 1070 names the sequence; started when a character uses the spot, with that character as the starter [R] | 82 spots, all naming class-114 objects |
+| **Interaction spot** | a class-35 spot whose option 1070 names the sequence; started when a character uses the spot, with that character as the starter [R]. Script ID 235 on a spot (stream option 1071, handler `0x0010D5D0`, one object argument) runs the same "used by" routine `0x00184130` with that character (2026-11-21) [D]: it stores the user (+0x10C); posts message 6 (with the spot) to the spot and to every object subscribed to it (virtual slot 0x20 = the message post `0x00133508`; the spot's own message handler is the base one, `0x00133590`, which does nothing, so only subscribers act on it [R for subscribers]); applies the spot's state-machine goals (`0x0020FF70`), the entries of stream option **1075** (script ID 526, three arguments, added by `0x001840B8`); applies its task-state requests (`0x00161F48`), the entries of stream option **1076** (script ID 527, two arguments (task, state), added by `0x001840F8`); raises script event 5 on the spot (so task event 26 with the spot); then, if option 1070 is set (+0x114), starts that sequence with the user as starter (`0x001DFD58`; nothing happens if it is running). The routine has no in-world test, so it also works on a spot that is out of the world [D for the absence in this routine]. **Correction (2026-11-21):** row 0's spot 80398 does start a sequence. The package record (in `jb_elevator_power_switch`) has only options 1074 and 1069, but copy placement 150360 (in `jb_intro_rig`) patches target 80398 with options 1070 = **1675** and 26 [D]. Copy patches apply to the copied object (classes/placement.md 1.2) [R], so the copy's spot carries 1070 = 1675 and is out of the world at start. Sequence 1675 adds it (command 670) and its last command sends signal 152638 to 1674 (`630 152638 1674`). So the call on 80398 starts 1675 with Sly, and 1675 is what sends 152638 [D for the data]. The earlier statement that 80398 has no option 1070 read the package record only and was wrong | 82 spots, all naming class-114 objects |
 | **Animation event** | a timed event of type 4 in a clip (animation.md 2) whose object ID names a sequence; started when the clip crosses the event's frame, with no starter [R] | 168 timed type-4 events name class-114 objects (the other 252 type-4 events, all in retract lists, name clips and play them) |
 | **Another sequence** | **option 636**, the start-sub-sequence command: arguments (sequence, starter object or −1, no-wait flag). With −1 the running sequence's current subject is passed on as the starter. Flag 0: the parent waits until the sub-sequence ends, and stopping the parent also stops it; flag 1: the parent goes on at once [R] | 708 uses, all in class-114 lists; starter −1 in 679, an object in 29; flag 0 in 473, 1 in 235 [D] |
 | **Safe-house action** | a Cross action of the safe house (option 1338, safehouse-and-shop.md) whose target is a sequence: started with no starter, or with the character chosen [R] | one per character and hub (placement blocks) |
@@ -100,6 +109,26 @@ object**, which the sequence's commands use as their default target [R]. The way
 A guard command list can also **signal** a running sequence (class-113 command 15, option 612:
 options-by-class.md 2.2): it raises a numbered alarm the sequence can wait for; it does not start it [R]. All 71
 such commands on the disc name class-114 objects [D].
+
+**Signals: commands 629 and 630** (added 2026-11-21) [D unless marked]. Each sequence has a small **set of signal
+values** (a count, then up to 8 values).
+
+- **630 (send)**, arguments (value, sequence): appends a record of kind 5. When it runs, it adds the value to the
+  named sequence's set, unless the value is already there or the set is full (8). It never waits.
+- **629 (wait)**, arguments (value, flag): appends a record of kind 4. The run stops on it until the value is in the
+  **running sequence's own** set. If the flag is not 0, the value is then removed from the set (consumed);
+  with flag 0 it stays, so a later wait for the same value passes at once.
+- A signal sent before the wait starts is not lost: the wait passes as soon as it is reached.
+- The set is cleared when the sequence stops (the stop routine calls `0x001E0120`).
+- Scripts send the same kind of signal with a sequence's script ID 640 and a value [I from the matching uses], and a
+  guard command list with command 15 (above) [R].
+- **Examples in row 2:**
+  - Tutorial 1791 (task 1790's) plays its lines, then `629 123864 0` waits until sequence 1792 runs
+    `630 123864 1791`; 1792 is started by task 1790's script on task event 9 (the photo mode opening,
+    [missions.md](missions.md) 4.3). Then 1791 sets 1790 to state 2.
+  - Sequence 1833 waits on `629 98046 0` until Dimitri's command list 1827 reaches its point 33582, whose script
+    sends 98046 with script ID 640 (missions.md 4.3).
+  - In row 0, sequence 1674 waits on 152638, which sequence 1675 sends.
 
 A port should therefore start a sequence from these hooks rather than offering a manual start [I]: the script calls
 (by far the most), trigger volumes, interaction spots and animation events.

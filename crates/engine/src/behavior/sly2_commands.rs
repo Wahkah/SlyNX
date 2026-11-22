@@ -49,6 +49,8 @@ pub mod opt {
     pub const START_WITH_PLAYER: u16 = 614;
     /// See [`START`].
     pub const STOP: u16 = 615;
+    /// Sequences: send a signal value (script ID 640; dialogue-and-voice.md 2.1 [I]).
+    pub const SIGNAL: u16 = 617;
     /// Trigger volume: the sequence it starts.
     pub const VOLUME_SEQUENCE: u16 = 441;
     /// Interaction spot: the sequence it starts.
@@ -71,7 +73,15 @@ pub mod opt {
 
 fn object(world: &World, me: Handle, a: &Arg) -> Option<Handle> {
     match *a {
-        Arg::Int(id) => world.find_sly2_id(id, Some(me)),
+        // A placement's ID names its copy (scripts.md 5): the leash 123878 is parented to Dimitri's copy, not to his
+        // placement (missions.md 4.3).
+        Arg::Int(id) => world.find_sly2_id(id, Some(me)).map(|h| {
+            if world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 6)) {
+                world.children(h).find(|&c| world.sly2_id(c) == Some(id)).unwrap_or(h)
+            } else {
+                h
+            }
+        }),
         Arg::Short(6, oid) if oid >= 0 => world.find_nearest(oid, Some(me)),
         _ => None,
     }
@@ -237,6 +247,52 @@ pub fn safe_house_action(
     Some(h)
 }
 
+/// An interaction spot (class 35) used by `user` (dialogue-and-voice.md 2.1, the "used by" routine; also script ID
+/// 235 on a spot, which works on a spot out of the world): the user is stored (option 1068), the spot's state-machine
+/// goals (1075: object, machine, goal) and task-state requests (1076: task, state) apply, script event 5 goes to the
+/// spot, which broadcasts task event 26 with it, then the spot's sequence (option 1070, which a copy patch can set)
+/// starts with the user as starter (a running one is left as it is). The notice to the spot (message 6) has no
+/// effect here: the spot's own handler does nothing and it has no subscribers in this engine.
+pub fn use_spot(world: &mut World, spot: Handle, user: Option<Handle>) {
+    if let Some(u) = user.and_then(|u| world.sly2_id(u)) {
+        world.set_option(spot, SPOT_USER, crate::object::OptionValue::Int(u));
+    }
+    let lists: Vec<(u16, Vec<i32>)> = world
+        .sly2
+        .as_deref()
+        .map(|l| {
+            l.actions
+                .iter()
+                .filter(|a| a.0 == spot.index() && (a.1 == SPOT_GOAL || a.1 == SPOT_TASK))
+                .map(|a| (a.1, a.2.iter().filter_map(|x| number(x).map(|f| f as i32)).collect()))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (id, v) in lists {
+        match (id, v.as_slice()) {
+            (SPOT_GOAL, &[object, machine, goal, ..]) => {
+                crate::game::sly2_jobs::with(world, |j, _| j.machine_goals.push((object, machine, goal, false)));
+            }
+            (SPOT_TASK, &[task, state, ..]) => world.shared.task_requests.push((task, state)),
+            _ => {}
+        }
+    }
+    world.raise(spot, 5, Vec::new());
+    super::sly2_props::send_task_event_from(world, super::sly2_props::task_event::ENTERED, Some(spot));
+    let seq =
+        world.options(spot).and_then(|o| o.i32(opt::SPOT_SEQUENCE)).and_then(|q| world.find_sly2_id(q, Some(spot)));
+    if let Some(sequence) = seq {
+        world.shared.sequence_requests.push(SequenceRequest::Start { sequence, starter: user });
+    }
+}
+
+/// An interaction spot's user (1068), state-machine goals (1075) and task-state requests (1076).
+pub const SPOT_USER: u16 = 1068;
+/// See [`SPOT_USER`].
+pub const SPOT_GOAL: u16 = 1075;
+/// See [`SPOT_USER`].
+pub const SPOT_TASK: u16 = 1076;
+
 /// A sequence object (class 114): takes the script calls that start and stop it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Sequence {
@@ -253,10 +309,14 @@ impl ClassBehavior for Sequence {
             }
             opt::START_WITH_PLAYER => SequenceRequest::StartWithPlayer(me),
             opt::STOP => SequenceRequest::Stop(me),
+            opt::SIGNAL => match args.first() {
+                Some(Arg::Int(v)) => SequenceRequest::Alarm(me, *v),
+                _ => return false,
+            },
             // Vehicles hook: the dance commands (699 to 701) go to the dance director.
             _ => return crate::behavior::vehicles::dance::sequence_command(world, id, args),
         };
-        if id != opt::STOP {
+        if id == opt::START || id == opt::START_WITH_PLAYER {
             self.started += 1;
         }
         world.shared.sequence_requests.push(r);
@@ -352,6 +412,9 @@ pub struct CommandRun {
     pub path: Vec<[f32; 3]>,
     /// See [`CommandRun::path`].
     pub path_at: usize,
+    /// Script event 2 has gone to the list (missions.md 4.3: a list's module hears 2 when a run starts, 3 when it
+    /// ends).
+    pub started: bool,
 }
 
 impl CommandRun {
@@ -366,6 +429,7 @@ impl CommandRun {
             pause_range: None,
             path: Vec::new(),
             path_at: 0,
+            started: false,
         }
     }
 }
@@ -401,6 +465,10 @@ pub fn step_commands(cx: &mut Cx<'_>, run: &mut CommandRun, arrived: bool) -> (S
         Some(super::Behavior::Sly2Commands(l)) => l.commands.clone(),
         _ => return (Step::Idle, false),
     };
+    if !run.started {
+        run.started = true;
+        cx.world.raise(run.list, LIST_STARTED, Vec::new());
+    }
     let mut guard = 0;
     while let Some(c) = commands.get(run.at) {
         guard += 1;
@@ -472,6 +540,12 @@ pub fn step_commands(cx: &mut Cx<'_>, run: &mut CommandRun, arrived: bool) -> (S
                     continue;
                 }
             }
+            // Command 4 (599): script event 4 on the list's own module with the value (missions.md 4.3: 1826's
+            // last command, 1827's path points).
+            4 => {
+                let v = c.args.first().and_then(number).unwrap_or(0.0) as i32;
+                cx.world.raise(run.list, 4, alloc::vec![script::Value::Int(v)]);
+            }
             15 => {
                 if let Some(s) = c.args.first().and_then(|a| object(cx.world, me, a)) {
                     let n = c.args.get(1).and_then(number).unwrap_or(0.0) as i32;
@@ -482,5 +556,11 @@ pub fn step_commands(cx: &mut Cx<'_>, run: &mut CommandRun, arrived: bool) -> (S
         }
         run.at += 1;
     }
+    cx.world.raise(run.list, LIST_ENDED, Vec::new());
     (Step::Idle, false)
 }
+
+/// Script events a command list hears when a run of it starts and ends (missions.md 4.3).
+pub const LIST_STARTED: u32 = 2;
+/// See [`LIST_STARTED`].
+pub const LIST_ENDED: u32 = 3;

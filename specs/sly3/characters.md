@@ -293,6 +293,18 @@ listed.
 - **In a hub** the player picks one of the core three at the safe house (class 69: present in v_ext, o_ext, h_ext,
   c_ext, p_ext, p_at_sea); the choice is the "current player" progress value, saved and restored (section 2). [R]
   [O]
+- **No free switching in a hub** [X, partial]. No gameplay code tests a d-pad button through the game's button
+  test (`0x001A7A80`): no call passes a d-pad mask (`0x1000`, `0x2000`, `0x4000`, `0x8000`). The places that hand
+  player control to another character (`0x001F4B00`'s 23 callers) are:
+  - tasks and scripts (command `0x13`, the game object's method 983);
+  - the update shared by classes 86 and 170 (`0x002859F0`, vtable slot 18 / 72), which reads L3 `0x200` and Circle
+    `0x20`;
+  - minigames (the lock) and vehicles.
+
+  The safe house's own selection path was not traced here.
+
+  So switching outside the safe house is not the game's rule; a d-pad switch in a port is an addition [I: other
+  input paths were not all traced].
 - **In a job**, the task makes its character the current player (tasks set and enable a player object; the task
   spec owns the details) [R]. The recruits become the player only this way: each recruit is present only in the
   worlds of section 1, mostly under job conditions, and has no safe-house entry. **Recruits are not playable outside

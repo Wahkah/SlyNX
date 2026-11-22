@@ -226,6 +226,29 @@ impl World {
         self.sly3_object(h).map(|o| o.id)
     }
 
+    /// Sly 3 hook (missions.md 4.1a): a hit record (class 196) of `hitter` hitting `target`, for event 12's
+    /// handlers: scripts read the object hit as script ID 556 and the hitter as 276. It has no record and stays out of
+    /// the world.
+    pub fn sly3_hit_record(&mut self, target: Handle, hitter: Handle) -> Option<Handle> {
+        const HIT_CLASS: i16 = 196;
+        let slot =
+            self.create(HIT_CLASS, -1, u32::MAX, -1, formats::geometry::Affine::IDENTITY, crate::world::NONE, 0, 0);
+        let h = self.handle(slot)?;
+        self.set_in_world(h, false);
+        self.shared.sly3_hits.insert(slot, (target, hitter));
+        Some(h)
+    }
+
+    /// Frees every hit record made so far ([`World::sly3_hit_record`]): called before a new blast makes its own, once
+    /// the last blast's event-12 handlers have long run.
+    pub fn sly3_free_hit_records(&mut self) {
+        for slot in core::mem::take(&mut self.shared.sly3_hits).into_keys() {
+            if let Some(h) = self.handle(slot) {
+                self.destroy(h);
+            }
+        }
+    }
+
     /// The record a Sly 3 object was made from.
     pub fn sly3_record(&self, h: Handle) -> Option<&Record> {
         let r = self.record(h)?;

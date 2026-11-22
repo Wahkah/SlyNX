@@ -80,6 +80,38 @@ pub enum SeqCommand {
     /// Option 631 (record kind 6): stop the named sequence: all its runs stop and retract their waited playbacks
     /// (animation.md 2).
     StopSequence(i32),
+    /// Option 629: wait until the value is in the run's own sequence's signal set; `consume` (flag not 0) then
+    /// removes it (dialogue-and-voice.md 2.1).
+    WaitSignal {
+        /// The signal value.
+        value: i32,
+        /// Remove it once seen.
+        consume: bool,
+    },
+    /// Option 630: add the value to the named sequence's signal set; never waits.
+    SendSignal {
+        /// The signal value.
+        value: i32,
+        /// The sequence's object ID.
+        sequence: i32,
+    },
+    /// Option 711: a character (object ID; a placement means its copy) runs a command list (missions.md 4.3).
+    RunList {
+        /// The character.
+        object: i32,
+        /// The command list.
+        list: i32,
+    },
+    /// Option 639: show a screen (object, label −1 for the default show); with the no-wait flag 0 the run waits
+    /// until the screen is no longer busy (user-interface.md 2.1).
+    ShowScreen {
+        /// The screen's object ID.
+        screen: i32,
+        /// The label (−1: the default show).
+        label: i32,
+        /// Wait until the screen is done (no-wait 0).
+        wait: bool,
+    },
     /// Option 625: a thread (its ID) runs the commands up to the matching 626 beside the line that reaches it
     /// (animation.md 2); `end` is the index of that 626.
     Thread {
@@ -141,6 +173,17 @@ pub const PLAY_CLIP: i16 = 635;
 pub const STOP_THREAD: i16 = 627;
 /// Option 631: stop a sequence.
 pub const STOP_SEQUENCE: i16 = 631;
+/// Option 629: wait for a signal (value, flag); option 630: send one (value, sequence) (dialogue-and-voice.md 2.1).
+pub const WAIT_SIGNAL: i16 = 629;
+/// See [`WAIT_SIGNAL`].
+pub const SEND_SIGNAL: i16 = 630;
+/// Option 711: a character runs a command list (missions.md 4.3).
+pub const RUN_LIST: i16 = 711;
+/// Option 639: shows a screen object (user-interface.md 2.1).
+pub const SHOW_SCREEN: i16 = 639;
+/// The class of the job prompt screen ("Job Failed!" / "Press X to try again", 1748 in episode 1; user-interface.md
+/// 2.1).
+pub const JOB_PROMPT_CLASS: i16 = 127;
 /// Option 625: open a thread.
 pub const THREAD: i16 = 625;
 /// Option 626: close a thread.
@@ -239,6 +282,27 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
             }
             if o.id == STOP_SEQUENCE {
                 return Some(SeqCommand::StopSequence(int_of(typed_args(v)?.first()?.1)));
+            }
+            if o.id == RUN_LIST {
+                let a = typed_args(v)?;
+                return Some(SeqCommand::RunList { object: int_of(a.first()?.1), list: int_of(a.get(1)?.1) });
+            }
+            if o.id == WAIT_SIGNAL || o.id == SEND_SIGNAL {
+                let a = typed_args(v)?;
+                let (x, y) = (int_of(a.first()?.1), a.get(1).map_or(0, |b| int_of(b.1)));
+                return Some(if o.id == WAIT_SIGNAL {
+                    SeqCommand::WaitSignal { value: x, consume: y != 0 }
+                } else {
+                    SeqCommand::SendSignal { value: x, sequence: y }
+                });
+            }
+            if o.id == SHOW_SCREEN {
+                let a = typed_args(v)?;
+                return Some(SeqCommand::ShowScreen {
+                    screen: int_of(a.first()?.1),
+                    label: a.get(1).map_or(-1, |x| int_of(x.1)),
+                    wait: a.get(2).is_none_or(|x| int_of(x.1) == 0),
+                });
             }
             if o.id == STOP_THREAD {
                 return Some(SeqCommand::StopThread(int_of(typed_args(v)?.first()?.1)));
@@ -610,8 +674,11 @@ impl Sly2Sound {
                     seq.at += 1;
                     continue;
                 }
-                SeqCommand::PlayClip { wait: true, .. } => {
-                    // Played by the session, which holds the run until the clip is retracted.
+                SeqCommand::PlayClip { wait: true, .. }
+                | SeqCommand::ShowScreen { wait: true, .. }
+                | SeqCommand::WaitSignal { .. } => {
+                    // Played (shown) by the session, which holds the run until the clip is retracted (the screen is
+                    // done).
                     let run = (seq.object, seq.thread);
                     if !seq.started_sub {
                         self.world_cues.push((seq.object, seq.thread, cmd));
@@ -630,6 +697,9 @@ impl Sly2Sound {
                 | SeqCommand::RemoveObject(_)
                 | SeqCommand::Value(_)
                 | SeqCommand::StopSequence(_)
+                | SeqCommand::ShowScreen { .. }
+                | SeqCommand::SendSignal { .. }
+                | SeqCommand::RunList { .. }
                 | SeqCommand::PlayClip { .. } => {
                     // Done by the session (it has the world), in order with the task requests.
                     self.world_cues.push((seq.object, seq.thread, cmd));

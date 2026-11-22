@@ -235,6 +235,8 @@ pub struct Jobs {
     /// Sly 3 hook: the script event a job or task object gets for one of [`script_event`]'s (`None`: not raised).
     /// Sly 2's are as listed; Sly 3 numbers its events differently (`game::sly3::jobs`).
     pub script_events: fn(u32) -> Option<u32>,
+    /// Sly 3 hook: the code a task event (`event`) is broadcast with; the identity in Sly 2.
+    pub task_codes: fn(u32) -> u32,
     /// Sly 3 hook: the class whose objects in the world also hear every task event, after the tasks and before the
     /// current job (Sly 3's macro-package listeners, class 147; missions.md 4.2). `None` in Sly 2.
     pub listener_class: Option<i16>,
@@ -330,6 +332,7 @@ impl Jobs {
             exits: if sly3 { Vec::new() } else { flow::exits(world) },
             fired_elsewhere: Vec::new(),
             script_events: Some,
+            task_codes: |e| e,
             listener_class: None,
             done_queue: alloc::collections::VecDeque::new(),
             finishing: false,
@@ -432,23 +435,29 @@ impl Jobs {
                 // Object-model hook (level-flow.md 4.1): the change raises the task's "after state change" event, which
                 // the episodes' macro modules answer by starting the opening sequence. Not for a new game, whose
                 // queued task (1583) lies past the intro's attract-mode tasks that would answer it.
-                // Sly 3 raises it whatever is queued (mode 1 counts as live, sly3/missions.md 4.1a).
-                if queued.is_none() || self.sly3_rules {
+                // Sly 3 raises its own events below.
+                if queued.is_none() && !self.sly3_rules {
                     let slot = self.graph.tasks[t].slot;
                     self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
-                    // Sly 3 hook: the restore's state setter runs in mode 1, which still raises the state change's
-                    // task events (sly3/missions.md 4.1a), heard by the macro packages that play the intro.
-                    if self.sly3_rules {
-                        let here = Some(slot);
-                        self.effects.push(Effect::Broadcast { event: event::STATE_BEFORE, object: here });
-                        self.effects.push(Effect::Broadcast { event: event::STATE_AFTER, object: here });
-                    }
                 }
             }
         }
         for t in 0..self.graph.tasks.len() {
             let s = self.states[t] as i32;
             self.switch(t, s, true);
+        }
+        // Sly 3 hook (sly3/missions.md 4.1a): every task starts at −1 from the load, so the restore's set is a change
+        // for each one, whatever it restores, in mode 1, which still raises events: the "before" task event and
+        // script event, then the "after" ones (delivery skips off-world tasks).
+        if self.sly3_rules {
+            for &t in &order {
+                let slot = self.graph.tasks[t].slot;
+                let here = Some(slot);
+                self.effects.push(Effect::Script { slot, event: script_event::STATE_BEFORE, task_event: None });
+                self.effects.push(Effect::Broadcast { event: event::STATE_BEFORE, object: here });
+                self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
+                self.effects.push(Effect::Broadcast { event: event::STATE_AFTER, object: here });
+            }
         }
         // The current job, task and checkpoint from session memory (the carry; none after a card load). A task with
         // option 1273 restored as available replaces the remembered task, the last in graph order winning, on every
@@ -939,6 +948,14 @@ impl Jobs {
         });
     }
 
+    /// Sly 3 hook: runs `f` in restoring mode (sly3/missions.md 4.1a, mode 1): no back-fill and no follow-ups of the
+    /// state setter, events as usual. World-start step 3 runs the requests queued during the restore this way.
+    pub fn in_restoring_mode(&mut self, f: impl FnOnce(&mut Jobs)) {
+        let was = core::mem::replace(&mut self.restoring, true);
+        f(self);
+        self.restoring = was;
+    }
+
     /// Forces task `t` to state `s` (task methods 1290 to 1293; Sly 3's 1314 to 1317): the request skips the checks.
     pub fn force_state(&mut self, t: usize, s: i8) {
         // An index from another world's graph names nothing here (a stale index after a load).
@@ -1181,7 +1198,8 @@ impl Jobs {
                         if let Some(h) = world.handle(s)
                             && world.in_world(h)
                         {
-                            world.raise(h, task_event, vec![script::Value::Int(event as i32), obj.clone()]);
+                            let code = (self.task_codes)(event);
+                            world.raise(h, task_event, vec![script::Value::Int(code as i32), obj.clone()]);
                         }
                     }
                 }
@@ -1233,6 +1251,9 @@ impl Jobs {
         self.exits[i].state = ExitState::Fired;
         let exit = self.exits[i].clone();
         world.raise(exit.handle, 5, Vec::new());
+        // Object-model hook: event 5 goes through the common script-event routine, which broadcasts task event 26
+        // with the door (missions.md 4.3; the m1 jobs' door check).
+        self.task_event(event::ARRIVED, Some(exit.handle));
         if let Some((req, pairs)) = flow::fire(world, &exit) {
             for (task, s) in pairs {
                 if let Some(&t) = self.graph.task_ids.get(&task) {
@@ -1267,11 +1288,12 @@ impl Jobs {
             if !world.is_active(h) {
                 continue;
             }
-            // An exit whose volume is not read is never entered; one a task or job wants arms on its own updates.
+            // An exit whose volume is not read is never entered, so it arms on its own updates (level-flow.md 5.5)
+            // and fires only when a task, job or script fires it. Object-model hook: the hub's job doors are such
+            // exits, fired by their sequences' scripts (1735, from 123860's module).
             let inside = match crate::behavior::sly2_props::volume_box(world, h) {
                 Some(b) => crate::behavior::sly2_props::in_volume(&b, p),
-                None if self.exits[i].wanted => false,
-                None => continue,
+                None => false,
             };
             let arm = world.options(h).and_then(|o| o.f32(flow::opt::ARM_TIME)).unwrap_or(0.0);
             self.exits[i].state = match (self.exits[i].state, inside) {
@@ -1329,8 +1351,8 @@ pub fn step(game: &mut crate::game::Game, dt: f32, touched: bool) {
             }
         }
         let events = w.sly2.as_deref_mut().map(|l| core::mem::take(&mut l.task_events)).unwrap_or_default();
-        for e in events {
-            j.task_event(e, None);
+        for (e, object) in events {
+            j.task_event(e, object);
         }
         if let Some(p) = player {
             j.step_exits(w, p, dt);

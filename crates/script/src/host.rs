@@ -33,6 +33,13 @@ pub trait ScriptHost {
         None
     }
 
+    /// Engine hook: a second class whose option map is tried when the object's own class does not list a script
+    /// option (Sly 2: a placement's copy root also answers to the placement's options, classes/placement.md 2.1).
+    fn fallback_class(&self, object: ObjectId) -> Option<i16> {
+        let _ = object;
+        None
+    }
+
     /// Reads a stream option of an object. Action options never come here (they become methods).
     fn get_option(&mut self, object: ObjectId, option: u16) -> Value {
         let _ = object;

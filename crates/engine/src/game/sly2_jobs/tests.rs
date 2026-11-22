@@ -192,6 +192,7 @@ fn jobs() -> Jobs {
         exits: Vec::new(),
         fired_elsewhere: Vec::new(),
         script_events: Some,
+        task_codes: |e| e,
         listener_class: None,
         done_queue: alloc::collections::VecDeque::new(),
         finishing: false,

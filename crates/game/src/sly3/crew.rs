@@ -11,26 +11,38 @@
 //!   the characters at their records' placements.
 //! - **Current player**: Sly, else Bentley, else Murray (the first present). It is placed at the checkpoint, facing
 //!   its heading. The spec removes the other playable characters from the world; here they stand beside the
-//!   player instead, so the d-pad can switch between the core three (left Sly, up Murray, right Bentley) until the
-//!   safe house and the tasks hand control as the game does.
+//!   player instead.
+//! - **Switching** (characters.md 6): only what the game hands over switches the played member: the safe house's
+//!   take-out, command 0x13 and the world object's method 983 on a crew member, named in
+//!   `World::shared.sly3_switch_to`. The member handed control comes into the world. There is no free d-pad
+//!   switching (an inference of the spec: no gameplay code tests the d-pad buttons).
 //! - Every frame each core member's position and heading are written into its object, and `World::player` is the
 //!   current member's object, so the follow camera follows whoever is played.
+//! - **Guards** (guards.md: Sly 2's hit and knock-out rules): the in-world guards (class 58, `Sly2Guard`) that are not
+//!   knocked out are the crew's targets, and the crew's attacks reach them as Sly 2's gang's do
+//!   (`crate::sly2::gang`): a punch or crossbow swing on its target, an air attack, a flop landing or a dart around
+//!   the point. The guards' strikes on the crew are not taken yet.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use engine::behavior::Behavior;
 use engine::collision::TriMesh;
 use engine::collision::world::{CollisionWorld, QueryFilter, Shape};
 use engine::game::systems::{CollisionQueries, FrameInput, PlayerSystem, StepInfo};
 use engine::gang::sly3::{Crew, Member, shared};
-use engine::gang::{GangInput, GangWorld, Who};
+use engine::gang::{GangEvent, GangInput, GangWorld, Target, TargetKind, Who};
 use engine::object::Handle;
-use engine::world::World;
+use engine::world::{Notice, World};
 use formats::geometry::Affine;
 use formats_sly3::stream::Body;
-use platform_api::Buttons;
 
-use crate::sly2::gang::gang_buttons;
+use crate::sly2::gang::{AREA_REACH, TARGET_RANGE, gang_buttons};
+
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    engine::math::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+}
 
 /// The default arrival id (characters.md 2).
 pub const DEFAULT_ARRIVAL: i32 = 424;
@@ -266,9 +278,25 @@ impl PlayerSystem for CrewPlayer {
                 c.velocity = l.velocity;
             }
         }
-        for (b, m) in [(Buttons::LEFT, Member::Sly), (Buttons::UP, Member::Murray), (Buttons::RIGHT, Member::Bentley)] {
-            if input.pressed & b.0 != 0 {
-                crew.switch_to(m);
+        // Sly 3 hook (characters.md 6, inference): the member the session names switches; the d-pad does not. The
+        // member handed control comes into the world (leaving the safe house with a character adds it).
+        if let Some(m) = world.shared.sly3_switch_to.take() {
+            crew.switch_to(m);
+            if let Some(h) = m.core().and_then(|w| self.handles[w.index()]) {
+                world.set_in_world(h, true);
+            }
+        }
+        // Sly 3 hook (missions.md 4.1a): members scripts move (0x36) or turn (0x77).
+        for (h, at, yaw) in core::mem::take(&mut world.shared.sly3_crew_moves) {
+            let Some(k) = self.handles.iter().position(|&o| o == Some(h)) else { continue };
+            if let Some(c) = crew.gang.get_mut([Who::Sly, Who::Murray, Who::Bentley][k]) {
+                if let Some(p) = at {
+                    c.position = p;
+                    c.leave_ground();
+                }
+                if let Some(y) = yaw {
+                    c.yaw = y;
+                }
             }
         }
         let yaw = world.shared.camera_yaw;
@@ -283,10 +311,57 @@ impl PlayerSystem for CrewPlayer {
             // Gang hook: the gang's stick reader fills the deflection (`player::stick`).
             deflection: 0.0,
         };
-        let gw =
-            GangWorld { cw, filter: QueryFilter::default(), targets: &[], help: 0.0, safehouse: false, pools: &[] };
+        // Sly 3 hook: the guards as targets (Sly 2's rule, `crate::sly2::gang`).
+        let at = crew.gang.current().map_or([0.0; 3], |c| c.position);
+        let mut targets: Vec<Target> = Vec::new();
+        for h in world.handles() {
+            let Some(Behavior::Sly2Guard(g)) = world.behavior(h) else { continue };
+            if g.knocked_out() || !world.in_world(h) {
+                continue;
+            }
+            let Some(p) = world.position(h).filter(|&p| dist(p, at) <= TARGET_RANGE) else { continue };
+            targets.push(Target {
+                id: h.index(),
+                position: p,
+                yaw: g.yaw,
+                kind: TargetKind::Guard { robbable: !g.pocket.entries.is_empty(), launched: false },
+            });
+        }
+        let gw = GangWorld {
+            cw,
+            filter: QueryFilter::default(),
+            targets: &targets,
+            help: 0.0,
+            safehouse: false,
+            pools: &[],
+        };
         let events = if step.game_dt > 0.0 { crew.update(step.game_dt, &gi, &gw) } else { Vec::new() };
         let player = self.handles[crew.gang.player.index()];
+        // The crew's attacks on the guards.
+        if let Some(me) = player {
+            let around = |world: &mut World, p: [f32; 3]| {
+                for t in &targets {
+                    if dist(t.position, p) <= AREA_REACH
+                        && let Some(h) = world.handle(t.id)
+                    {
+                        world.notify(h, Notice::Attack { by: me, kind: 1 });
+                    }
+                }
+            };
+            for (_, e) in &events {
+                match *e {
+                    GangEvent::Punch { target: Some(id), .. } | GangEvent::Crossbow { target: Some(id), .. } => {
+                        if let Some(h) = world.handle(id) {
+                            world.notify(h, Notice::Attack { by: me, kind: 1 });
+                        }
+                    }
+                    GangEvent::AirAttack(_) => around(world, at),
+                    GangEvent::FlopLanded { position, .. } => around(world, position),
+                    GangEvent::Dart { to, .. } => around(world, to),
+                    _ => {}
+                }
+            }
+        }
         // Sly 3 pose hook: the core three's clips for their states, posed now.
         if step.game_dt > 0.0 {
             self.clips.drive(world, &crew.gang.members, &self.handles, &events, step.game_dt);

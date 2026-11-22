@@ -284,9 +284,11 @@ if let Some(m) = scripts.program().package_module(package, record.script) { scri
   is the game's binary search (midpoint rounded down, first match reached), which finds the second entry for
   class 98, IDs 112 and 113 (scripts.md 5). Custom properties start at 1,233, a fixed threshold in the game
   (`Interpreter::custom_base`): getting or setting an ID from it on uses the object's property store, adding
-  (108) and ensuring (109) always do, and a property never added reads as void. An option is an action when its
-  option-table entry is a typed argument list (flag `0x400`), has value type `0x12`, or has flag `0x1` with
-  arguments (option 1095 of noise templates, value type `0x2093`, flag `0x1`, two arguments, is one).
+  (108) and ensuring (109) always do, and a property never added reads as void. An option is an action exactly
+  when its option-table entry has flag `0x1`, whatever its argument count (scripts.md 5: below the custom
+  properties, bit `0x1` alone means a method; otherwise bit `0x2` is a field and neither a getter). Option 1095 of
+  noise templates (flag `0x1`, two arguments) and the placements' lease call 1177 (flag `0x1`, none) are both
+  actions.
 - **Events.** `EventSignatures::from_executable` reads the 30 signatures (type codes, object included). Event 29
   starts at the end of the 51 type words, so its signature is empty (scripts.md 6). Raising events is as in Sly 1.
 - **Lists.** Both halves of a list cell can now be replaced, so a list can loop back on itself: every walk is

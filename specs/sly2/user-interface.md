@@ -45,8 +45,17 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/shop.cpp (gadget assignment), screenrt.cpp, splayer.cpp (key crossing)
     used_for: names of the cell fields, how a key's placements, released slots and colour pairs are applied [R]
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), class 127's table entry and vtable (0x00112C10, 0x002DABF0: show 0x00211CA8, init 0x00211D08,
+      update 0x00211D38), the screen-busy test 0x002121C8, the button table 0x002A97F8, command 639 (0x00107300,
+      record kind 14), 640 (kind 15), 641 (0x001E0680) and the kind-14 case of the record-done test (2026-11-21)
+    used_for: the job prompt screen and how a sequence waits on a screen (section 2.1) [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9 (prompt screen show and update, screen-busy test, sequence record start)
+    used_for: the fields those routines test (section 2.1) [R]
 reviewed_by: pending
-date: 2026-11-19
+date: 2026-11-21
 ---
 
 # Sly 2 user interface
@@ -135,6 +144,38 @@ The game loads the file the first time the screen is shown [R].
 - Scripts can show and hide a screen, select or reset a label on it, set a label's playback fraction or time, and set
   its ten arguments (options 1133 to 1142, also as script operations: scripts.md 4).
 - Screens are drawn after the 3-D scene, in priority order (option 1123).
+
+### 2.1 The job prompt screen (class 127) and sequences that show screens (added 2026-11-21)
+
+Class 127 has one object per world. In episode 1 it is object 1748: priority 13, argument 1133 = string 670
+"Job Failed!", argument 1135 = string 671 "Press &2X&. to try again." [D]. It is **a single "press to continue"
+prompt, not a yes/no question** [D unless marked]:
+
+- **Show** (`0x00211CA8`) works only when the screen is stopped. It shows the screen, takes control from the player
+  (hands off) and plays sound 0x33A [R for what the sound is].
+- **Update** (`0x00211D38`) runs each frame while the screen is busy. It acts when all three hold: the screen has
+  been idle (state 2) for **more than 0.5 s**; no other blocking screen is up (two checks, `0x001D9880`); and any
+  **face button** is pressed (mask `0xF0`: Cross, Circle, Triangle, Square; button table `0x002A97F8`). Then:
+  1. control goes back to the player;
+  2. if the screen's flag +0x114 is 0 and a job is current, a counter is increased and the **current job is
+     restarted** (`0x00162DF8`) [D for the call, R for "restart"];
+  3. the screen hides itself.
+
+  There is no second answer: every face button does the same.
+- **Command 639** (show a screen; handler `0x00107300`, record kind 14) shows the screen, with its second argument
+  as the label (−1: the default show). With the no-wait flag 0 the run **waits until the screen is no longer busy**.
+  The kind-14 done test is the screen-busy test `0x002121C8`: it passes when the screen's state (+0x58) and +0x64
+  are both below 2. For class 127 that means the wait ends when the player presses a face button.
+  - Command 640 (kind 15) hides a screen.
+  - Command 641 (`0x001E0680`) sets the game clock speed.
+- **Sequence 1751** (row 2) runs: 639 1748 (waited), then 634 −1, 641 0 (clock speed 0) and a 10 s wait. The m1
+  jobs' event-17 handlers start it on task event 26 from a door ([missions.md](missions.md) 4.3).
+  - Strings 3241–3243 are the abandon texts: 3241 "Job Abandoned!", 3242 "Using a door marked with &2w&. will
+    automatically abandon your current job…", 3243 "Press &2X&. to continue.".
+  - Because of the restart in step 2, the commands after the 639 matter only if the prompt is dismissed without a
+    restart [I].
+- Before failing a job (script ID 1067), a job sets the reason shown on 1748 through its option 986. For example
+  string 826, "In this training job, you must avoid being seen by the flashlight guards!" [D].
 
 ## 3. Drawing
 

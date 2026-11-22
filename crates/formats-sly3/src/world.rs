@@ -424,10 +424,11 @@ impl<'a> World<'a> {
             for o in list.options.iter().filter(|o| o.id == SET_EXTRA_CONDITION) {
                 let (at, len) = (o.value.0 as usize, o.value.1 as usize);
                 let bytes = &self.data[at..at + len];
-                match typed_ints(bytes) {
-                    Some(v) => extra.extend(v),
-                    None if len == 4 => extra.push(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
-                    None => {}
+                // A plain 4-byte condition (v_ext's sets: 14 and 17 for set 22); a longer value as a typed list.
+                if len == 4 {
+                    extra.push(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                } else if let Some(v) = typed_ints(bytes) {
+                    extra.extend(v);
                 }
             }
         }

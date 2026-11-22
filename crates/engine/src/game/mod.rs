@@ -249,6 +249,17 @@ impl Game {
         &mut self.rng
     }
 
+    /// Sly 3 hook (sly3/scripts.md 7.1): raises `event` on `h` at once and returns its handler's value (a command
+    /// script's condition that asks its module). `None` without a handler.
+    pub fn raise_now(&mut self, h: crate::object::Handle, event: u32, args: &[script::Value]) -> Option<script::Value> {
+        let interp = self.scripts.as_mut()?;
+        let mut host = Self::host(&mut self.world, &mut self.rng, self.clock.game_time, self.systems.physics.queries());
+        let r = interp.raise_event(&mut host, h.to_script(), event, args);
+        self.counters.script_errors += host.errors;
+        merge_kinds(&mut self.script_error_kinds, host.kinds);
+        r
+    }
+
     /// Dispatches the queued script events (scripts.md 6).
     pub fn flush_events(&mut self) {
         let Some(interp) = self.scripts.as_mut() else {

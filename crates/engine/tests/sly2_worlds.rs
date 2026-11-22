@@ -237,14 +237,24 @@ fn every_world_loads_with_the_formats_counts() {
         // Identity across reloads: persist keys are unique.
         let keys: BTreeSet<u64> = w.handles().map(|h| w.persist_key(h).unwrap()).collect();
         assert_eq!(keys.len(), w.len(), "row {row}: persist keys");
-        // Modules are the scripts' package modules.
+        // Modules are the scripts' package modules, except the copy roots a placement's patch binds to one of its
+        // own package's modules (missions.md 4.3).
         let program = Program::from_sly2_world(&fw).unwrap();
+        let mut bound = 0;
         for h in w.handles() {
             let r = w.sly2_record(h).unwrap();
             let pkg = l.record_package(w.record(h).unwrap()).unwrap();
             let want = program.package_module(pkg, r.script).map_or(-1, |m| m as i16);
-            assert_eq!(w.module(h), want, "row {row}: module");
+            if w.module(h) != want {
+                // Only a copy root (its parent a placement) is bound; one with a module of its own keeps that as
+                // its outer module.
+                let root_of_placement = w.parent(h).and_then(|p| w.class(p)).is_some_and(|c| c == 6 || c == 7);
+                assert!(root_of_placement, "row {row}: module of a non-root");
+                assert!(want < 0 || w.outer_module(h) == Some(want), "row {row}: outer module");
+                bound += 1;
+            }
         }
+        assert_eq!(bound, l.stats.patch_modules, "row {row}: modules bound by patches");
         let mut t = totals.lock().unwrap();
         t.0 += w.len();
         t.1 += l.stats.unresolved_placements;

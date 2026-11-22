@@ -89,6 +89,8 @@ struct Frame<'e> {
     owner: Affine,
     enclosing: &'e [Affine],
     depth: u32,
+    /// The class of the record this one is nested in (−1 at a group's top).
+    parent_class: i16,
 }
 
 impl Expect<'_> {
@@ -99,7 +101,7 @@ impl Expect<'_> {
 
     fn group(&mut self, group: usize, root: Affine, depth: u32) -> usize {
         let copy = self.copy();
-        let f = Frame { group, copy, parent: root, root, owner: root, enclosing: &[], depth };
+        let f = Frame { group, copy, parent: root, root, owner: root, enclosing: &[], depth, parent_class: -1 };
         let w = self.world;
         for r in &w.bodies[group].objects {
             self.record(r, f);
@@ -142,13 +144,21 @@ impl Expect<'_> {
                 let m = own.first().copied().unwrap_or(f.parent);
                 self.objects.push((r.class, r.id, m));
                 for c in &s.children {
-                    self.record(c, Frame { parent: m, enclosing: &own, ..f });
+                    self.record(c, Frame { parent: m, enclosing: &own, parent_class: r.class, ..f });
                 }
             }
             Body::Placement(p) => {
                 let m = Self::at(&f, p.parent).mul(&p.matrix);
                 self.objects.push((r.class, r.id, m));
                 if p.mode == 2 {
+                    // A core crew member's spawner gets one pooled copy of its group (the loader's Sly 3 hook,
+                    // gadgets.md 3).
+                    if matches!(f.parent_class, 52..=54)
+                        && let Some(g) = self.world.group_by_id(p.group_id)
+                        && f.depth < 8
+                    {
+                        self.group(g, m, f.depth + 1);
+                    }
                     return;
                 }
                 let copy = match self.world.group_by_id(p.group_id) {
@@ -156,7 +166,16 @@ impl Expect<'_> {
                     _ => self.copy(),
                 };
                 if !p.fresh {
-                    let extra = Frame { copy, parent: m, root: m, owner: m, enclosing: &[], depth: f.depth + 1, ..f };
+                    let extra = Frame {
+                        copy,
+                        parent: m,
+                        root: m,
+                        owner: m,
+                        enclosing: &[],
+                        depth: f.depth + 1,
+                        parent_class: r.class,
+                        ..f
+                    };
                     for c in &p.objects {
                         self.record(c, extra);
                     }
@@ -167,8 +186,8 @@ impl Expect<'_> {
                 self.objects.push((r.class, r.id, m));
                 let one = [m];
                 let child = match header {
-                    Some(_) => Frame { parent: m, owner: m, enclosing: &one, ..f },
-                    None => Frame { parent: m, ..f },
+                    Some(_) => Frame { parent: m, owner: m, enclosing: &one, parent_class: r.class, ..f },
+                    None => Frame { parent: m, parent_class: r.class, ..f },
                 };
                 for c in r.nested() {
                     self.record(c, child);

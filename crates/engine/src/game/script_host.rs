@@ -301,6 +301,16 @@ impl WorldHost<'_> {
 }
 
 impl ScriptHost for WorldHost<'_> {
+    fn fallback_class(&self, object: ObjectId) -> Option<i16> {
+        // Sly 2 hook: a placement's copy root (what a search for the placement's ID finds, scripts.md 5) also takes
+        // the placement's lease methods (classes/placement.md 2.1).
+        let h = self.obj(object)?;
+        self.world.sly2.as_ref()?;
+        let p =
+            self.world.parent(h).filter(|&p| self.world.class(p).is_some_and(|c| crate::world::sly2::is_a(c, 6)))?;
+        (self.world.sly2_id(p) == self.world.sly2_id(h)).then_some(6)
+    }
+
     fn class_of(&self, object: ObjectId) -> Option<i16> {
         if !self.world.sly1_meanings() {
             return self.sly2_class_of(object); // Sly 2 and Sly 3 hook

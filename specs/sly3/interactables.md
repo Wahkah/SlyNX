@@ -274,6 +274,117 @@ State −1 in a request means "make current", as in Sly 2 [R]. So use point 1382
 `t1_recon_go_to_key` to become current** when Sly uses the point. That task's 1405 then marks it done at once
 (missions.md 4). Disc values include (2405, 4), (2111, −1) and (2105, −1).
 
+## 5a. Photo targets (class 43)
+
+Class 43 is Sly 2's **photo target** (Sly 2 class 46, `cid 0x2E`). Its record layout and defaults match Sly 2's
+field for field, so the picture-taking rules are Sly 2's (reference photo helper) [X for the options and
+defaults; R for the behaviour]. 13 bodies on the disc, in the groups `v_ext_follow`, `i_trainer_spycam` and
+`c_ext_get_job` [D].
+
+**Options** (load-time setup `0x0024D4B8` / `0x0024D4F8`) [X]:
+
+| Option | Sly 2 | Field | Default | Meaning |
+|---:|---:|---|---|---|
+| 1302 | 1195 | +0xD0 | 75 | **radius**: the view test, a sphere of this radius that must be inside the camera's planes |
+| 1303 | 1196 | +0xD4 | 0, which means the radius | **size**: the world length that must fill the frame |
+| 1304 | 1197 | +0xD8 | 0.25 | **tolerance** of the size match |
+| 1308 | 1201 | +0xDC | — | the **task** that a good picture requests state 2 on |
+| 1305 | 1198 | +0xE4 | −1 | the target's title (a string ID, shown when the picture is taken) |
+| 1306 | 1199 | +0xE8 | −2, which means the title | the title shown in the target list; −1 means not listed |
+| 1307 | 1200 | +0xEC | −1 | a dialogue line played when the picture is accepted |
+| 1309 | — | +0xF0 | — | a linked object (class 120) |
+| 1310 | — | +0xF4 | 5,000 | its radius |
+| 1311 | 1204 | method `0x0024D6B0` | | "picture taken" query |
+| 1312 | — | +0xFC | 0 | "not yet": when set, a good picture only shows a message |
+| 1313 | 1206 | +0x100 | −1 | the message shown in that case |
+
+Target 140741 (v_ext): radius 500, size 300, tolerance 0.3, not listed, task 2241 [D].
+
+**Targets added by their task's module** [D] [X]. Target 139578 (task 2245 `t1_follow_take_picture2`) carries
+option 27, so it is removed at the start. It is brought in by **2245's own module** (v_macro module 63 in v_ext):
+
+```
+(define s22 (lambda (s1240) (set s3893 (op118 139578 obj0)) ((op117 s3893 41))))
+(define s23 (lambda (s1240) ((op117 s3893 42))))
+(define s24 (lambda (s1240) (case (op117 s1240 525) ((2) ((op117 (op118 2233 obj0) 583))))))
+```
+
+- Script ID 41 is stream option 26: script method `0x00100A88` → vtable slot 8, **add to the world**.
+- Script ID 42 is stream option 27's script method `0x00100B80` → vtable slot 9, **remove from the world**.
+- Event 22 is raised when the task **becomes current** (section 4 of missions.md); event 23 when it **stops being
+  current**.
+- So 139578 is in the world exactly while 2245 is the current task, and at state 2 script 2233 is stopped. No
+  1416 switch, command or linked object is involved.
+
+**Sly 3 photo constants** [X: the pick routine `0x0024C478` and the update `0x0024CCB0`, which are Sly 2's
+`0x00202540` / `0x00202D38` in the reference's function map]:
+
+- **Minimum distance:** the starting minimum is the float at `0x00327170`, which is the largest float. So there
+  is **no distance limit**: the nearest eligible, unblocked target wins.
+- The eye point is raised by 20, as in Sly 2.
+- **Screen mapping:** x × 320 + 320 and y × −240 + 240, so Sly 3's canvas is **640 × 480**. Sly 2 used 246.4.
+- **Centring:** 128 and 1/128, unchanged.
+- **Size divisor:** 1/120 (0.008333), unchanged.
+- The hint timeout of 5 s is unchanged.
+- The horizontal field of view comes from the camera's view planes (camera.md), not from a photo constant.
+
+**Taking a picture** [R, Sly 2's helper; constants as above]:
+
+- **The camera.** It is the character's binocucom photo mode.
+  - Script command **`0x46` opens the binocucom** on a character with a scripted view (handler `0x002284D4`). It
+    takes an object of class 50, a point looked up by OID, vectors and floats, then calls `0x001BDA88`, the
+    reference's OpenBinoc, on a class-51 character with flag 1.
+  - Command `0x6E` closes the binocucom of the run's character (`0x001BDB50`, CloseBinoc).
+  - Command `0x47` takes no arguments (`0x0022B7F0`).
+  - In free play the binocucom opens with **R3** (Sly 2's rule [R]), on the character the player controls.
+  - Script 2238 uses `0x46` with (24, 25, …, 139568, 139555, −1): the binocucom view on character 24 (Sly) looking
+    at the lion 139555. It collects up to 16 class-43 targets, and lists up to 5 by their list
+  titles.
+- **Eligible target:** in the world, its linked object (1309) not in the world, and its task (1308) **available
+  (state 1)**.
+- **Picking the target.** Of the eligible targets inside the camera's view planes (sphere = radius) and within
+  draw distance, the one with the smallest **horizontal camera-to-target distance** is chosen, provided it is not
+  blocked: four rays test the line of sight. There is **no distance limit**. The search starts from the largest
+  float, in both games: Sly 2's `0x002A8550` = `0x7F7FFFFF`, Sly 3's `0x00327170` = `0x7F7FFFFF` [X].
+- **Framing.** On Sly 3's 640 × 480 screen (Sly 2: 640 × 492.8), with the reticle at the screen's centre:
+  - **centring** = clamp(1 − (d − 128) / 128, 0, 1), where d is the target's screen distance from the reticle.
+    Full centring means within 128 units;
+  - **size** = the screen length of (target, target + camera up × size) ÷ 120. Above 1 it is folded to 2 − size,
+    so too close also counts as too small.
+  - The picture is good when centring = 1 and size ≥ 1 − tolerance. With 140741's 0.3, the target's 300 units
+    must span **84 to 156 screen units** (0.7 to 1.3 of 120).
+- **Prompt states:**
+  - 2: no target;
+  - 4: target, not centred;
+  - 5 / 6: centred, too small or too big;
+  - 7: ready;
+  - 8: shutter;
+  - 9: accepted;
+  - 0 / 1 / 10: open and close.
+- **The shutter.** The photo action button (mask 0xA, or 0xFA in state 7) enters state 8. State 8 freezes the
+  game clock (clock factor 0) while the flash plays. Then the result is judged: good and not "not yet" → 9;
+  otherwise a hint message (per case, from the prompt screen's +0x110 to +0x120 strings) and back to the matching
+  state.
+- **A good picture → the task.** Leaving state 9:
+  - the dialogue (1307) plays and the title overlay shows;
+  - **task 1308 gets a checked request for state 2** (Sly 2's `0x002036E8`), with the target as the requester;
+  - task event 10 is broadcast.
+
+  When no listed target is still pending, the binocucom closes by itself.
+- For 2241: when it becomes current its event 22 starts script 2233 and the 50 s timer. The picture of 140741
+  requests 2241 → 2 (1 → 2 is allowed). Its event 24 at state 2 stops 2233.
+
+**Task options 1416 and 1417** ([missions.md](missions.md) 3) [D for the layouts; R for the use]:
+
+- **1416, object switch** (Sly 2 1287 plus a fifth value, always 0): (object, list of task states, owner (−1
+  none), world (−1 any), 0). On every state change of the task, the object is added to the world when the new
+  state is in the list and removed otherwise. For example, 2241's entries bring in target 140741 and objects
+  139571, 139572 and 139574 for the states they list.
+- **1417, state-machine goal** (Sly 2 1288 plus a seventh value, always 0): (task state, object, state machine,
+  goal state, instant flag, world, 0). When the task enters that state, the state machine on the object is driven
+  to the goal (snapped while restoring). For example, 2116's four entries set state machine 4935 on 137605 to
+  13758 in states 0 and 1, and to 13759 in states 2 and 3.
+
 ## 6. Other classes
 
 **Trigger shapes (class 21)**, 348 top-level and 184 nested bodies. Options (after the 54-byte header) [D], with value
@@ -283,7 +394,7 @@ types [X]. The correspondence to Sly 2's trigger-volume options 432 to 443 (Sly 
 | Option | Kind [X] | Bodies | Values [D] | Sly 2 | Meaning |
 |---:|---|---:|---|---:|---|
 | 27 | method, no arguments | 79 | — | 26 | removed at start |
-| 478 | bool at +0x244 | 22 | 1 | 443 [R] | tracking: keep the ordered set of members inside |
+| 478 | bool at +0x244 | 22 | 1 | 443 [R] | tracking: keep the ordered set of members inside (+0x23C count, +0x240 array). With it set, the trigger raises **script event 9** whenever the set changes, either way, and once more with an empty set when it leaves the world. Script ID 586 (stream option 479) reads the set [X: `0x0015D510`, `0x0015CD50`, `0x0015D6A0`] |
 | 480 | method, one argument (repeats) | 136 | object IDs: 24 (Sly) ×45, others | 432 | an object that counts |
 | 483 | method, one argument (repeats) | 144 | class IDs: 52 (Sly) ×49, 58 (guards) ×32, 60 ×13, 53 ×13 | 433 | a class that counts |
 | 486 | float | 7 | 0, 1.0, 15.0 | 434 | hold time [I] |

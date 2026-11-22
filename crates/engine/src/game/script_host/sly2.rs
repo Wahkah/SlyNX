@@ -221,6 +221,20 @@ impl WorldHost<'_> {
             // the option as it is.
             return Ok(());
         }
+        // Sly 3 hook (missions.md 4.1a): a module writing its runner's context (script ID 741 on a command script).
+        if self.world.sly3.is_some()
+            && option == super::sly3::RUNNER_CONTEXT
+            && let Some(h) = self.obj(object)
+            && self.world.class(h) == Some(135)
+            && let Some(script) = self.world.sly3_id(h)
+        {
+            let with = match value {
+                Value::Object(Some(o)) => self.obj(*o).and_then(|o| self.world.sly3_id(o)).unwrap_or(-1),
+                _ => -1,
+            };
+            self.world.shared.sly3_context_writes.push((script, with));
+            return Ok(());
+        }
         let v = self.sly2_to_option(self.entry(option), value).ok_or(ScriptError::Host(option as u32))?;
         if object == WORLD_SCRIPT_ID {
             self.world.world_options.set(option, v);
@@ -383,6 +397,112 @@ impl WorldHost<'_> {
             }
             return Some(Value::Void);
         }
+        // Object-model hook: a placement's lease of its shared package's copy (classes/placement.md 2.1): 1019
+        // (1175) leases one, 1021 (1177) gives the lease (taken first if none). The world holds one copy per placement,
+        // so the lease is that copy's root. Taking it puts the copy in the world, which the placement's own option 26
+        // does not hold back, and raises script event 14 on the placement and the copy; the placement's blocks and
+        // matrix were applied to the copy at load. Simplifications (the pool is not modelled): 1017 (1174, can one be
+        // leased) answers whether the placement has a copy, ignoring the lease state; 1019 always gives that one
+        // root; 1023 / 1024 (1179 / 1180, lock and unlock the lease) are stand-ins that do nothing. 1020 (the current
+        // lease, 1176) is a getter, not a method, and is not answered here.
+        // A search for the placement's ID finds the copy's root (scripts.md 5), so the call can arrive there.
+        let is_placement = |h: Handle| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 6));
+        let placement = self.obj(object).and_then(|h| {
+            if is_placement(h) {
+                Some(h)
+            } else {
+                self.world.parent(h).filter(|&p| is_placement(p) && self.world.sly2_id(p) == self.world.sly2_id(h))
+            }
+        });
+        if (LEASE_CAN..=LEASE_UNLOCK).contains(&option)
+            && let Some(h) = placement
+        {
+            let root = self.world.children(h).next();
+            let take = option == LEASE_TAKE || option == LEASE_OF && !self.world.shared.leased.contains(&h.index());
+            if take && let Some(r) = root {
+                self.world.shared.leased.insert(h.index());
+                self.world.set_in_world(h, true);
+                self.world.set_in_world(r, true);
+                self.world.raise(h, LEASE_EVENT, Vec::new());
+                self.world.raise(r, LEASE_EVENT, Vec::new());
+            }
+            return Some(match option {
+                LEASE_CAN => Value::Bool(root.is_some()),
+                LEASE_LOCK | LEASE_UNLOCK => Value::Void,
+                _ => Value::Object(root.map(Handle::to_script)),
+            });
+        }
+        // Object-model hook: script ID 235 (option 1071) on an interaction spot (class 35) runs its "used by" routine
+        // with the character given (dialogue-and-voice.md 2.1; row 0: 1674 has Sly use 80398, whose sequence 1675,
+        // set by 150360's copy patch, signals 1674).
+        if option == SPOT_USE
+            && let Some(h) =
+                self.obj(object).filter(|&h| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 35)))
+        {
+            let user = match args.first() {
+                Some(Value::Object(Some(o))) => self.obj(*o),
+                _ => None,
+            };
+            crate::behavior::sly2_commands::use_spot(self.world, h, user);
+            return Some(Value::Void);
+        }
+        // Object-model hook: a guard or character (class 56 and derived) told to run a command list (script ID 441,
+        // stream option 317; missions.md 4.3: Dimitri's lists), and a volume (class 22 and derived) asked whether a
+        // position is inside it (script ID 108, stream option 366).
+        if option == RUN_LIST
+            && let Some(h) =
+                self.obj(object).filter(|&h| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 56)))
+        {
+            if let Some(Value::Object(Some(l))) = args.first()
+                && let Some(list) = self.obj(*l)
+            {
+                crate::behavior::sly2_commands::run_commands(self.world, h, list);
+            }
+            return Some(Value::Void);
+        }
+        if option == VOLUME_HOLDS
+            && let Some(h) =
+                self.obj(object).filter(|&h| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 22)))
+        {
+            let p = match args.first() {
+                Some(Value::Vector(v)) => Some(*v),
+                _ => None,
+            };
+            let inside = p
+                .zip(crate::behavior::sly2_props::volume_box(self.world, h))
+                .is_some_and(|(p, b)| crate::behavior::sly2_props::in_volume(&b, p));
+            return Some(Value::Bool(inside));
+        }
+        // Object-model hook: a sequence's signal set (dialogue-and-voice.md 2.1): script ID 640 (617) sends a value,
+        // 641 (618) takes it away (the volumes' leave handlers [I]) and 642 (619) asks whether it is there.
+        if (SIGNAL_SEND..=SIGNAL_HAS).contains(&option)
+            && let Some(h) = self.obj(object).filter(|&h| self.world.class(h) == Some(114))
+            && let Some(v) = args.first().and_then(|a| a.as_i32())
+            && let Some(s) = self.world.slot(h)
+        {
+            let shared = &mut self.world.shared;
+            return Some(match option {
+                SIGNAL_SEND => {
+                    shared.send_signal(s, v);
+                    Value::Void
+                }
+                SIGNAL_REMOVE => {
+                    shared.take_signal(s, v, true);
+                    Value::Void
+                }
+                _ => Value::Bool(shared.sequence_signals.get(&s).is_some_and(|set| set.contains(&v))),
+            });
+        }
+        // Object-model hook: script ID 3 (stream option 2 on every class) is the class test "is-a"
+        // (object-stream.md 3.1): `((op111 x 3) 26)` asks whether x is a door. No object is of no class.
+        if option == 2
+            && let [arg] = args
+            && let Some(want) = arg.as_i32()
+        {
+            let class = self.obj(object).and_then(|h| self.world.class(h));
+            let is = class.is_some_and(|c| crate::world::sly2::is_a(c, want));
+            return Some(Value::Bool(is));
+        }
         let job_method = [opt::FAILURE, opt::RESTART, opt::END_JOB, opt::RESET_COUNTS].contains(&option);
         let task_method = [opt::REQUEST, opt::FORCE, opt::SIGNAL, opt::MAKE_CURRENT].contains(&option)
             || (opt::FORCE_LOCKED..=opt::FORCE_CLOSED).contains(&option);
@@ -526,12 +646,36 @@ impl WorldHost<'_> {
         // Object-model hook: option 1286 (script ID 342) also reads the task's state (level-flow.md 4.1: the episode
         // macros' intro handlers test it).
         let option = if option == TASK_STATE_342 { opt::STATE } else { option };
+        let h = self.obj(object)?;
+        let jobs = self.world.sly2.as_deref()?.jobs.as_deref()?;
+        let id = self.world.sly2_id(h)?;
+        // Object-model hook: the read-only job and task options of missions.md 3.1: task 1268 (done) and 1269
+        // (current), job 1251 (last task done) and 1252 (current). The arrival point of a job world asks 1252 to make
+        // its first task current (397 in the nightclub cellar).
+        let done = |t: usize| jobs.states[t] >= crate::game::sly2_jobs::state::DONE;
+        // A door's option 789 (script ID 771) is a getter: its destination's level-table row (missions.md 4.3).
+        if option == DOOR_ROW && self.world.class(h) == Some(crate::game::sly2_jobs::flow::EXIT_CLASS) {
+            let row = jobs.exits.iter().find(|e| e.handle == h).and_then(|e| e.row);
+            return Some(Value::Int(row.map_or(-1, i32::from)));
+        }
+        match option {
+            JOB_LAST_DONE | JOB_CURRENT => {
+                let j = *jobs.graph.job_ids.get(&id)?;
+                return Some(Value::Bool(match option {
+                    JOB_CURRENT => jobs.job == Some(j),
+                    _ => jobs.graph.jobs[j].last.is_some_and(done),
+                }));
+            }
+            TASK_DONE | TASK_CURRENT => {
+                let t = *jobs.graph.task_ids.get(&id)?;
+                return Some(Value::Bool(if option == TASK_CURRENT { jobs.current == Some(t) } else { done(t) }));
+            }
+            _ => {}
+        }
         if option != opt::STATE && option != opt::PLAYED {
             return None;
         }
-        let h = self.obj(object)?;
-        let jobs = self.world.sly2.as_deref()?.jobs.as_deref()?;
-        let t = *jobs.graph.task_ids.get(&self.world.sly2_id(h)?)?;
+        let t = *jobs.graph.task_ids.get(&id)?;
         Some(Value::Int(match option {
             opt::STATE => jobs.states[t] as i32,
             _ => jobs.graph.tasks[t]
@@ -614,7 +758,7 @@ impl WorldHost<'_> {
                         shop::set_owned(&mut j.progress, id, on);
                     }
                     if on {
-                        l.task_events.push(ITEM_OWNED_EVENT);
+                        l.task_events.push((ITEM_OWNED_EVENT, None));
                     }
                 }
                 Value::Void
@@ -626,6 +770,37 @@ impl WorldHost<'_> {
 
 /// Object-model hook: option 1286 (script ID 342), a task's state as level-flow.md 4.1 reads it.
 const TASK_STATE_342: u16 = 1286;
+/// A placement's lease methods (script IDs 1017 to 1024).
+const LEASE_CAN: u16 = 1174;
+/// See [`LEASE_CAN`].
+const LEASE_TAKE: u16 = 1175;
+/// See [`LEASE_CAN`].
+const LEASE_OF: u16 = 1177;
+/// The script event a lease raises on the placement and the copy.
+const LEASE_EVENT: u32 = 14;
+/// See [`LEASE_CAN`].
+const LEASE_LOCK: u16 = 1179;
+/// See [`LEASE_CAN`].
+const LEASE_UNLOCK: u16 = 1180;
+/// A character's "run this command list" (script ID 441).
+const RUN_LIST: u16 = 317;
+/// A volume's "is this position inside" (script ID 108).
+const VOLUME_HOLDS: u16 = 366;
+/// An interaction spot's "used by" (script ID 235).
+const SPOT_USE: u16 = 1071;
+/// A sequence's signal options (dialogue-and-voice.md 2.1): send, remove, test.
+const SIGNAL_SEND: u16 = 617;
+/// See [`SIGNAL_SEND`].
+const SIGNAL_REMOVE: u16 = 618;
+/// See [`SIGNAL_SEND`].
+const SIGNAL_HAS: u16 = 619;
+/// A door's destination row (missions.md 4.3).
+const DOOR_ROW: u16 = 789;
+/// Read-only job and task options (missions.md 3.1).
+const TASK_DONE: u16 = 1268;
+const TASK_CURRENT: u16 = 1269;
+const JOB_LAST_DONE: u16 = 1251;
+const JOB_CURRENT: u16 = 1252;
 
 #[cfg(test)]
 mod tests {

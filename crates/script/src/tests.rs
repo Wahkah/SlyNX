@@ -1408,7 +1408,7 @@ fn sly2_custom_properties_and_actions() {
     let mut table = formats_sly2::exe::OptionTable {
         entries: vec![formats_sly2::exe::OptionEntry { value_type: 0, flags: 0, arg_count: 0 }; 1000],
     };
-    table.entries[974].flags = 0x400; // a typed argument list: an action
+    table.entries[974].flags = 0x401; // flag 0x1: an action (scripts.md 5), here also a typed argument list
     it.set_sly2_tables(None, &table);
     assert_eq!(it.custom_base(), 1233);
     let mut h = Mock { class: 2, ..Default::default() };

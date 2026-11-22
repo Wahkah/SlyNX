@@ -28,6 +28,7 @@ use engine::game::camera::FreeCamera;
 use engine::game::progress::Progress;
 use engine::game::systems::{FrameInput, Systems};
 use engine::game::{Game, GameConfig};
+use engine::gang::sly3::Member;
 use engine::world::sly3::Sly3Options;
 use engine::world::{World, WorldInfo};
 use formats::iso::ReadAt;
@@ -43,9 +44,11 @@ pub mod crew;
 pub mod flow;
 pub mod front; // Sly 3 hook: the title, the save slots, the episode menu and the movies.
 pub mod grid; // Sly 3 hook: the gadget assignment screen.
+pub mod guards; // Sly 3 hook: guard command lists (0x62).
 pub mod jobs;
 pub mod layer; // Sly 3 hook: the 2D layer (fonts, HUD, pause menu, job screens; `ui::sly2`).
 pub mod lock; // Sly 3 hook: the cell lock minigame (class 79).
+pub mod photo; // Sly 3 hook: the binocucom's photo mode and photo targets (class 43).
 pub mod safehouse;
 pub mod waypoints;
 
@@ -96,6 +99,78 @@ enum SessionAction {
     TakeOut(engine::gang::sly3::Member),
     /// A script holds (true) or releases the pad (`0x1F`).
     Pause(i32, bool),
+    /// `0x46` / `0x6E`: the binocucom opens (looking at the object, −1 none) or closes.
+    Binocucom(bool, i32),
+    /// `0x62`: a guard gets a command list.
+    GuardList(i32, i32),
+    /// Control handed to the safe house (method 983 on safe house 15065, characters.md 6).
+    SafeHouse,
+    /// `0x60` / `0x61`: a hint shown (string, seconds) or cleared.
+    Hint(Option<(i32, f32)>),
+}
+
+/// Bentley's bomb stand-in (see the session's update): the first press plants, the second sets it off.
+fn bomb_press(bomb: &mut Option<engine::object::Handle>, world: &mut World) {
+    use engine::gang::sly3::gadget_class;
+    match bomb.take() {
+        None => {
+            // Bentley's pooled bomb (the copy his spawner 623 holds; `world::sly3::load`).
+            let (Some(b), Some(at)) = (
+                world.handles().find(|&h| world.class(h) == Some(gadget_class::BOMB)),
+                world.player.and_then(|p| world.position(p)),
+            ) else {
+                return;
+            };
+            world.set_world_transform(b, formats::geometry::Affine { t: at, ..formats::geometry::Affine::IDENTITY });
+            world.set_in_world(b, true);
+            *bomb = Some(b);
+        }
+        Some(b) => {
+            let radius = engine::gang::gadgets::blast_of(7).map_or(300.0, |s| s.radius as f32);
+            let Some(at) = world.position(b) else { return };
+            let hit: Vec<engine::object::Handle> = world
+                .handles()
+                .filter(|&h| h != b && world.module(h) >= 0 && world.in_world(h))
+                .filter(|&h| world.class(h).is_some_and(|c| !matches!(c, 135 | 169 | 168)))
+                .filter(|&h| {
+                    world.position(h).is_some_and(|p| {
+                        let d = [p[0] - at[0], p[1] - at[1], p[2] - at[2]];
+                        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
+                    })
+                })
+                .collect();
+            // The last blast's hit records are freed first, so they do not pile up.
+            world.sly3_free_hit_records();
+            for h in hit {
+                if let Some(record) = world.sly3_hit_record(h, b) {
+                    world.raise(h, 12, alloc::vec![script::Value::Object(Some(record.to_script()))]);
+                }
+            }
+            world.set_in_world(b, false);
+        }
+    }
+}
+
+/// Player 0's control handed to object `h` (command 0x13, the world object's method 983; characters.md 6): a crew
+/// member is switched to, the safe house (class 69) is entered, anything else is driven (and brought into the world
+/// with what holds it).
+fn control_to(world: &mut World, h: engine::object::Handle) -> Option<SessionAction> {
+    match world.class(h) {
+        Some(safehouse::SAFEHOUSE_CLASS) => return Some(SessionAction::SafeHouse),
+        c => {
+            if let Some(m) = c.and_then(engine::gang::sly3::Member::from_class).filter(|m| m.core().is_some()) {
+                return Some(SessionAction::TakeOut(m));
+            }
+        }
+    }
+    let chain: Vec<_> = core::iter::successors(Some(h), |&q| world.parent(q)).collect();
+    for q in chain {
+        if !world.in_world(q) {
+            world.set_in_world(q, true);
+        }
+    }
+    world.shared.driving = Some(h);
+    None
 }
 
 /// Carries out one script request (commands.rs) on the world, the job system, the level flow and the player.
@@ -109,15 +184,38 @@ fn apply_request(
     waypoints: &[waypoints::Waypoint],
 ) -> Option<SessionAction> {
     use commands::Request;
-    use engine::gang::sly3::Member;
     match r {
         Request::Place { target, at } => {
             let to = world.find_sly3_id(at, None).and_then(|h| world.world_transform(h))?;
             let h = world.find_sly3_id(target, None)?;
             if world.player == Some(h) {
                 player.place(world, to);
+            } else if world.class(h).and_then(Member::from_class).is_some() {
+                // Another crew member: the crew moves it (it writes the members' objects every frame).
+                world.shared.sly3_crew_moves.push((h, Some(to.t), None));
             } else {
                 world.set_world_transform(h, to);
+            }
+        }
+        // A placement's run-time instance (missions.md 4.1a). Stand-in: one per placement, the copy the load made
+        // (out of the world until taken), brought into the world at the placement and taken out when released. Flags
+        // 1 (the current instance) and 2 (locked) change nothing here.
+        Request::Instance { placement, take } => {
+            let h = world
+                .slots_with_sly3_id(placement)
+                .iter()
+                .filter_map(|&k| world.handle(k))
+                .find(|&h| world.class(h) == Some(formats_sly3::stream::PLACEMENT))?;
+            world.set_in_world(h, take);
+        }
+        Request::Face { target, at } => {
+            let (Some(h), Some(to)) = (world.find_sly3_id(target, None), world.find_sly3_id(at, None)) else {
+                return None;
+            };
+            if world.class(h).and_then(Member::from_class).is_some()
+                && let (Some(p), Some(q)) = (world.position(h), world.position(to))
+            {
+                world.shared.sly3_crew_moves.push((h, None, Some(engine::math::atan2(q[1] - p[1], q[0] - p[0]))));
             }
         }
         Request::Control { object, .. } => {
@@ -130,19 +228,7 @@ fn apply_request(
                 .copied()
                 .find(|&h| world.class(h) != Some(formats_sly3::stream::PLACEMENT))
                 .or_else(|| handles.first().and_then(|&p| world.children(p).next()))?;
-            match world.class(h).and_then(Member::from_class) {
-                Some(m) if m.core().is_some() => return Some(SessionAction::TakeOut(m)),
-                _ => {
-                    // Control brings the object (and what holds it) into the world.
-                    let chain: Vec<_> = core::iter::successors(Some(h), |&q| world.parent(q)).collect();
-                    for q in chain {
-                        if !world.in_world(q) {
-                            world.set_in_world(q, true);
-                        }
-                    }
-                    world.shared.driving = Some(h);
-                }
-            }
+            return control_to(world, h);
         }
         Request::Activate { object } => {
             // scripts.md 7.3: by the object's class. Exits fire, points become the checkpoint, a screen fade (138)
@@ -185,11 +271,15 @@ fn apply_request(
             to.t[2] += 300.0;
             player.place(world, to);
         }
-        Request::Module { script, value } => {
-            let h = world.find_sly3_id(script, None)?;
+        Request::Module { script, value, copy } => {
+            let h = copy.or_else(|| world.find_sly3_id(script, None))?;
             world.raise(h, 4, alloc::vec![script::Value::Int(value)]);
         }
+        Request::Hint { string, seconds } => return Some(SessionAction::Hint(Some((string, seconds)))),
+        Request::ClearHint => return Some(SessionAction::Hint(None)),
         Request::Pause { script, on } => return Some(SessionAction::Pause(script, on)),
+        Request::Binocucom { open, look_at, .. } => return Some(SessionAction::Binocucom(open, look_at)),
+        Request::GuardList { guard, list } => return Some(SessionAction::GuardList(guard, list)),
         Request::FireExit { exit, point } => {
             if let Some(f) = flow {
                 f.fire(exit, point);
@@ -282,6 +372,16 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     pub script_paused: bool,
     /// Sly 3 hook (interactables.md 5): the cell lock started by method 1600, while one runs.
     pub lock: Option<lock::Lock>,
+    /// Sly 3 hook (interactables.md 5a): the binocucom's photo mode, while open.
+    pub photo: Option<photo::Photo>,
+    /// Sly 3 hook (guards.md 4a): the guards running command lists.
+    pub guards: Vec<guards::GuardRun>,
+    /// Sly 3 hook (missions.md 4.1a): the hint scripts show (string, seconds left); drawing it is the 2D layer's.
+    pub hint: Option<(i32, f32)>,
+    /// The last dialogue line asked for (line ID), for tests.
+    pub last_line: Option<i32>,
+    /// Sly 3 hook (gadgets.md 3, 7): Bentley's planted bomb (class 114, `bentley_mine`), while one is planted.
+    pub bomb: Option<engine::object::Handle>,
     paused_by: alloc::collections::BTreeSet<i32>,
     /// The world's mission waypoints (class 120) and, by base class, the classes deriving from it.
     pub waypoints: Vec<waypoints::Waypoint>,
@@ -363,6 +463,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             frame_dt: 0.0,
             script_paused: false,
             lock: None,
+            photo: None,
+            guards: Vec::new(),
+            hint: None,
+            last_line: None,
+            bomb: None,
             paused_by: alloc::collections::BTreeSet::new(),
             waypoints: Vec::new(),
             derived: alloc::collections::BTreeMap::new(),
@@ -579,6 +684,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         for w in &self.waypoints {
             self.derived.entry(w.player_class).or_insert_with(|| derived_classes(&disc.classes, w.player_class));
         }
+        // Sly 3 hook (missions.md 4.1a): every class's derived classes, for scripts' "derived from class n".
+        game.world.shared.sly3_derived =
+            (0..256i16).map(|c| (c, derived_classes(&disc.classes, c))).filter(|(_, d)| d.len() > 1).collect();
+        self.bomb = None;
         self.in_safe_house = false;
         self.shop = None;
         // The job system: the progress block goes on from the previous world (with what it carried, unless this
@@ -739,14 +848,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
     /// gets: the d-pad and Cross are the safe house's while in it; a take-out switches to the character next frame.
     fn safe_house_input(&mut self, input: &FrameInput) -> FrameInput {
         let mut out = *input;
-        if let Some(m) = self.take_out.take() {
-            use engine::gang::sly3::Member;
-            let b = match m {
-                Member::Sly => platform_api::Buttons::LEFT.0,
-                Member::Murray => platform_api::Buttons::UP.0,
-                _ => platform_api::Buttons::RIGHT.0,
-            };
-            out.pressed |= b;
+        // The member taken out (or handed control by 0x13) is named for the crew (characters.md 6).
+        if let Some(m) = self.take_out.take()
+            && let Some(g) = self.game.as_mut()
+        {
+            g.world.shared.sly3_switch_to = Some(m);
         }
         if !self.in_safe_house {
             return out;
@@ -812,7 +918,46 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         };
         if let Some(g) = self.game.as_mut() {
             g.world.shared.sly3_holds = holds;
+            // Sly 3 hook (photo mode, interactables.md 5a): R3 opens and closes the binocucom on the controlled
+            // character (Sly 2's rule); while it is open it takes the pad and the crew stands still.
+            if input.pressed & platform_api::Buttons::RSTICK.0 != 0 && self.lock.is_none() {
+                self.photo = match self.photo.take() {
+                    Some(_) => None,
+                    None => photo::Photo::open(&g.world, photo::params(g.render.camera.fov_y)),
+                };
+            }
+            let pad = *input;
+            let idle = FrameInput::default();
+            let input = if self.photo.is_some() { &idle } else { input };
             g.frame(input, measured);
+            // World-start step 3 (missions.md 4.1a), once the frame has run the restore's events: the queued requests
+            // run in mode 1, and the events they raise run while the mode still reads 1, until nothing more is
+            // queued (at most 16 rounds); then the "current when available" pass.
+            if g.world.shared.sly3_restore_mode
+                && let Some(j) = self.jobs.as_mut()
+            {
+                for _ in 0..16 {
+                    jobs::run_queued(j, &mut g.world);
+                    if g.world.events.is_empty() {
+                        break;
+                    }
+                    g.flush_events();
+                    let s = &g.world.shared;
+                    if s.task_calls.is_empty() && s.task_requests.is_empty() {
+                        break;
+                    }
+                }
+                jobs::finish_world_start(j, &mut g.world);
+            }
+            // Stand-in (gadgets.md: the gadget slots' pad path is not traced): as Bentley, L (L1) plants the world's
+            // bomb (class 114, `bentley_mine`) at his feet, and L again sets it off, as the Trigger Bomb does. The blast
+            // (radius 300, gadgets.md 7.1) hits every object with a script within that radius (standing in for the
+            // blast's rays): each gets script event 12 with a hit record (class 196; missions.md 4.1a).
+            if input.pressed & platform_api::Buttons::L.0 != 0
+                && g.world.player.and_then(|p| g.world.class(p)).and_then(Member::from_class) == Some(Member::Bentley)
+            {
+                bomb_press(&mut self.bomb, &mut g.world);
+            }
             // Sly 3 hook (use points): the use button (Circle) uses the nearest active point within reach. Working
             // choice (the candidate search is not traced): nearest horizontally, reach as `UsePoint::user_of` has it.
             if input.pressed & platform_api::Buttons::A.0 != 0
@@ -830,9 +975,13 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     })
                     .collect();
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
-                if let Some(script) = points.into_iter().find_map(|(_, h)| use_point_used(&mut g.world, h)).flatten() {
+                // The point's command script is its copy's (the gauntlet's buttons share one script ID per copy).
+                if let Some((point, script)) =
+                    points.into_iter().find_map(|(_, h)| use_point_used(&mut g.world, h).map(|s| (h, s)))
+                    && let Some(script) = script
+                {
                     let me = g.world.player.and_then(|h| g.world.sly3_id(h)).unwrap_or(-1);
-                    self.scripts.start(&g.world, script, me);
+                    self.scripts.start_in(&g.world, script, me, Some(point));
                 }
             }
             let touched = input.buttons != 0 || input.left != [0.0; 2] || input.right != [0.0; 2];
@@ -853,7 +1002,35 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             }
             if let Some(l) = self.lock.as_mut() {
                 l.update(input, measured, &mut g.world, &mut self.scripts);
+                // Done (5) or given up (0): the lock no longer runs.
+                if matches!(l.state, 0 | 5) {
+                    self.lock = None;
+                }
             }
+            // Sly 3 hook (photo mode): an accepted shot plays the target's line, asks for state 2 on its task (a
+            // checked request) and broadcasts task event 10; the binocucom closes once no listed target is pending.
+            let targets = if self.photo.is_some() { photo::targets(&g.world) } else { Vec::new() };
+            if let Some(p) = self.photo.as_mut()
+                && let Some(shot) = p.update(&pad, measured, &g.world, &targets)
+            {
+                if let Some(line) = shot.line {
+                    lines.push(Some((line, g.world.sly3_id(shot.target).unwrap_or(-1))));
+                }
+                if let Some(task) = shot.task {
+                    g.world.shared.task_requests.push((task, 2));
+                }
+                if let Some(j) = self.jobs.as_mut() {
+                    j.task_event(photo::TASK_EVENT, Some(shot.target));
+                }
+                if !p.listed_pending(&targets) {
+                    self.photo = None;
+                }
+            }
+            // Sly 3 hook (guards.md 4a): the guards' command lists; their alarms are the command scripts'.
+            for r in &mut self.guards {
+                r.update(measured, &mut g.world, &mut self.scripts.alarms);
+            }
+            self.guards.retain(|r| !r.done());
             if let Some(j) = self.jobs.as_mut() {
                 jobs::step(j, &mut g.world, measured, touched);
                 // Vehicles hook: a job's machine is handed to the player while the job runs.
@@ -868,13 +1045,51 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             for (script, with) in core::mem::take(&mut g.world.shared.sly3_script_starts) {
                 self.scripts.start(&g.world, script, with);
             }
+            // And those they stopped (method 749).
+            for script in core::mem::take(&mut g.world.shared.sly3_script_stops) {
+                self.scripts.stop(script);
+            }
+            // Alarms scripts set on command scripts (method 735) and runner contexts modules wrote (script ID 741).
+            for (_, alarm) in core::mem::take(&mut g.world.shared.sly3_alarms) {
+                self.scripts.alarms.insert(alarm);
+            }
+            for (script, with) in core::mem::take(&mut g.world.shared.sly3_context_writes) {
+                if let Some(r) = self.scripts.running.iter_mut().find(|r| r.oid == script) {
+                    r.context = with;
+                }
+            }
+            // A hint's time counts down; a time that is not a finite number clears it now.
+            if let Some((_, t)) = self.hint.as_mut() {
+                *t = if t.is_finite() { (*t - measured).max(0.0) } else { 0.0 };
+                if *t <= 0.0 {
+                    self.hint = None;
+                }
+            }
+            // Each running script's object, for scripts (script ID 740).
+            g.world.shared.sly3_script_objects = self.scripts.running.iter().map(|r| (r.oid, r.object)).collect();
+            // A command script starting gets script event 5 (missions.md 4.1a); the event broadcasts task event 29
+            // with the script (`sly3_event5`).
+            for (_, h) in core::mem::take(&mut self.scripts.started) {
+                g.world.raise(h, 5, Vec::new());
+            }
+            // Control scripts handed over (method 983).
+            for h in core::mem::take(&mut g.world.shared.sly3_control_to) {
+                match control_to(&mut g.world, h) {
+                    Some(SessionAction::TakeOut(m)) => self.take_out = Some(m),
+                    Some(SessionAction::SafeHouse) => self.in_safe_house = self.safe_house.is_some(),
+                    _ => {}
+                }
+            }
             // Scripts, then what they asked.
             let view = commands::View { line_playing: false };
             self.scripts.update(Some(&g.world), &view, measured);
             for r in core::mem::take(&mut self.scripts.requests) {
                 // Sly 3 hook (2D layer): the lines' subtitles.
                 match &r {
-                    commands::Request::PlayLine { line, object, .. } => lines.push(Some((*line, *object))),
+                    commands::Request::PlayLine { line, object, .. } => {
+                        lines.push(Some((*line, *object)));
+                        self.last_line = Some(*line);
+                    }
                     commands::Request::ClearSubtitle => lines.push(None),
                     commands::Request::Screen { screen, on } => screens.push((*screen, *on)),
                     _ => {}
@@ -895,7 +1110,31 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                             self.paused_by.remove(&script);
                         }
                     }
+                    Some(SessionAction::Binocucom(true, look_at)) => {
+                        let fov = g.render.camera.fov_y;
+                        self.photo = photo::Photo::open(&g.world, photo::params(fov));
+                        let at = g.world.find_sly3_id(look_at, None).and_then(|h| g.world.position(h));
+                        if let (Some(p), Some(at)) = (self.photo.as_mut(), at) {
+                            p.look_at(at);
+                        }
+                    }
+                    Some(SessionAction::Binocucom(false, _)) => self.photo = None,
+                    Some(SessionAction::SafeHouse) => self.in_safe_house = self.safe_house.is_some(),
+                    Some(SessionAction::Hint(h)) => self.hint = h,
+                    Some(SessionAction::GuardList(guard, list)) => {
+                        if let Some(run) = guards::GuardRun::new(&g.world, guard, list) {
+                            self.guards.retain(|r| r.guard != run.guard);
+                            self.guards.push(run);
+                        }
+                    }
                     None => {}
+                }
+            }
+            // Conditions that asked a script's module (scripts.md 7.1): answered now, for the runner's next frame.
+            for (oid, copy, value) in core::mem::take(&mut self.scripts.questions) {
+                if let Some(h) = copy.or_else(|| g.world.find_sly3_id(oid, None)) {
+                    let v = g.raise_now(h, 4, &[script::Value::Int(value)]);
+                    self.scripts.answers.insert((oid, value), v.is_some_and(|v| v.is_true()));
                 }
             }
             // A script's pause lasts while it runs.

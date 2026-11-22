@@ -115,7 +115,7 @@ pub struct PlacementBlock {
     pub index: i16,
     /// The block's bytes: (absolute offset, size).
     pub bytes: (u32, u32),
-    /// The option list of a kind-5 block.
+    /// The block's option list (every target; `None` for a block of another target that did not read as one).
     pub options: Option<OptionList>,
 }
 
@@ -564,6 +564,10 @@ impl<'a, 't> Walk<'a, 't> {
                 let index = r.i16()?;
                 let size = r.u16()? as usize;
                 let start = r.pos();
+                // Every block is an option list (classes/placement.md 1.1); the first field is its target object (5
+                // the placement, 6 the copy's root, else an object of the copy). Object-model hook: all are read. A
+                // block for another target that does not read as an option list of exactly its size is skipped
+                // (no options) rather than failing the world; the placement's own block (5) must read.
                 let options = if block_kind == BLOCK_OPTIONS {
                     let o = self.options(r)?;
                     if r.pos() - start != size {
@@ -572,8 +576,10 @@ impl<'a, 't> Walk<'a, 't> {
                     rest.remove_at_start |= o.has(option_ids::REMOVE_AT_START);
                     Some(o)
                 } else {
+                    let read = self.options(r).ok().filter(|_| r.pos() - start == size);
+                    r.set_pos(start);
                     r.skip(size)?;
-                    None
+                    read
                 };
                 rest.blocks.push(PlacementBlock {
                     kind: block_kind,

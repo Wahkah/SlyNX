@@ -59,6 +59,9 @@ mod world_method {
     pub const CONTROLLED: u16 = 986;
     /// Whether player n's control is held.
     pub const HELD: u16 = 1001;
+    /// Hand player 0's control to an object (script ID 983; characters.md 6): the safe house, a crew member, a
+    /// machine.
+    pub const GIVE_CONTROL: u16 = 985;
 }
 
 /// Task methods: request, forced request, signal, force state 0 to 3 (1418 to 1421), make current.
@@ -71,10 +74,37 @@ pub mod task_method {
     pub const MAKE_CURRENT: u16 = 1422;
     /// A task's state (script ID 525; missions.md 4.1a), read from the session's mirror.
     pub const STATE: u16 = 1415;
+    /// A task's mode (script ID 1280; missions.md 4.1a): 0 live play, 1 the restore or world-start step 2.
+    pub const MODE: u16 = 1411;
 }
 
 /// Command-script method 747 (script ID 247; missions.md 4.1a): starts the script, with one argument (the object).
 const START_SCRIPT: u16 = 747;
+/// Command-script method 749 (script ID 583; interactables.md 5a, task 2241 stopping script 2233): stops the script.
+const STOP_SCRIPT: u16 = 749;
+/// Command-script method 748 (script ID 733; missions.md 4.1a): starts the script with its default context, player
+/// 0's controlled object.
+const START_SCRIPT_DEFAULT: u16 = 748;
+/// A hit record (class 196; missions.md 4.1a): the object hit (script ID 556) and the hitter (276).
+const HIT_CLASS: i16 = 196;
+const HIT_TARGET: u16 = 1646;
+const HIT_HITTER: u16 = 1644;
+/// A trigger shape's member list (script ID 586, stream 479; missions.md 4.1a) and flag (script ID 43, stream 28).
+const TRIGGER_CLASS: i16 = 21;
+const TRIGGER_MEMBERS: u16 = 479;
+const TRIGGER_FLAG: u16 = 28;
+/// "Derived from class n" (script ID 3, stream 2 on any class; missions.md 4.1a), read as a method.
+const DERIVED_FROM: u16 = 2;
+/// Command-script method 751 (script ID 735; missions.md 4.1a, the gauntlet's buttons): sets an alarm on the script.
+const SET_ALARM: u16 = 751;
+/// The context object of the runner calling the module (script ID 741, stream 757; missions.md 4.1a), written.
+pub const RUNNER_CONTEXT: u16 = 757;
+/// A command script's context object (script ID 740, stream 756; missions.md 4.1a), the one its start wrote.
+const SCRIPT_OBJECT: u16 = 756;
+/// Methods 41 and 42 (stream 26 and 27, on any object; interactables.md 5a, task 2245 adding and removing photo target
+/// 139578): add the object to the world, take it out.
+const ADD_TO_WORLD: u16 = 26;
+const REMOVE_FROM_WORLD: u16 = 27;
 /// Command scripts.
 const COMMAND_SCRIPT_CLASS: i16 = 135;
 /// Use points, and their user (script ID 555; interactables.md 5).
@@ -182,7 +212,7 @@ impl WorldHost<'_> {
         // The world object's player methods are methods to call (the shared read hands out methods only for
         // objects other than the world).
         if object == crate::object::WORLD_SCRIPT_ID {
-            return matches!(option, world_method::CONTROLLED | world_method::HELD)
+            return matches!(option, world_method::CONTROLLED | world_method::HELD | world_method::GIVE_CONTROL)
                 .then_some(Value::Method { object, option });
         }
         let h = self.obj(object)?;
@@ -191,25 +221,56 @@ impl WorldHost<'_> {
             let id = self.world.sly3_id(h)?;
             return self.world.shared.sly3_task_states.get(&id).map(|&s| Value::Int(s as i32));
         }
-        // Whether the object is the one with an ID (or a copy of it): same object ID.
-        if option == IS_ID {
+        // A task's mode (mode 3, a silent change, raises no events, so scripts never see it).
+        if option == task_method::MODE && self.world.class(h) == Some(TASK_CLASS) {
+            return Some(Value::Int(i32::from(self.world.shared.sly3_restore_mode)));
+        }
+        // Whether the object is the one with an ID (or a copy of it): same object ID. Adding to and removing from the
+        // world. Whether its class derives from another.
+        if matches!(option, IS_ID | ADD_TO_WORLD | REMOVE_FROM_WORLD | DERIVED_FROM) {
             return Some(Value::Method { object, option });
         }
+        // A trigger shape's members (the tracked objects inside) and its flag. Working reading: the flag is whether
+        // the shape is in the world (its meaning is not given).
+        if self.world.class(h) == Some(TRIGGER_CLASS) && matches!(option, TRIGGER_MEMBERS | TRIGGER_FLAG) {
+            if option == TRIGGER_FLAG {
+                return Some(Value::Bool(self.world.in_world(h)));
+            }
+            let members = match self.world.behavior(h) {
+                Some(crate::behavior::Behavior::Sly2Volume(t)) => t.members.clone(),
+                _ => Vec::new(),
+            };
+            return Some(Value::list(members.into_iter().map(|m| Value::Object(Some(m.to_script())))));
+        }
+        // A hit record's object hit and hitter.
+        if matches!(option, HIT_TARGET | HIT_HITTER) && self.world.class(h) == Some(HIT_CLASS) {
+            let slot = self.world.slot(h)?;
+            let &(target, hitter) = self.world.shared.sly3_hits.get(&slot)?;
+            let o = if option == HIT_TARGET { target } else { hitter };
+            return Some(Value::Object(Some(o.to_script())));
+        }
         // A command script's start method, a lock's start and event-5 methods.
-        if (option == START_SCRIPT && self.world.class(h) == Some(COMMAND_SCRIPT_CLASS))
+        if (matches!(option, START_SCRIPT | START_SCRIPT_DEFAULT | STOP_SCRIPT | SET_ALARM)
+            && self.world.class(h) == Some(COMMAND_SCRIPT_CLASS))
             || (matches!(option, LOCK_START | RAISE_FIVE) && self.world.class(h) == Some(LOCK_CLASS))
         {
             return Some(Value::Method { object, option });
         }
-        // The lock part's owner: the first enclosing object that is not a placement (working choice for the field
-        // at +0x10).
+        // The lock part's owner (interactables.md 5, the cell lock): the first enclosing object that is not a
+        // placement (working choice).
         if option == OWNER_REF
-            && self.world.class(h) == Some(PART_CLASS)
+            && matches!(self.world.class(h), Some(PART_CLASS | COMMAND_SCRIPT_CLASS))
             && self.world.options(h).and_then(|o| o.get(OWNER_REF)).is_none()
         {
             let owner = core::iter::successors(self.world.parent(h), |&q| self.world.parent(q))
                 .find(|&q| self.world.class(q) != Some(PLACEMENT_CLASS));
             return Some(Value::Object(owner.map(Handle::to_script)));
+        }
+        // A command script's object, from the session's mirror of the running scripts.
+        if option == SCRIPT_OBJECT && self.world.class(h) == Some(COMMAND_SCRIPT_CLASS) {
+            let id = self.world.sly3_id(h)?;
+            let with = self.world.shared.sly3_script_objects.get(&id).copied().filter(|&o| o >= 0);
+            return Some(Value::Object(with.and_then(|o| self.sly3_find(o, None))));
         }
         // A use point's user, stored when it was used.
         if option == USE_USER && self.world.class(h) == Some(USE_POINT_CLASS) {
@@ -258,6 +319,16 @@ impl WorldHost<'_> {
             return match option {
                 world_method::CONTROLLED => Some(Value::Object(self.sly3_player())),
                 world_method::HELD => Some(Value::Bool(self.world.shared.sly3_holds > 0)),
+                world_method::GIVE_CONTROL => {
+                    // The object among the arguments (the player index, when given, is 0 here).
+                    if let Some(h) = args.iter().find_map(|a| match a {
+                        Value::Object(Some(o)) => self.obj(*o),
+                        _ => None,
+                    }) {
+                        self.world.shared.sly3_control_to.push(h);
+                    }
+                    Some(Value::Void)
+                }
                 _ => None,
             };
         }
@@ -265,6 +336,19 @@ impl WorldHost<'_> {
             let h = self.obj(object)?;
             let id = args.first().and_then(|a| a.as_i32());
             return Some(Value::Bool(id.is_some() && self.world.sly3_id(h) == id));
+        }
+        if option == DERIVED_FROM {
+            let h = self.obj(object)?;
+            let class = self.world.class(h)?;
+            let base = args.first().and_then(|a| a.as_i32()).unwrap_or(-1) as i16;
+            let derived =
+                class == base || self.world.shared.sly3_derived.get(&base).is_some_and(|d| d.contains(&class));
+            return Some(Value::Bool(derived));
+        }
+        if matches!(option, ADD_TO_WORLD | REMOVE_FROM_WORLD) {
+            let h = self.obj(object)?;
+            self.world.set_in_world(h, option == ADD_TO_WORLD);
+            return Some(Value::Void);
         }
         // Event 5 raised on the lock (its part forwards its own).
         if option == RAISE_FIVE {
@@ -286,6 +370,42 @@ impl WorldHost<'_> {
                 _ => None,
             };
             self.world.shared.sly3_lock_starts.push((h, user));
+            return Some(Value::Void);
+        }
+        // An alarm set on a command script (the gauntlet's buttons on script 2291).
+        if option == SET_ALARM {
+            let h = self.obj(object)?;
+            if self.world.class(h)? != COMMAND_SCRIPT_CLASS {
+                return None;
+            }
+            let script = self.world.sly3_id(h)?;
+            if let Some(alarm) = args.first().and_then(|a| a.as_i32()) {
+                self.world.shared.sly3_alarms.push((script, alarm));
+            }
+            return Some(Value::Void);
+        }
+        // A command script stopped by a script, queued for the session's runner.
+        if option == STOP_SCRIPT {
+            let h = self.obj(object)?;
+            if self.world.class(h)? != COMMAND_SCRIPT_CLASS {
+                return None;
+            }
+            let script = self.world.sly3_id(h)?;
+            self.world.shared.sly3_script_stops.push(script);
+            return Some(Value::Void);
+        }
+        // A command script started with its default context.
+        if option == START_SCRIPT_DEFAULT {
+            let h = self.obj(object)?;
+            if self.world.class(h)? != COMMAND_SCRIPT_CLASS {
+                return None;
+            }
+            let script = self.world.sly3_id(h)?;
+            let with = self.world.player.and_then(|p| self.world.sly3_id(p)).unwrap_or(-1);
+            let starts = &mut self.world.shared.sly3_script_starts;
+            if !starts.iter().any(|&(s, _)| s == script) {
+                starts.push((script, with));
+            }
             return Some(Value::Void);
         }
         // A command script started by a script, queued for the session's runner (missions.md 4.1a).

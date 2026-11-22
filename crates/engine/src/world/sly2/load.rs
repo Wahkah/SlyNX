@@ -48,6 +48,10 @@ pub struct LoadStats {
     pub option_errors: u32,
     /// Copy patches whose target ID is in no object of the copy.
     pub unmatched_patches: u32,
+    /// Copy roots bound to a module of their placement's package by a patch's script index.
+    pub patch_modules: u32,
+    /// Pool copies of fixed placements (option 1178) kept out of the world at load.
+    pub fixed_pool_copies: u32,
 }
 
 /// The loading context of one object list.
@@ -192,6 +196,21 @@ impl World {
         w.level.bytes = bytes;
         level.build_ids();
         w.sly2 = Some(alloc::boxed::Box::new(level));
+        // A fixed placement (its root block sets 1178 = 1, script ID 1022) does not lease its copy when it enters the
+        // world, so the pool's stored copy stays out of it until leased (placement.md 2.1: Dimitri's bullets).
+        let fixed: Vec<u32> = w
+            .handles()
+            .filter(|&h| {
+                w.class(h).is_some_and(|c| super::is_a(c, 6)) && w.options(h).and_then(|o| o.i32(1178)) == Some(1)
+            })
+            .filter_map(|h| w.children(h).next().and_then(|c| w.slot(c)))
+            .collect();
+        for s in fixed {
+            w.set_flag(s, crate::object::flags::IN_WORLD, false);
+            if let Some(l) = w.sly2.as_deref_mut() {
+                l.stats.fixed_pool_copies += 1;
+            }
+        }
         w.ensure_order();
         w.update_transforms();
         Ok(w)
@@ -401,17 +420,24 @@ impl<'b> Loader<'b> {
                     }
                 }
                 let first = w.slot_count() as u32;
+                // Whether the package was copied: a depth-cut or unresolved placement has no copy root (`first` would
+                // then name its first extra object, or nothing).
+                let mut copied = false;
                 let copy = match self.set_index.get(&p.set_id).copied() {
                     Some(_) if cx.depth >= self.max_depth => {
                         self.level.stats.depth_cut += 1;
                         self.new_copy()
                     }
-                    Some(t) => self.package(w, t, p.set_id, slot, world, cx.depth + 1)?,
+                    Some(t) => {
+                        copied = true;
+                        self.package(w, t, p.set_id, slot, world, cx.depth + 1)?
+                    }
                     None => {
                         self.level.stats.unresolved_placements += 1;
                         self.new_copy()
                     }
                 };
+                let root = (copied && first < w.slot_count() as u32).then_some(first);
                 let extra = Cx {
                     copy,
                     parent: slot,
@@ -423,6 +449,22 @@ impl<'b> Loader<'b> {
                     ..cx
                 };
                 self.list(w, &p.extra, extra)?;
+                // A fresh placement's blocks for other targets (classes/placement.md 1.1): 6 is the copy's root (the
+                // Dimitri placement 122332's route, missions.md 4.3), other IDs an object of the copy.
+                for b in p.blocks.iter().filter(|b| b.kind != BLOCK_OPTIONS) {
+                    let target = if b.kind == 6 {
+                        root
+                    } else {
+                        (first..w.slot_count() as u32).find(|&s| {
+                            let o = &self.level.objects[s as usize];
+                            o.copy == copy && o.id == b.kind
+                        })
+                    };
+                    match (target, &b.options) {
+                        (Some(t), Some(o)) => self.apply(w, t, o),
+                        _ => self.level.stats.unmatched_patches += 1,
+                    }
+                }
                 for patch in &p.patches {
                     let target = if matches!(patch.target, 5 | 6) {
                         Some(slot)
@@ -435,6 +477,24 @@ impl<'b> Loader<'b> {
                     match target {
                         Some(t) => self.apply(w, t, &patch.options),
                         None => self.level.stats.unmatched_patches += 1,
+                    }
+                    // A patch's script index binds the copy's root to that module of the placement's package
+                    // (missions.md 4.3: 123863's patch (5, class 48, index 5) gives the vent prop 120985 module 5 of
+                    // `f_nightclub_cellar_rig`); an earlier module stays as its outer environment (scripts.md 11.3).
+                    // Several 5 / 6 patches with indices each bind in turn: the last wins, and each overwrites the
+                    // outer module recorded by the one before.
+                    if matches!(patch.target, 5 | 6)
+                        && let Some(r) = root
+                    {
+                        let m = self.module_of(cx.pkg, patch.index);
+                        let old = w.module[r as usize];
+                        if m >= 0 && old != m {
+                            if old >= 0 {
+                                w.outer_module.insert(r, old);
+                            }
+                            w.module[r as usize] = m;
+                            self.level.stats.patch_modules += 1;
+                        }
                     }
                 }
             }

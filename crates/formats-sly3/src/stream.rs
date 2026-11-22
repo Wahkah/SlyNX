@@ -446,6 +446,17 @@ pub fn command_script(data: &[u8], body_offset: u32, table: &OptionTable) -> Res
     Ok((o, read_commands(&mut r)?))
 }
 
+/// Sly 3 hook (guards.md 4a): a path's points (classes 9 to 13, classes/paths-and-volumes.md 4), in the path's own
+/// space.
+pub fn path_points(data: &[u8], body_offset: u32) -> Result<Vec<[f32; 3]>> {
+    let mut r = Reader::at(data, body_offset as usize);
+    header(&mut r)?;
+    r.skip(2)?;
+    let n = r.u16()? as usize;
+    r.skip(n * 4)?;
+    (0..n).map(|_| Ok([r.f32()?, r.f32()?, r.f32()?])).collect()
+}
+
 /// A level exit's body (class 24, level-flow.md 4, classes/paths-and-volumes.md 3): the trigger volume and the file
 /// records it leads to.
 #[derive(Clone, Debug, PartialEq)]

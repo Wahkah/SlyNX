@@ -19,6 +19,7 @@ pub mod layer; // Sly 2 hook: the 2D layer (fonts, HUD, menus, job screens).
 pub mod level;
 pub mod menus; // Sly 2 hook: gadget assignment, shop and options screens.
 pub mod movie; // Sly 2 hook: stills of the screens' sprites (the grids' icons).
+pub mod photo; // Sly 2 hook: the binocucom's photo targets (class 46).
 pub mod progress; // Sly 2 hook: progress, saving and world changes through the job system.
 pub mod safehouse;
 pub mod screens; // Sly 2 hook: the job screens (job complete, saving, job help).
@@ -65,6 +66,33 @@ fn apply_world_cue(
             world.raise(seq, SEQUENCE_VALUE, alloc::vec![script::Value::Int(v)]);
             None
         }
+        // Command 639: show a screen. The job prompt (class 127) takes control from the player until a face button
+        // dismisses it, and is waited for (user-interface.md 2.1); other screens are not drawn by sequences yet.
+        talk::SeqCommand::ShowScreen { screen, .. } => {
+            let s =
+                world.find_sly2_id(screen, Some(seq)).filter(|&s| world.class(s) == Some(talk::JOB_PROMPT_CLASS))?;
+            if world.shared.job_prompt.is_none() {
+                world.shared.job_prompt = Some((s, 0.0));
+            }
+            Some(s)
+        }
+        // Command 711: a character runs a command list; a placement stands for its copy (missions.md 4.3).
+        talk::SeqCommand::RunList { object, list } => {
+            let who = world.find_sly2_id(object, Some(seq));
+            let placement = |h| world.class(h).is_some_and(|c| engine::world::sly2::is_a(c, 6));
+            let who = who.map(|h| if placement(h) { world.children(h).next().unwrap_or(h) } else { h });
+            if let (Some(h), Some(l)) = (who, world.find_sly2_id(list, Some(seq))) {
+                engine::behavior::sly2_commands::run_commands(world, h, l);
+            }
+            None
+        }
+        // Command 630: a signal to another sequence (dialogue-and-voice.md 2.1).
+        talk::SeqCommand::SendSignal { value, sequence } => {
+            if let Some(s) = world.find_sly2_id(sequence, Some(seq)).and_then(|h| world.slot(h)) {
+                world.shared.send_signal(s, value);
+            }
+            None
+        }
         // Command 631: stop the named sequence (all its runs; their waited playbacks are retracted).
         talk::SeqCommand::StopSequence(id) => {
             if let Some(h) = world.find_sly2_id(id, Some(seq)) {
@@ -102,6 +130,25 @@ fn clip_playing(world: &engine::world::World, p: engine::object::Handle) -> bool
     world.sly2.as_deref().is_some_and(|l| l.anim.get_option(world, p, engine::game::sly2_anim::opt::CLIP).is_some())
 }
 
+/// Whether what a run waits for is still busy: a clip playback until retracted, the job prompt screen until the
+/// player dismisses it (user-interface.md 2.1).
+fn still_waits(world: &engine::world::World, p: engine::object::Handle) -> bool {
+    if world.class(p) == Some(talk::JOB_PROMPT_CLASS) {
+        return world.shared.job_prompt.is_some_and(|(s, _)| s == p);
+    }
+    clip_playing(world, p)
+}
+
+/// Retracts the clip playback a stopped run waited for (a screen is left as it is).
+fn retract_wait(world: &mut engine::world::World, p: engine::object::Handle) {
+    if world.class(p) != Some(talk::JOB_PROMPT_CLASS) {
+        engine::game::sly2_anim::with(world, |a, w| a.remove(w, p));
+    }
+}
+
+/// The job prompt's wait before a press counts, in real seconds (user-interface.md 2.1: idle for more than 0.5 s).
+pub const JOB_PROMPT_IDLE: f32 = 0.5;
+
 /// A sequence run without a sound engine: its next command, where it stops, its thread and the clip it waits for
 /// (635 with no-wait 0).
 #[derive(Clone, Copy, Debug)]
@@ -137,7 +184,7 @@ fn step_silent(
     stop: &mut Vec<(engine::object::Handle, i32)>,
 ) -> bool {
     if let Some(p) = run.waiting {
-        if clip_playing(world, p) {
+        if still_waits(world, p) {
             return false;
         }
         run.waiting = None;
@@ -165,7 +212,15 @@ fn step_silent(
                 .shared
                 .sequence_requests
                 .push(engine::behavior::sly2_commands::SequenceRequest::Start { sequence, starter: None }),
-            talk::SeqCommand::PlayClip { wait, .. } => {
+            // Command 629: the run waits until its sequence holds the signal (sent before or after).
+            talk::SeqCommand::WaitSignal { value, consume } => {
+                let me = world.slot(run.sequence).unwrap_or(u32::MAX);
+                if !world.shared.take_signal(me, value, consume) {
+                    run.at -= 1;
+                    return false;
+                }
+            }
+            talk::SeqCommand::PlayClip { wait, .. } | talk::SeqCommand::ShowScreen { wait, .. } => {
                 let p = apply_world_cue(world, run.sequence, c);
                 if wait && p.is_some() {
                     run.waiting = p;
@@ -275,6 +330,10 @@ pub struct Sly2Session<B: Backend, R: ReadAt> {
     pub safe_house: Option<safehouse::SafeHouse>,
     /// The safe house is the current player.
     pub in_safe_house: bool,
+    /// The binocucom's photo mode while the binocucom is on (missions.md 4.3).
+    pub photo: Option<photo::Photo>,
+    /// The binocucom was on last frame (its task events).
+    binocucom_was_on: bool,
     /// The vault changes since the last frame (sequences, lines, the dial's screen).
     pub vault_events: Vec<engine::behavior::sly2_vault::VaultEvent>,
     /// A character to switch to next frame (taken out of the safe house).
@@ -285,6 +344,8 @@ pub struct Sly2Session<B: Backend, R: ReadAt> {
     silent: Vec<SilentRun>,
     /// With a sound engine: (sequence, clip playback) a sequence waits for.
     clip_waits: Vec<(engine::object::Handle, i32, engine::object::Handle)>,
+    /// Runs held on a signal (629), with a sound engine: (sequence, thread, value, consume).
+    signal_waits: Vec<(engine::object::Handle, i32, i32, bool)>,
     items: Option<ItemTable>,
     pockets: Option<engine::gang::PocketTable>,
     disc: Option<Disc<R>>,
@@ -343,11 +404,14 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             unrendered: 0.0,
             safe_house: None,
             in_safe_house: false,
+            photo: None,
+            binocucom_was_on: false,
             vault_events: Vec::new(),
             switch_to: None,
             running: Vec::new(),
             silent: Vec::new(),
             clip_waits: Vec::new(),
+            signal_waits: Vec::new(),
             current: None,
             seed,
             pending: progress::Pending::default(),
@@ -677,6 +741,27 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         out
     }
 
+    /// The job prompt screen (class 127, user-interface.md 2.1): while it is up the player has no control. After it
+    /// has been up for more than [`JOB_PROMPT_IDLE`] seconds, any face button gives control back, restarts the
+    /// current job, if any, and hides the screen.
+    fn job_prompt_input(&mut self, input: &FrameInput, measured: f32) -> FrameInput {
+        use platform_api::Buttons;
+        let Some(g) = self.game.as_mut() else { return *input };
+        let Some((screen, up)) = g.world.shared.job_prompt else { return *input };
+        let face = Buttons::A.0 | Buttons::B.0 | Buttons::X.0 | Buttons::Y.0;
+        if up > JOB_PROMPT_IDLE && input.pressed & face != 0 {
+            g.world.shared.job_prompt = None;
+            engine::game::sly2_jobs::with(&mut g.world, |j, _| {
+                if j.job.is_some() {
+                    j.restart_at_checkpoint();
+                }
+            });
+        } else {
+            g.world.shared.job_prompt = Some((screen, up + measured));
+        }
+        FrameInput::default()
+    }
+
     /// Runs one frame for a measured interval (seconds). Returns false when the session should end.
     pub fn update(&mut self, input: &FrameInput, measured: f32) -> bool {
         // Sly 2 hook (front end): a movie holds everything; the title and the episode menu take the input.
@@ -686,8 +771,41 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             return !self.quit;
         };
         let input = &self.safe_house_input(&input);
+        let input = &self.job_prompt_input(input, measured);
         if let Some(g) = self.game.as_mut() {
             g.frame(input, measured);
+            // The binocucom's photo mode (missions.md 4.3): open while the binocucom is on; a good picture asks the
+            // target's task for state 2, and the binocucom closes once no listed target is pending.
+            let on = engine::gang::binocucom_on(&g.world);
+            if on != self.binocucom_was_on {
+                // Task events 7 then 9 on opening, 8 then 11 on closing, no object (missions.md 4.3). Radio-talk
+                // mode (12, 13) is not entered here.
+                let es = if on {
+                    [photo::BINOCUCOM_OPENED, photo::PROMPT_STARTED]
+                } else {
+                    [photo::BINOCUCOM_CLOSED, photo::PROMPT_ENDED]
+                };
+                engine::game::sly2_jobs::with(&mut g.world, |j, _| es.iter().for_each(|&e| j.task_event(e, None)));
+                self.binocucom_was_on = on;
+            }
+            if !on {
+                self.photo = None;
+            } else if self.photo.is_none() {
+                self.photo = photo::Photo::open(&g.world, photo::params(g.render.camera.fov_y));
+            }
+            let targets = if self.photo.is_some() { photo::targets(&g.world) } else { Vec::new() };
+            if let Some(p) = self.photo.as_mut()
+                && let Some(shot) = p.update(input, measured, &g.world, &targets)
+            {
+                if let Some(task) = shot.task {
+                    g.world.shared.task_requests.push((task, 2));
+                }
+                engine::game::sly2_jobs::with(&mut g.world, |j, _| j.task_event(photo::PICTURE_ACCEPTED, None));
+                if !p.listed_pending(&targets) {
+                    self.photo = None;
+                    g.world.shared.camera_binocucom = None;
+                }
+            }
             self.vault_events.clear();
             self.vault_events.append(&mut g.world.shared.vault_events);
             self.unrendered += engine::game::clock::frame_step(measured);
@@ -718,9 +836,18 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                     retract.extend(self.clip_waits.iter().filter(|w| (w.0, w.1) == (h, t)).map(|w| w.2));
                     self.clip_waits.retain(|w| (w.0, w.1) != (h, t));
                 }
+                // Signals the runs wait for (629): released once their sequence holds them.
+                self.signal_waits.retain(|&(seq, t, value, consume)| {
+                    let me = g.world.slot(seq).unwrap_or(u32::MAX);
+                    let got = g.world.shared.take_signal(me, value, consume);
+                    if got {
+                        s.release(seq, t);
+                    }
+                    !got
+                });
                 // Clips the runs wait for: released once retracted.
                 self.clip_waits.retain(|&(seq, t, p)| {
-                    let alive = clip_playing(&g.world, p);
+                    let alive = still_waits(&g.world, p);
                     if !alive {
                         s.release(seq, t);
                     }
@@ -751,10 +878,15 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 ended.dedup();
             }
             for p in retract {
-                engine::game::sly2_anim::with(&mut g.world, |a, w| a.remove(w, p));
+                retract_wait(&mut g.world, p);
             }
             self.running.retain(|h| !ended.contains(h));
             for h in ended {
+                // A stopped sequence's signal set is cleared (dialogue-and-voice.md 2.1).
+                if let Some(s) = g.world.slot(h) {
+                    g.world.shared.sequence_signals.remove(&s);
+                }
+                self.signal_waits.retain(|w| w.0 != h);
                 g.world.raise(h, SEQUENCE_ENDED, Vec::new());
             }
         }
@@ -796,10 +928,15 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                         self.silent.retain(|r| r.sequence != sequence);
                         self.clip_waits.retain(|w| w.0 != sequence);
                         for p in waited {
-                            engine::game::sly2_anim::with(&mut g.world, |a, w| a.remove(w, p));
+                            retract_wait(&mut g.world, p);
                         }
                     }
-                    Q::Alarm(..) => {}
+                    // A signal from a script (ID 640) or a guard command list (command 15).
+                    Q::Alarm(sequence, value) => {
+                        if let Some(s) = g.world.slot(sequence) {
+                            g.world.shared.send_signal(s, value);
+                        }
+                    }
                 }
             }
         }
@@ -818,8 +955,19 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 for (h, t, c) in s.take_world_cues() {
                     let p = apply_world_cue(&mut g.world, h, c);
                     match (c, p) {
-                        (talk::SeqCommand::PlayClip { wait: true, .. }, Some(p)) => self.clip_waits.push((h, t, p)),
-                        (talk::SeqCommand::PlayClip { wait: true, .. }, None) => s.release(h, t),
+                        (talk::SeqCommand::WaitSignal { value, consume }, _) => {
+                            self.signal_waits.push((h, t, value, consume))
+                        }
+                        (
+                            talk::SeqCommand::PlayClip { wait: true, .. }
+                            | talk::SeqCommand::ShowScreen { wait: true, .. },
+                            Some(p),
+                        ) => self.clip_waits.push((h, t, p)),
+                        (
+                            talk::SeqCommand::PlayClip { wait: true, .. }
+                            | talk::SeqCommand::ShowScreen { wait: true, .. },
+                            None,
+                        ) => s.release(h, t),
                         _ => {}
                     }
                 }

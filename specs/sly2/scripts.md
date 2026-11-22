@@ -59,8 +59,11 @@ sources:
   - kind: disc
     what: 2026-11-20 survey of the 209 op133 calls against the placements' bind indexes in all 43 worlds
     used_for: the survey counts in section 4.3
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), option-table entry 2 (handler 0x00100228) and the class test 0x00132B10 (2026-11-21)
+    used_for: what the class test answers (section 5) [D]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-21
 ---
 
 # Sly 2 world scripts
@@ -402,6 +405,11 @@ state-machine playback, 77 new emitter handle, 106 and 368 apply a clip or a sta
 stream, 233 guard aim target, 479 stop an emitter) and 2.2 (the class-113 guard command lists, options 595 to 612).
 Starting and stopping a class-114 sequence from a script uses options 613 (script ID 235, with a starter object),
 614 (script ID 638, the current character as starter) and 615 (script ID 530, stop): dialogue-and-voice.md 2.1.
+
+**The class test** (added 2026-11-21) [D]. Script ID 3 maps to stream option 2 on every class. Its handler
+`0x00100228` passes the class number to the class test `0x00132B10`, which answers **is-a** (the class or any class
+derived from it), not exact match. So `((op111 x 3) 56)` is true for every class 56–67, `52` for 52–55 and `90` for
+90–95. 26, 81 and 92 are leaves, so they match exactly. The full tree is in [object-stream.md](object-stream.md) 3.1.
 
 ## 6. Events
 

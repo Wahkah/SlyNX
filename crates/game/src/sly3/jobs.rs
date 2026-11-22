@@ -79,25 +79,60 @@ pub fn script_events(e: u32) -> Option<u32> {
     match e {
         script_event::TASK_EVENT => Some(20),
         script_event::BEGIN => Some(22),
-        // After a state change of a live task (missions.md 4.1a): event 24 on the task.
+        // No longer current (interactables.md 5a: task 2245's module answers it by removing its photo target).
+        script_event::END => Some(23),
+        // Around a state change of a live task (missions.md 4.1a): event 25 before, 24 after, on the task.
+        script_event::STATE_BEFORE => Some(25),
         script_event::STATE => Some(24),
         _ => None,
     }
 }
 
+/// Sly 3's task-event codes where they differ from Sly 2's (missions.md 4.1a): a state change is broadcast with 42
+/// before and 41 after.
+pub fn task_codes(e: u32) -> u32 {
+    use engine::game::sly2_jobs::event;
+    match e {
+        event::STATE_BEFORE => 42,
+        event::STATE_AFTER => 41,
+        e => e,
+    }
+}
+
 /// The job system of a freshly loaded Sly 3 world with `progress`, restored: `carry` from the previous world (none
-/// after a new game or a load), `queued` a task requested, forced (an episode start's task).
+/// after a new game or a load), `queued` a task requested, forced (an episode start's task). The world start's steps
+/// 1 and 2 (missions.md 4.1a): the tasks' events are raised in mode 1 and run with the world's next frame; step 3 is
+/// [`finish_world_start`], after them.
 pub fn attach(world: &mut World, progress: Progress, carry: Option<Carry>, queued: Option<i32>) -> Jobs {
     let mut j = Jobs::new_with(world, progress, &IDS);
     j.script_events = script_events;
+    j.task_codes = task_codes;
     j.sly3_rules = true; // Sly 3's order of becoming current and world start (sly3/missions.md 4, 7).
     // The macro packages (class 147) hear every task event too (missions.md 4.2).
     j.listener_class = Some(MACRO_LISTENER_CLASS);
     j.restore(queued, carry);
-    current_when_available(&mut j);
     j.apply(world);
     mirror(&j, world);
+    // Scripts read the tasks' mode (script ID 1280) as 1 until step 3.
+    world.shared.sly3_restore_mode = true;
     j
+}
+
+/// World-start step 3 (missions.md 4.1a), part one: the requests queued in mode 1 (by the restore's and step 2's
+/// events) run in order, in mode 1. The events they raise are still mode 1's; the session runs them and calls this
+/// again while they queue more, then [`finish_world_start`].
+pub fn run_queued(j: &mut Jobs, world: &mut World) {
+    j.in_restoring_mode(|j| run_requests(j, world));
+    j.apply(world);
+    mirror(j, world);
+}
+
+/// World-start step 3, part two: the "current when available" pass. Scripts then read the mode as 0 (live play).
+pub fn finish_world_start(j: &mut Jobs, world: &mut World) {
+    world.shared.sly3_restore_mode = false;
+    current_when_available(j);
+    j.apply(world);
+    mirror(j, world);
 }
 
 /// Sly 3 hook: the task states, mirrored into the world for scripts (task option 1415; missions.md 4.1a).
@@ -171,6 +206,13 @@ pub fn step(j: &mut Jobs, world: &mut World, dt: f32, touched: bool) {
     if j.job.is_some() && j.idle < engine::game::sly2_jobs::IDLE_LIMIT {
         j.timer += dt;
     }
+    run_requests(j, world);
+    j.apply(world);
+    mirror(j, world);
+}
+
+/// The frame's task requests: from props, trigger shapes and use points, then the task methods scripts called.
+fn run_requests(j: &mut Jobs, world: &mut World) {
     // Task-state requests from props and trigger shapes (option 489: (task, state), state 4 meaning "current", as
     // for the task methods).
     for (task, s) in core::mem::take(&mut world.shared.task_requests) {
@@ -203,8 +245,6 @@ pub fn step(j: &mut Jobs, world: &mut World, dt: f32, touched: bool) {
             }
         }
     }
-    j.apply(world);
-    mirror(j, world);
 }
 
 /// Command `0x1E` (scripts.md 7.2) and the exit and arrival pairs (841, 847): task `task` asked for state `s` as

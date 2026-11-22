@@ -49,6 +49,34 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/task.cpp (task activation, state routine, job completion), frontend.cpp (exit firing and update), transition.cpp (load request)
     used_for: section 4.2, the order of becoming-current effects and when a task exit loads [R]
+  - kind: disc
+    what: >-
+      SCUS-97316, worlds of rows 2, 3 and 5 walked 2026-11-21 (4,822, 2,646 and 2,436 bodies, 0 failures): job 1771
+      and tasks 1772-1800 with their modules in `f_nightclub_macro`, modules 5 and 8 of `f_nightclub_cellar_rig`,
+      placements 123848-123863, package `f_vent_panel_break`, photo targets 122764, 122766, 122768
+    used_for: section 4.3 [D]
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), the task-event broadcasts (calls of 0x001619A0: event 26 at 0x001A6224, 23 and 24 at
+      0x0017993C, 0x00179924 and 0x0018120C, 19 at 0x00154138), the photo helper 0x00202540 and 0x00202D38
+      (constants at 0x00202F18, 0x00202F30, 0x00202F4C; masks at 0x002034E8, 0x00203528), the value at 0x002A8550
+    used_for: section 4.3 [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/aihit.cpp, trigger.cpp, photo.cpp; sly2-decomp @ 33e2bab9 (creature hit)
+    used_for: section 4.3, what raises the events and the photo rules [R]
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), the binocucom window broadcasts (0x0019D6E8, 0x0019D700, 0x0019D804, 0x0019D81C, 0x0019D8A0,
+      0x0019D8B8), the photo prompt broadcasts (0x002029A8, 0x00202CB0 reached from 0x00202A68, 0x00202CD4), option
+      789's getter 0x00228518 and the level-row lookup 0x002109D0, class 26's vtable 0x002DC6F0 and fire routine
+      0x002283D0 (2026-11-21)
+    used_for: section 4.3, binocucom events, the door's destination row, doors raising event 26 [D]
+  - kind: disc
+    what: SCUS-97316 row 2 job 1818 and tasks 1819-1833 with modules 59-70 of `f_nightclub_macro`; doors 1735 and 136718 (2026-11-21)
+    used_for: section 4.3, `t1_follow_complete` and the doors' destinations [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/binoc.cpp, photo.cpp (window and prompt states)
+    used_for: section 4.3, which state change raises which event [R]
 reviewed_by: pending
 date: 2026-11-21
 ---
@@ -373,6 +401,198 @@ exit field (option 1278, default none) being filled from another option (1287's 
 job-exit lookup that falls back to "the first exit of the world"; or job 2406 being taken as ended (an ended job with
 no next task fires its 1259 exit, and it has none; a job end with no exit pending goes to the episode's main world,
 row 14, not 15) [I].
+
+### 4.3 Episode 1, `m1_recon` (job 1771): task event 26 and how its tasks are finished (added 2026-11-21)
+
+**Task event 26 (0x1A) carries the object that raised it, not the character** [D].
+
+- Many objects use the common script-event routine `0x001A61E0`: trigger volumes, doors, hiding spots, interaction
+  spots, pipes and others. When one raises script event 5, the routine broadcasts task event 26 with **the object
+  itself** (`0x001A6224`). For event 6 it broadcasts 27 (0x1B) the same way (`0x001A6240`).
+- For a trigger volume, event 5 means "something counting entered" (interactables.md 4) [R].
+- So `((op111 x 3) 26)` in the job handlers asks whether the object is a door (class 26). The entering character is
+  not passed.
+- The m1 jobs then read the door's script option 771. Unless it is 3 or 5, they start sequence 1751, the "Job
+  Abandoned!" prompt ([user-interface.md](user-interface.md) 2.1). (Script ID 771 is stream option 789; what it
+  returns is below.)
+
+**The job's handlers** are in module 26 of `f_nightclub_macro` [D]. op97 is the current level-table row, so the row-3
+cases run only in the nightclub cellar (row 3):
+
+- **Event 19** (the job began), in row 3: sets a working list to the four placements **123856–123859**.
+- **Event 17, task event 19 (0x13)**, in row 3. A sensor's detection raises it with the detecting object
+  (`0x00154138`) [R for "detection"].
+  - If the object is one of the boar guards 123848–123851, the job fails with reason string 826 ("…avoid being
+    seen by the flashlight guards!").
+  - If it is one of the rats 123852–123855, their option 437 is set.
+- **Event 17, task events 23 and 24**, in row 3: if the object is in the working list it is removed. When the list is
+  empty, task **1776** is asked for state 2 (script ID 1104 = stream option 1280) 1.0 s later.
+- **Event 17, task event 26:** the door check above.
+
+**`t1_recon_brawl` (1776, "Battle Guards With Murray")** [D unless marked]:
+
+- 123856–123859 are placements of package **`npc_swarmer_rat`** (swarming rats), not guards. They are in
+  `f_nightclub_cellar_rig` at (10948, −5482, 0), (11804, −5182, 20), (11723, −4484, 0) and (12727, −6314, 167).
+- **"Dealt with" means killed.**
+  - A swarming creature's hit routine (`0x001811B8`) raises task event **24** with the creature when an accepted hit
+    leaves its health at 0. It then puts the creature in its dead state (4).
+  - A guard raises 24 when the current player character knocks it out, and 23 when something else does
+    (`0x00179924` / `0x0017993C`, once per guard).
+  - The job accepts both numbers, so it doesn't matter who lands the last hit.
+  - The job matches the creature against the placement IDs, so the placed copy answers to its placement's ID [I].
+- Task 1776 carries option 1272 (current as soon as available). Its module 29:
+  - on becoming current, sets Murray (object 9) to follow Sly: Murray's script ID 446 with Sly and the offset
+    (85, 180, 0), plus his options 381 and 358;
+  - on the first task event 19 while it is current, starts sequence 1777 (Murray's line).
+- **To build:** the four rats with health and hits that kill them, the broadcast of 24 on death, and the job's list.
+
+**`t1_recon_vent2_broken` (1789)** [D unless marked]:
+
+- Placement **123863** puts package `f_vent_panel_break` (one class-98 prop, 120985) in the cellar at (57, −1077,
+  211).
+  - The prop has one event: explode 8206, hide mesh group 19178, turn collision group 24582 off, show group 26816.
+  - It has no trigger class, so a hit is an attack contact (interactables.md 3.2) [R]. It has no hit-count option,
+    so one hit breaks it [I].
+- After its last event the prop raises script event 5. The placement binds the prop to module 5 of
+  `f_nightclub_cellar_rig`, whose event-5 handler asks task 1789 for state 4 (current) and then state 2.
+- A second route: door 136718 (class 26) owns module 8 of the same package. Its event-5 handler also asks 1789 for
+  state 2.
+- Task 1789's own module 40 runs on event 21 (after a state change). It moves the prop to event 1546 (broken) or 1545
+  (intact) according to the task's script ID 1080, so a restored save shows the right vent.
+- Its object switches: 124008 in state 2, 123863 in states 0–2, 124009 in state 3.
+- **To build:** Sly's attack breaking the vent prop in one hit, the prop's event 5 reaching its bound module, and the
+  requests for state 4 and then 2.
+
+**`t1_recon_teach_spycam` (1790, "Locate Tail Feathers") and the spy targets 1793–1795** [D unless marked]:
+
+- **Module 41 (1790), on becoming current:**
+  - If script ID 1078 returns 1, sequence 1791 (the tutorial) starts with the current character. 1791 waits for
+    signal 123864 (command 629) and then sets 1790 to state 2.
+  - Otherwise the module shows a HUD message (string 802, 10 s) and asks 1790 for state 2.
+- Module 41's event-17 handler starts sequence 1792 on task event 9. 1792 sends signal 123864 to 1791 (command 630).
+- The targets are **Sly 2 class 46**, the class that Sly 3's class 43 copies (specs/sly3/interactables.md 5a). They
+  are in row 5 (`1_nightclub/04_0x044`):
+
+| Target | Task | Radius (1195) | Size (1196) | Title (1198) | Line (1200) | Where |
+|---:|---:|---:|---:|---|---:|---|
+| 122768 | 1793 `t1_recon_spytarget_access_point` | 80 | 150 | 737 "Generator" | 1333 | (0, 385, 1647) |
+| 122764 | 1794 `t1_recon_spytarget_dimitri` | 90 | 150 | 738 "Dimitri" | 1332 | nested under 122763; see below |
+| 122766 | 1795 `t1_recon_spytarget_talon_plates` | 100 | 120 | 739 "Money Printer" | 1334 | (6, −13, 928) |
+
+  - In row 5, the job's event 19 attaches 122764 to Dimitri (122332, class 59), 150 above his position.
+  - Tolerance (1197) is unset, so the default 0.25 applies [R].
+  - Each task's state-1 switch brings its target in.
+- **The Sly 2 constants:**
+  - **No minimum distance.** The value at `0x002A8550` is `0x7F7FFFFF`, the largest `f32`. It is the starting
+    "best so far" of the nearest-target search. So any eligible target in view can be picked, and the nearest one
+    (by horizontal camera distance) wins [D for the value, R for the use].
+  - **Size:** the target's screen length × 1/120 (`0x3C088889`, loaded at `0x00202F4C`) [D].
+  - **Centring:** 1 − (d − 128) × 1/128, clamped to 0–1 (128.0 at `0x00202F18`, 1/128 at `0x00202F30`) [D].
+  - **Buttons:** the shutter is mask **`0x0A`** (R1 and R2). In the ready state 7 it is **`0xFA`**, which adds the
+    four face buttons. The immediates are at `0x002034E8` and `0x00203528`; the button bits come from `0x002A97F8`
+    [D].
+- A good picture asks the target's task (1201) for state 2, with the target as requester (`0x002036E8`) [R]. So each
+  of 1793–1795 is finished by its own picture.
+- `t1_recon_complete` (1796, option 1272) follows them. Its module 42 starts sequence 1797 on task event 11 when its
+  script ID 342 returns 1, and 1797 sets 1796 to state 2.
+
+**Binocucom and photo-mode task events** (added 2026-11-21). Opening the binocucom raises **9** and closing it
+raises **11**, but through the photo prompt; the binocucom window itself raises 7 and 8. **None of them carries an
+object**: every one is broadcast with no object (the third argument is 0) [D].
+
+| Event | Raised when | Where |
+|---:|---|---|
+| 7 | the binocucom window opens (state 0); **12** instead in the binocucom radio-talk mode | `0x0019D700` / `0x0019D6E8` |
+| 9 | the photo prompt enters state 0. The window's opening puts the prompt in state 0 straight after event 7 | `0x00202CB0`, reached from `0x00202A68` |
+| 10 | a picture was accepted (leaving prompt state 9, after the target's task request) | `0x002029A8` |
+| 8 | the window closes (state 2) or is torn down; **13** in the talk mode | `0x0019D81C`, `0x0019D8B8` / `0x0019D804`, `0x0019D8A0` |
+| 11 | the photo prompt enters state 10 (the window's close puts it there) or is torn down without passing through 10 | `0x00202CB0`, `0x00202CD4` |
+
+[D for the event numbers and that no object is passed; R for which window and prompt state each belongs to.] So 9
+follows 7, and 11 follows 8, every time the binocucom opens and closes outside a radio talk. Task 1790's tutorial is
+signalled on the first opening (9 → sequence 1792); task 1796's sequence 1797 starts on a closing (11) once its
+script ID 342 returns 1.
+
+**Doors: option 789 (script ID 771), and event 26 on use** [D unless marked]:
+
+- **789 is not a stored field.** Its option-table entry has no field, only a getter, `0x00228518`, which returns the
+  **level-table row of the door's destination world** (the door's destination record at +0x144, looked up by
+  `0x002109D0`). There is no load-time default: every door answers with its own destination row.
+- So the m1 jobs' test "unless 3 or 5" means "unless this door leads to the cellar (row 3) or the job's second world
+  (row 5)". Door 1735 (the episode-wide door in rows 2, 3 and 5) leads to row 3, and door 136718 (in row 3) leads to
+  row 5, so neither starts 1751. A door leading anywhere else, for example back to the hub (row 2), starts "Job
+  Abandoned!".
+- **Doors do broadcast 26 on use.** Class 26's script-event slot is the common routine `0x001A61E0`
+  (vtable `0x002DC6F0`), and the fire routine `0x002283D0` sets the door to state 4 and then raises script event 5
+  on it through that slot. That broadcasts task event 26 with the door.
+
+**`t1_follow_complete` (1822, "Steal Dimitri's Access Code", job 1818 `m1_follow_dimitri`, row 2)** [D unless
+marked]. It takes no extra player action once the follow has worked:
+
+1. Task 1821 (`t1_follow_dimitri_on_streets`, option 1272) is the follow itself. Dimitri (122332) walks the command
+   list 1826.
+2. **When list 1826 reaches its end**, module 66 (1826's own) gets event 4 (the list's last command 599, value
+   124052; command 599 raises event 4 on its list's own module with its object argument [R]). It asks volume
+   **123886** (class 22) whether the current character's position is inside (the volume's script ID 108 = stream
+   option 366, handler `0x00104718`, a point-in-shape test).
+   It was set up by the job's method 1879 and the placement's route (below).
+   - **Inside:** task 1822 is asked for state 4 (current), with no delay.
+   - **Outside:** the job fails with reason string 829, "Make sure you can see how Dimitri gets through the door."
+3. Task 1822's module 62 starts sequence **1833** on becoming current (no starter). 1833:
+   - stops sequences 1829 and 1828 (command 631);
+   - plays Dimitri's line in a thread;
+   - adds 124056 and gives Dimitri command list 1827 (command 711);
+   - **waits for signal 98046** (command 629; dialogue-and-voice.md 2.1);
+   - then plays clip 124057 on 124056, plays a line, and **sets 1822 to state 2**, then removes 124056.
+4. The signal comes from list 1827's module 67. Each 599 command in 1827 raises event 4 with its value (30744, 76873,
+   33582 match the module's cases [D for the match, R for the mechanism]). On 33582, the last point, the module
+   hides 123887, sends 98046 to 1833 (script ID 640) and calls the job's script ID 1877.
+
+So the player only has to be inside 123886 when Dimitri finishes list 1826. After that, Dimitri's walk along 1827
+and the sequence finish the task.
+
+**How job 1818 sets up the follow** (module 59 of `f_nightclub_macro`; row 2) [D unless marked]. The job keeps the
+live Dimitri in its property 1880 and a "following" flag in 1881.
+
+- **Method 1879** (called by sequence 1823's or 1824's module on value 123882):
+  1. Dimitri's placement **122332** (class 6, package `npc_dimitri`, a shared package) is asked for its copy with
+     script ID 1021 (lease one if needed), and the result is stored as 1880. Script ID 1023 then locks that lease
+     ([classes/placement.md](classes/placement.md) 2.1).
+     - **This is what puts Dimitri in the world.** Taking the lease adds the copy's objects to the world at the
+       placement's matrix, and re-applies the placement's target-6 block: route 1826, plus options 13 and 8. The
+       placement's own option 26 (its root block, target 5) is not re-applied [D for the calls, R for the rest].
+     - So the copy is live and updating before it is given list 1825. No out-of-world copy needs to run a list.
+     - Whether an out-of-world object runs its command list does not arise on this route. Objects out of the world
+       are not in the update list (clock-and-loop.md) [R].
+  2. Trigger volume **123878** (class 24, option 26) is attached to the copy (script IDs 33 with mode 3, then 37) and
+     added (39). Its module 45 handles event 6 (the copy left it, or it left the copy): it calls the job's method
+     1878, which fails the job with string 827 "Dimitri got too far away!" while 1881 is set. So 123878 is the leash
+     that travels with Dimitri.
+  3. Placement **123879** (package `mission_waypoint`, a marker) is attached to the copy (script ID 33, mode 1) and
+     put at its position (34).
+  4. Script ID 1884 is called on **123880**, a class-6 placement of package `f_dimitri_boat`. That package's root
+     object (142629, class 48) defines 1884 as "hide mesh group 142636" (script ID 111) and 1885 as "show it" (110),
+     in its module 0. So 1884 hides part of the boat.
+  5. The copy is given command list **1825** (script ID 441 on class 59 = stream option 317, handler `0x00103DB0`:
+     run this command list), and 1881 is set.
+- **Method 1877** undoes it: clears 1881; unlocks the lease (1024) and removes the copy (40); clears 1880; removes
+  123878 and detaches 123878 and 123879 (script ID 33 with no object).
+- **From 1825 to 1826.** 1825 is a one-off list: look at marker 124045, play clip 122439 (stepping off the boat [I]),
+  `599 −1` (its module 65 then sets the boat's 478 to 17840), and follow curve 124046. When it ends, nothing names
+  1826 in any script or command. 1826 is Dimitri's **route**: placement 122332 sets the copy's option 273 (the
+  guard's route command list, guards.md) to 1826 [D]. A guard whose scripted list has run out goes back to its route
+  [I]. 1826 starts on curve 124047, the curve after 124046. Its module 66 starts sequence 1828 on event 2 (the list
+  started on the guard) and stops it on event 3 (the list was replaced or stopped) [R for events 2 and 3].
+- **Events about the copy** (job's event-17 handler, tested only while 1881 is set and only when the event's object
+  is the copy 1880) [D for the handler and the broadcasts; R where marked]:
+
+| Task event | Raised when | Job's response |
+|---:|---|---|
+| 19 | a sensor entry of a character's detector (class 51 and derived) goes to "seen" (`0x00154138`; the object is the detector's owner, Dimitri) [R for "seen"] | start sequence 1830, which ends by failing the job with string 828 "Dimitri spotted you!" (its module 69 on value 33832) |
+| 21 | the guard enters a hit reaction (`0x00179720`, `0x001797D0`) [R] | start 1830 as for 19 |
+| 22 | the guard gains state 12, the first step of investigating a noise or a suspicion (table `0x002C3D98`: state 3 → event 20, state 12 → event 22) [R for "investigating"] | start sequence 1829 (Dimitri's suspicious line) |
+
+  So yes: 19 comes from the copy's own detector seeing the player, and 21 and 22 from its reactions.
 
 ## 5. Jobs
 

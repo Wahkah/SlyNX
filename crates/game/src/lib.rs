@@ -21,6 +21,7 @@ pub mod frontend;
 pub mod iris;
 pub mod level;
 pub mod movie;
+pub mod photo; // Sly 3 hook (shared with Sly 2): taking pictures with the binocucom.
 pub mod saving;
 pub mod session;
 pub mod settings;
