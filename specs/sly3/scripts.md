@@ -398,7 +398,7 @@ closes the block the first opens [I].
 |---|---|---:|
 | 1886 (`0x75E`) | always true | 1,114 |
 | 1887 | always false | 5 |
-| 1888 to 1890 | a state test on the command's object | 1,673 |
+| 1888 to 1890 | a test on the object named by the condition's second word (looked up by OID, `0x0017E1B8`), in `0x00226950` [X]: **1888** its +0x54 equals 1. On a task that is the play counter, so 1888 means "the first time this task has been current" [I]. **1889** its mode (+0xFC) is 0, live play. **1890** its mode is 1, being restored (missions.md 4.1a) | 1,673 |
 | 1891, 1892 | an alarm of this script is set / is not set | 86, 101 |
 | 1894 | no dialogue line is playing | 132 |
 | 1895 | a dialogue line is playing | 24 |
@@ -529,6 +529,35 @@ waits until the segment retracts.
 
 *Interpretation:* `0x69` **returns the player to the nearest suitable mission waypoint**. It is a reset used after
 falls and failed sections [I]. The record field names are not established.
+
+### 7.4 Module environments and copied groups [X] [D]
+
+- **One script block per group, loaded once per world load.** The world loader (`0x0014F440`, the reference's
+  LoadSwFromBrx) loops once over the groups (`0x0014F750` to `0x0014F9C0`). Per group it calls the script-block
+  loader `0x002499F0` once. That loader evaluates each module into a new frame (`0x002BA9A8`), keeps the frames
+  in a block {key, count, frames}, and makes the block current (world +0x3F18; block list +0x3F1C). The current
+  block is cleared after the group (`0x0014F870`).
+- **Objects bind to the shared module frame.** New objects (`0x00150690`, PloNew) look up frame n of the current
+  block (`0x00249B78`). They store it in their environment slot with a reference-counted assignment
+  (`0x002BAA50`), not a copy. Proxy overrides (`0x001FA778`) do the same, then make the frame's parent the
+  object's previous frame. So the objects of a group's **first copy** share that module's top-level variables.
+  Later copies get their own cloned frames (next item).
+- **Group copies clone their objects, and the clone clones the environment** (correction; matches the Sly 2
+  finding) [X].
+  - After a group's objects are loaded and its block is cleared, the world loader runs `instances − 1` more
+    passes (`0x0014F8D8` to `0x0014F91C`, counting to the group's instance count at +0x8). Each pass clones every
+    object of the group with `0x001507E0` (the reference's PloCloneLo).
+  - PloCloneLo makes a new object (`0x00150690`) and calls the source's clone method, vtable slot 44 (+0x160).
+    The base clone (`0x001C8BF0`) clones the source's frame with `0x00129BE0` (CFrame::CloneTo): the same
+    parents, the bindings copied, and procedures re-closed over the new frame (CProc::CloneTo, `0x0012ACC8`). It
+    then stores that new frame in the clone's environment slot (`0x002BAA50`).
+  - Pool leases clone the same way: placement instances taken with script ID 825 / command `0x6F` go through
+    `0x001FBB08`, and `0x001FB408` → `0x001FB494` clones the frame.
+- So **each copy gets its own copy of the module's top-level variables**, cloned from the first copy's frame
+  at the time of cloning. The first copy keeps the frame of the block load. For v_gauntlet's `generator_rig`
+  (2 instances, taken by placements 139785 and 140134), the spawner's s1856 / s2324 … are separate per copy, and
+  each copy's event 0 `set`s its own. A port must clone the module frame (bindings copied, closures re-bound)
+  for every object copy and every pool lease, rather than sharing it.
 
 ## 8. Test vectors
 

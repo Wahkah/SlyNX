@@ -594,6 +594,64 @@ live Dimitri in its property 1880 and a "following" flag in 1881.
 
   So yes: 19 comes from the copy's own detector seeing the player, and 21 and 22 from its reactions.
 
+**`t1_waterpump_break_tank` (1884, job `m1_waterpump`, row 7 `1_nightclub/06_0x049`)** (added 2026-11-21) [D
+unless marked]. The player, as Murray, throws **five rats** into the open water main. Each splash advances the big
+tank one stage, and the fifth finishes 1884.
+
+- **123920** is a placement of package **`npc_swarmer_rat`** (a swarming creature, class 57) at (−4569, 3205, 128) in
+  `f_nightclub_waterpump_rig`. Task 1884's module (module 110 of `f_nightclub_macro` in this world) has two handlers
+  that use it:
+  - **Event 17, task events 19, 21, 23, 24:** if the event's object belongs to 123920 (the object's script ID 31,
+    stream option 18, returns the placement that leases its copy [R]), task 1884 is asked for state 4 (current).
+    So spotting, hitting or knocking out that rat makes the task current. The 19/21/23/24 cases are not the count.
+  - **Event 17, task event 26:** if the object is class 36 and its parent (script ID 32, the parent field) is a
+    class-57 creature, the pending 20 s hint timer is cancelled [I for "a rat being picked up"].
+- **Becoming current (event 19):** it calls 123922's 1888, shows HUD string 1391 ("Toss the rats into that open water
+  main and plug up those pipes.") and hint 798 (10 s). It also sets a 20 s timer that repeats 798 and adds 1401
+  ("Murray, use O to pick up guards…").
+- **The water main:**
+  - Placement **124106** puts package `f_boilerroom_tank` at (938, 845, −200). Its root 125253 (class 48) holds
+    trigger volume **125273** (class 24, option 433 = 57). Only class 57 counts there, and 57 is a leaf, so only the
+    swarming creatures count (object-stream.md 3.1).
+  - The tank package's module 0 handles the volume's event 5 (a rat fell in). It raises script event 5 on the volume's
+    parent, the tank root: script ID 12 = stream option 11, whose method `0x00133340` raises event 5 on the object.
+    Then it removes the rat (script ID 534 = the first object inside, then 40) [D for the calls; I that the module is
+    the volume's].
+  - Placement 124106 binds the tank root to **module 1 of `f_nightclub_waterpump_rig`** (patch on target 5, module
+    index 1). That module's event-5 handler:
+    1. calls the replaced handler (op133; the root had no module of its own, so this is the no-op 134);
+    2. starts sequence **1883** with no starter;
+    3. calls the tank's parent's 1888 (module 0 of the rig object 123922: a 1 s delayed restart of the generator
+       17346 unless it is running) [R for the effect].
+- **Sequence 1883** sets two state-machine goals: tank 124106's state machine 124107 to 124108, and pipe 124109's 59544
+  to 124110 (the splash and the plugged pipe [I]).
+  - When 1883 ends, its module 109 (event 6, the sequence ended [R]) calls 1884's property **1887**.
+  - 1887 increments a counter and steps the big tank 123921 (`f_boilerroom_tank_big`, state machine 123923) and the
+    generator 17346:
+
+| Rats in | Tank 123921's goal | Generator 17346's option 1354 | Also |
+|---:|---|---:|---|
+| 1 | 123924 | 4.0 | the hint timer is cancelled |
+| 2 | 123925 | 3.0 | |
+| 3 | 123926 | 2.0 | |
+| 4 | 123927 | 2.0 | |
+| 5 | 123928 | 5.0 | **task 1884 → state 2** (1104 = stream option 1280) |
+
+- **Event 21** (any state change) resets the counter to 0, sets 1354 back to 5.0 and calls 123922's 1373.
+- Task 1884's state-machine goals (1288) put the tank, the pipe and the big tank in their intact or broken states:
+  intact for task states 0–1, broken for 2–3 (124106/124107: 17435 / 17840; 124109/59544: 124112 / 97696;
+  123921/123923: 124113 / 49660).
+- Its state-1 switch brings in trigger volume 124111 (Murray only, option 432 = 9; option 440 names 1884 with state
+  −1 [I for its meaning]).
+- **To build:**
+  - Murray picking up and throwing a rat;
+  - volume 125273 counting class 57 and removing what enters;
+  - the bound module starting 1883;
+  - the end-of-sequence event 6 reaching module 109;
+  - the counter in 1887.
+
+  Guards thrown in do not count, because the volume counts only class 57.
+
 ## 5. Jobs
 
 Rules [R]:

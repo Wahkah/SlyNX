@@ -75,6 +75,14 @@ accessor was needed. `Program::read_table` reads a whole table at an offset, inc
   environment, which all objects attached to that module share: a module keeps the first outer module it gets, and
   a different one later, or a chain that would loop, is refused and counted (`outer_conflicts`).
   `outer_module(m)` reports the chain. `load` starts every module over without outer modules, so attach after it.
+- **Package copies** (scripts.md 1, both games): a package's modules are evaluated once, into one frame each, and
+  every copy past the first runs in its own clone. `attach_copy(object, module, copy)` attaches an object of copy
+  `copy`: copy 0 uses the loaded frame; copy n gets a clone made on its first object and shared by that copy's
+  objects (`Heap::clone_env`: the same parent, the bindings copied with lists copied cell by cell, and each
+  procedure closed over the original re-created closed over the clone). `raise_event` runs a copied object's handlers
+  in its clone, with `s1002` the object; `frame_of(object)` and `lookup_for(object, symbol)` read it. Clones are GC
+  roots and are dropped by `load`. Modules reached through a placement's bind are not cloned: attach those objects
+  with `attach` / `attach_with_outer`. A pool lease or a Sly 3 group instance is a further copy number.
 - **Truth**: only `#f` is false.
 - **Errors** are ordinary values (`Value::Error`, scripts.md 11, item 6). Each new error is passed to
   `ScriptHost::report` once and counted (`error_count`). They do not propagate: in a test an error counts as true;

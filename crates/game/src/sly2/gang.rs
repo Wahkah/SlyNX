@@ -213,6 +213,23 @@ pub fn knock_vector(from: [f32; 3], to: [f32; 3], kind: u32) -> [f32; 3] {
     v
 }
 
+/// Changes a guard's or creature's behaviour; false when `h` is none.
+fn set_guard(world: &mut World, h: Handle, f: impl FnOnce(&mut engine::behavior::sly2::Sly2Guard)) -> bool {
+    match world.behavior_mut(h) {
+        Some(Behavior::Sly2Guard(g)) => {
+            f(g);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// How high above Murray's base a carried guard rides. *Placeholder*: the carry attaches it to his hands.
+const CARRY_HEIGHT: f32 = 200.0;
+/// A dropped load's velocity in Murray's frame, 400 backward and 600 up (characters.md 4.6).
+const DROP_BACK: f32 = 400.0;
+const DROP_UP: f32 = 600.0;
+
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     engine::math::length(d)
@@ -234,6 +251,8 @@ pub struct GangPlayer {
     in_safe_house: bool,
     /// Sly 2 pose hook: the characters' clips by state (`engine::anim::sly2_gang`).
     pub clips: engine::anim::sly2_gang::GangClips,
+    /// The guard or creature Murray carries (characters.md 4.6).
+    carried: Option<Handle>,
 }
 
 impl GangPlayer {
@@ -248,6 +267,7 @@ impl GangPlayer {
             purse: Purse::default(),
             in_safe_house: false,
             clips: Default::default(), // Sly 2 pose hook
+            carried: None,
         }
     }
 
@@ -482,6 +502,26 @@ impl PlayerSystem for GangPlayer {
                 {
                     engine::gang::pool::take(world, me, item);
                 }
+                // A guard or creature Murray lifts is his to place until he throws it (characters.md 4.6): it flies
+                // from above him with the throw's velocity (missions.md 4.3: the rats tossed into the water main).
+                GangEvent::Lift(id) => {
+                    if let Some(h) = world.handle(id)
+                        && set_guard(world, h, |g| {
+                            g.held = true;
+                            g.flight = None;
+                        })
+                    {
+                        self.carried = Some(h);
+                    }
+                }
+                GangEvent::Thrown { id, velocity } if self.carried.is_some_and(|h| h.index() == id) => {
+                    if let Some(h) = self.carried.take() {
+                        set_guard(world, h, |g| {
+                            g.held = false;
+                            g.flight = Some((velocity, 0.0));
+                        });
+                    }
+                }
                 GangEvent::Thrown { id, velocity } if id <= 255 => {
                     if let Some(g) = engine::gang::pool::copy_of(world, id as u8).filter(|g| g.state == 0)
                         && let Some(t) = world.world_transform(me)
@@ -504,6 +544,29 @@ impl PlayerSystem for GangPlayer {
                 GangEvent::FlopLanded { position, .. } => around(world, position),
                 GangEvent::Dart { to, .. } => around(world, to),
                 _ => {}
+            }
+        }
+        // The carried guard rides above Murray; dropped without a throw (Murray hit or falling), it gets (−400, 0, 600)
+        // in his frame (characters.md 4.6).
+        if let Some(h) = self.carried {
+            let murray = self.gang.as_ref().and_then(|g| g.get(Who::Murray));
+            match murray {
+                Some(m) if m.carrying == Some(h.index()) => {
+                    let (s, c) = (engine::math::sin(m.yaw), engine::math::cos(m.yaw));
+                    let p = [m.position[0], m.position[1], m.position[2] + CARRY_HEIGHT];
+                    world.set_world_transform(h, Affine { cols: [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]], t: p });
+                }
+                _ => {
+                    let back = murray.map_or([0.0, 0.0, DROP_UP], |m| {
+                        let (s, c) = (engine::math::sin(m.yaw), engine::math::cos(m.yaw));
+                        [-DROP_BACK * c, -DROP_BACK * s, DROP_UP]
+                    });
+                    set_guard(world, h, |g| {
+                        g.held = false;
+                        g.flight = Some((back, 0.0));
+                    });
+                    self.carried = None;
+                }
             }
         }
         // Medicine the played character touches: taken unless its health and power are both full.

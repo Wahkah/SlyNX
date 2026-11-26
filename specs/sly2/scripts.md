@@ -62,6 +62,12 @@ sources:
   - kind: executable
     what: SCUS_973.16 (SHA-256 a511a94b…6a73), option-table entry 2 (handler 0x00100228) and the class test 0x00132B10 (2026-11-21)
     used_for: what the class test answers (section 5) [D]
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), the module frame lookup 0x001FFA40, the module evaluation 0x001FFA70, the object clone 0x0013E510 / 0x001A6730 (frame clone call at 0x001A6824) and the bind 0x001C9F74 (2026-11-21)
+    used_for: module frames per package copy and per bind (section 1) [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/splicemap.cpp, sw.cpp, loaders.cpp, update.cpp; sly2-decomp @ 33e2bab9 (object clone, frame clone, procedure clone)
+    used_for: when modules are evaluated (section 1) [R]
 reviewed_by: pending
 date: 2026-11-21
 ---
@@ -85,6 +91,39 @@ what changed. Notation as in the Sly 1 specs; `sN` is symbol N and `opN` built-i
 - **Nested records attach too.** Records inside a solid body are created by the same object-list reader as top-level
   records, and object creation binds the record's module whatever the depth [R]. So all 10,554 records attach to
   their module, not only the 7,138 top-level ones.
+- **Module environments: one per package copy, not one per module** (added 2026-11-21; corrected the same day).
+  The first answer here ("one environment shared by every object attached to the module") was wrong for package
+  copies. [D for the calls; R for what the routines do]
+  - **The block is loaded once per package.** When a package section loads, each module of its script block is
+    evaluated once into a new module frame (`0x001FFA70`, frame allocator `0x00256DD0`). The package's records are
+    then loaded, and each record's module index is resolved to that frame (`0x001FFA40` returns the stored frame,
+    without copying it).
+  - **Each further copy of the package gets its own frames.** A package placed more than once is loaded once. The
+    world loader then clones every loaded object for each further copy (`0x0013E510`, the object clone `0x001A6730`).
+    The object clone **clones the object's frame** (call of `0x00127E90` at `0x001A6824`):
+    - the new frame keeps the same parents;
+    - every binding is copied, with lists copied;
+    - every procedure value is re-created closed over the **new** frame (`0x00128F70`).
+
+    So copy 1, copy 2 and so on each have their own copy of the module's top-level variables. Copy 0 keeps the
+    original frame. Objects leased from a pool get cloned frames the same way (`0x001CA7B8`).
+  - **The clone is taken at load, before any event 0.** Event 0 is raised for each object at world start, after the
+    remove-at-start pass, in object order [R]. So every copy starts from the module's freshly evaluated values, and
+    a `set` (`k1`) in a handler finds the variable in that object's own frame first.
+  - **Row 7 example.** Copy placements 123918 and 123919 place package `f_powerbox` (root 125050, class 98, its own
+    module 0). Each patches the root with option 8, custom property 1374: tasks 1880 and 1881 [D]. Module 0's event-0
+    handler does `(set s1102 (op112 (op111 s1002 1374) …))`. The two roots are copy 0 and a clone, so each stores its
+    own task in its own s1102, and the event-4 and event-5 handlers ask the right task.
+  - **Binding placements do not isolate.** A placement patch with a module index binds the copy's object to a module
+    of the **placement's** package. The bound frame is that module's single frame: the object's old frame is added
+    as a parent, and the module frame becomes the object's frame (`0x001C9F74` calls `0x001FFA40`). Nothing is
+    cloned. A `set` on that module's top-level variables therefore writes the one shared frame. Two objects bound to
+    the same module (by two placements) share it, and the frame then has two parents (4.3).
+  - **For a port:**
+    - evaluate each module once;
+    - give every further package copy a cloned frame, with procedures re-closed over it;
+    - keep one shared frame for modules reached through binds;
+    - pass the object as `s1002`.
 - With the debug flag set (never on the disc), 16 bytes of source position follow each tag byte and three strings
   follow each module [R].
 

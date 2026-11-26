@@ -81,6 +81,9 @@ struct Cx<'e> {
     held: bool,
 }
 
+/// The guard class (pooled for spawn points).
+const GUARD_CLASS: i16 = 58;
+
 struct Loader<'b> {
     data: &'b [u8],
     bodies: &'b [GroupBody],
@@ -94,6 +97,9 @@ struct Loader<'b> {
     copy_ids: Vec<BTreeSet<i32>>,
     group_ids: BTreeMap<usize, BTreeSet<i32>>,
     instances: BTreeMap<i32, i32>,
+    /// Sly 3 hook (missions.md 4.1a, script ID 825): the groups mode-2 placements (spawn points) name, outside the
+    /// crew.
+    spawn_groups: BTreeSet<i32>,
     path: Vec<u32>,
     /// Sly 3 script hook: the program-wide index of each group's first script module (as
     /// `script::Program::from_sly3_bodies` numbers them).
@@ -164,6 +170,8 @@ impl World {
                 pose: Vec::new(),
                 game_objects: BTreeMap::new(),                   // Sly 3 host hook
                 pickpocket: alloc::collections::BTreeSet::new(), // Sly 3 host hook
+                pools: BTreeMap::new(),                          // Sly 3 spawn hook
+                pool_origins: BTreeMap::new(),                   // Sly 3 spawn hook
                 poser: Default::default(),                       // Sly 3 pose hook
                 objects: Vec::new(),
                 ids: Default::default(),
@@ -175,6 +183,7 @@ impl World {
             copy_ids: Vec::new(),
             group_ids: BTreeMap::new(),
             instances: BTreeMap::new(),
+            spawn_groups: BTreeSet::new(),
             path: Vec::new(),
             first_module: bodies
                 .iter()
@@ -194,6 +203,30 @@ impl World {
         for (i, g) in groups.iter().enumerate() {
             if g.shared != 0 {
                 ld.group(&mut w, i, NONE, Affine::IDENTITY, 0)?;
+            }
+        }
+        // Sly 3 spawn hook (missions.md 4.1a: script ID 825 takes a new instance of a placement). Stand-in, a working
+        // choice [I] for the pool's size: a group a spawn point names gets the copies its copy count (the world's
+        // header) leaves after the placed ones, made now at the top level and out of the world; 825 takes a free one.
+        // v_gauntlet: the brawl's guards (144809) have 7, 3 placed, so 4 in the pool. Only groups of guards (a class-58
+        // record at their top level) are pooled; the other spawn points' groups are left as they were.
+        for gid in core::mem::take(&mut ld.spawn_groups) {
+            let Some(g) = ld.by_id.get(&gid).copied() else { continue };
+            if !bodies.get(g).is_some_and(|b| b.objects.iter().any(|r| r.class == GUARD_CLASS)) {
+                continue;
+            }
+            let placed = ld.instances.get(&gid).copied().unwrap_or(0);
+            let want = ld.level.copy_counts.get(&gid).copied().unwrap_or(0) - placed;
+            for _ in 0..want.max(0) {
+                let first = w.slot_count() as u32;
+                let copy = ld.group(&mut w, g, NONE, Affine::IDENTITY, 1)?;
+                for s in first..w.slot_count() as u32 {
+                    if w.parent_of_slot(s) == NONE {
+                        w.flags[s as usize] &= !flags::IN_WORLD;
+                        ld.level.pool_origins.insert(s, w.local[s as usize]);
+                    }
+                }
+                ld.level.pools.entry(gid).or_default().push(copy);
             }
         }
 
@@ -441,6 +474,9 @@ impl<'b> Loader<'b> {
             self.level.stats.spawners += 1;
             for b in p.binds.iter().filter(|b| b.target == BIND_SELF) {
                 self.apply(w, slot, &b.options);
+            }
+            if cx.parent == NONE || !matches!(w.class_of_slot(cx.parent), CREW_FIRST..=CREW_LAST) {
+                self.spawn_groups.insert(p.group_id);
             }
             // Sly 3 hook, stand-in (a working choice [I]; the specs do not say how Sly 3 makes a gadget's objects):
             // a core crew member's mode-2 spawner gets one copy of its group, out of the world, which the session uses

@@ -39,6 +39,7 @@ use render::{Backend, Camera, FrameStats, RenderError, Renderer};
 
 use crate::sly2::level::{StaticLevel, upload_stage};
 
+pub mod clips; // Sly 3 hook: clips' add and remove events (knock-out clips).
 pub mod commands;
 pub mod crew;
 pub mod flow;
@@ -376,6 +377,8 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     pub photo: Option<photo::Photo>,
     /// Sly 3 hook (guards.md 4a): the guards running command lists.
     pub guards: Vec<guards::GuardRun>,
+    /// Clips playing for their add and remove events (the guards' knock-out clips, guards.md 4b).
+    pub clips: clips::Clips,
     /// Sly 3 hook (missions.md 4.1a): the hint scripts show (string, seconds left); drawing it is the 2D layer's.
     pub hint: Option<(i32, f32)>,
     /// The last dialogue line asked for (line ID), for tests.
@@ -465,6 +468,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             lock: None,
             photo: None,
             guards: Vec::new(),
+            clips: clips::Clips::default(),
             hint: None,
             last_line: None,
             bomb: None,
@@ -688,6 +692,8 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         game.world.shared.sly3_derived =
             (0..256i16).map(|c| (c, derived_classes(&disc.classes, c))).filter(|(_, d)| d.len() > 1).collect();
         self.bomb = None;
+        self.clips = clips::Clips::default();
+        self.guards.clear();
         self.in_safe_house = false;
         self.shop = None;
         // The job system: the progress block goes on from the previous world (with what it carried, unless this
@@ -1026,6 +1032,14 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     self.photo = None;
                 }
             }
+            // Sly 3 hook (guards.md 4b): a knocked-out guard plays its knock-out clip, whose remove event takes it
+            // out of the world.
+            for h in core::mem::take(&mut g.world.shared.sly3_knocked_out) {
+                if let Some(clip) = clips::knockout_clip(&g.world, h) {
+                    self.clips.play(&g.world, h, clip);
+                }
+            }
+            self.clips.step(&mut g.world, measured);
             // Sly 3 hook (guards.md 4a): the guards' command lists; their alarms are the command scripts'.
             for r in &mut self.guards {
                 r.update(measured, &mut g.world, &mut self.scripts.alarms);
@@ -1042,8 +1056,9 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             let derives = |c: i16, b: i16| derived.get(&b).is_some_and(|v| v.contains(&c));
             waypoints::update(&mut self.waypoints, &mut g.world, self.jobs.as_mut(), &derives);
             // Sly 3 hook: command scripts other scripts started (method 747, missions.md 4.1a).
-            for (script, with) in core::mem::take(&mut g.world.shared.sly3_script_starts) {
-                self.scripts.start(&g.world, script, with);
+            // Each on the script object called (its own copy: v_interpol's 88261, one per cell door).
+            for (script, with, h) in core::mem::take(&mut g.world.shared.sly3_script_starts) {
+                self.scripts.start_in(&g.world, script, with, Some(h));
             }
             // And those they stopped (method 749).
             for script in core::mem::take(&mut g.world.shared.sly3_script_stops) {
@@ -1072,6 +1087,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             for (_, h) in core::mem::take(&mut self.scripts.started) {
                 g.world.raise(h, 5, Vec::new());
             }
+            // A command script that ran to its end gets script event 6 (working reading, `commands::Scripts::ended`).
+            for (_, h) in core::mem::take(&mut self.scripts.ended) {
+                g.world.raise(h, 6, Vec::new());
+            }
             // Control scripts handed over (method 983).
             for h in core::mem::take(&mut g.world.shared.sly3_control_to) {
                 match control_to(&mut g.world, h) {
@@ -1081,7 +1100,19 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 }
             }
             // Scripts, then what they asked.
-            let view = commands::View { line_playing: false };
+            // The tasks' play counts (each focus key of the progress block) and the restore mode, for the object
+            // tests 1888 to 1890.
+            let plays = self.jobs.as_ref().map_or_else(Default::default, |j| {
+                j.graph
+                    .tasks
+                    .iter()
+                    .map(|t| {
+                        let n = t.keys.focus.as_ref().and_then(|k| j.progress.get(k, None)).map_or(0, |v| v.as_i32());
+                        (t.id, n)
+                    })
+                    .collect()
+            });
+            let view = commands::View { line_playing: false, plays, restoring: g.world.shared.sly3_restore_mode };
             self.scripts.update(Some(&g.world), &view, measured);
             for r in core::mem::take(&mut self.scripts.requests) {
                 // Sly 3 hook (2D layer): the lines' subtitles.
@@ -1111,6 +1142,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                         }
                     }
                     Some(SessionAction::Binocucom(true, look_at)) => {
+                        // The view opens with the photo mode (as R3 opens both), so a later R3 closes both.
+                        if let (None, Some(p)) = (g.world.shared.camera_binocucom, g.world.player) {
+                            engine::gang::toggle_binocucom(&mut g.world, p, false);
+                        }
                         let fov = g.render.camera.fov_y;
                         self.photo = photo::Photo::open(&g.world, photo::params(fov));
                         let at = g.world.find_sly3_id(look_at, None).and_then(|h| g.world.position(h));
@@ -1118,7 +1153,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                             p.look_at(at);
                         }
                     }
-                    Some(SessionAction::Binocucom(false, _)) => self.photo = None,
+                    Some(SessionAction::Binocucom(false, _)) => {
+                        // A script's close (0x6E) closes the view itself too, not only the photo mode.
+                        self.photo = None;
+                        g.world.shared.camera_binocucom = None;
+                    }
                     Some(SessionAction::SafeHouse) => self.in_safe_house = self.safe_house.is_some(),
                     Some(SessionAction::Hint(h)) => self.hint = h,
                     Some(SessionAction::GuardList(guard, list)) => {

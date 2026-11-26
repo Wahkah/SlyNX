@@ -150,6 +150,11 @@ pub struct Sly3Level {
     pub pickpocket: alloc::collections::BTreeSet<i32>,
     /// Sly 3 pose hook: the crew's clips applied to their poses (`anim::sly3_pose`).
     pub poser: crate::anim::sly3_pose::Sly3Poser,
+    /// Sly 3 spawn hook: the pooled copies of the groups spawn points name, by group ID (copy numbers), for
+    /// [`World::sly3_acquire`].
+    pub pools: BTreeMap<i32, Vec<u32>>,
+    /// Sly 3 spawn hook: each pooled copy's top-level objects' transforms as loaded (relative to the group's origin).
+    pub pool_origins: BTreeMap<u32, Affine>,
     objects: Vec<Sly3Object>,
     /// Slots by object ID (built at load; a destroyed object leaves it), for the ID searches.
     ids: alloc::collections::BTreeMap<i32, Vec<u32>>,
@@ -237,6 +242,62 @@ impl World {
         self.set_in_world(h, false);
         self.shared.sly3_hits.insert(slot, (target, hitter));
         Some(h)
+    }
+
+    /// Sly 3 script hook (scripts.md 7.4): each object's copy ordinal within its group, for
+    /// `script::Interpreter::attach_copy`: the group's first copy in load order is 0 (it keeps the module frame of
+    /// the block load), every further copy has its own number and so its own clone of the frame. The guard pool's
+    /// copies are cloned here at load, standing in for the clone the spec makes at each lease (825, `0x6F`); a
+    /// copy taken again keeps the frame it had.
+    pub fn sly3_copy_ordinals(&self) -> BTreeMap<u32, u32> {
+        let mut out = BTreeMap::new();
+        let Some(l) = self.sly3.as_deref() else { return out };
+        let mut seen: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+        for (slot, o) in l.objects.iter().enumerate() {
+            let copies = seen.entry(o.group).or_default();
+            let n = copies.iter().position(|&c| c == o.copy).unwrap_or_else(|| {
+                copies.push(o.copy);
+                copies.len() - 1
+            });
+            out.insert(slot as u32, n as u32);
+        }
+        out
+    }
+
+    /// Sly 3 spawn hook (missions.md 4.1a, script ID 825): takes a new instance of placement `placement` (class 8):
+    /// a free pooled copy of its group (none of its top-level objects in the world), placed at the placement, its
+    /// behaviours made afresh and its top-level objects brought into the world. Returns the copy's root, or None when
+    /// the pool has none free.
+    pub fn sly3_acquire(&mut self, placement: Handle) -> Option<Handle> {
+        let at = self.world_transform(placement)?;
+        let l = self.sly3.as_deref()?;
+        let formats_sly3::stream::Body::Placement(p) = &l.record(self.record(placement)?)?.body else { return None };
+        let pool = l.pools.get(&p.group_id)?;
+        let slots_of = |copy: u32| -> Vec<u32> {
+            (0..self.slot_count() as u32)
+                .filter(|&s| self.live[s as usize] && l.object(s).is_some_and(|o| o.copy == copy))
+                .collect()
+        };
+        let (slots, roots) = pool.iter().find_map(|&copy| {
+            let slots = slots_of(copy);
+            let roots: Vec<u32> = slots.iter().copied().filter(|&s| self.parent_of_slot(s) == super::NONE).collect();
+            let free = !roots.is_empty() && roots.iter().all(|&s| self.flags[s as usize] & super::flags::IN_WORLD == 0);
+            free.then_some((slots, roots))
+        })?;
+        for &s in &roots {
+            let Some(h) = self.handle(s) else { continue };
+            let origin = self.sly3.as_deref().and_then(|l| l.pool_origins.get(&s).copied()).unwrap_or(Affine::IDENTITY);
+            self.set_world_transform(h, at.mul(&origin));
+            self.set_in_world(h, true);
+        }
+        // The behaviours are made once the copy stands at the placement (a guard keeps its start as its home).
+        self.update_transforms();
+        for &s in &slots {
+            let Some(h) = self.handle(s) else { continue };
+            let b = crate::behavior::sly3::for_class(self, h);
+            self.set_behavior(h, b);
+        }
+        self.handle(*roots.first()?)
     }
 
     /// Frees every hit record made so far ([`World::sly3_hit_record`]): called before a new blast makes its own, once

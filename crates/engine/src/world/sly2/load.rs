@@ -162,6 +162,7 @@ impl World {
                 poser: Default::default(), // Sly 2 hook: clip poses
                 hud: Default::default(),
                 task_events: Vec::new(),
+                bound: Default::default(),
                 noise_objects: Vec::new(),
                 objects: Vec::new(),
                 ids: Default::default(),
@@ -493,6 +494,7 @@ impl<'b> Loader<'b> {
                                 w.outer_module.insert(r, old);
                             }
                             w.module[r as usize] = m;
+                            self.level.bound.insert(r);
                             self.level.stats.patch_modules += 1;
                         }
                     }

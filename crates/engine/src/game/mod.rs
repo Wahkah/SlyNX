@@ -164,14 +164,22 @@ impl Game {
                 .collect();
             g.world.set_event1_modules(event1);
             let handles: Vec<Handle> = g.world.handles().collect();
+            // Sly 2 hook: each package copy past the first runs in its own clone of the module frames (scripts.md
+            // 1); objects a placement bound, and Sly 1 worlds, keep the shared frame.
+            let ordinals = crate::world::sly2::copy_ordinals(&g.world);
             for &h in &handles {
                 let m = g.world.module(h);
                 if m >= 0 && (m as usize) < modules {
                     // A module given by a proxy override continues in the object's earlier module (scripts.md
                     // 11.3); the interpreter keeps the first outer module a module gets and counts refusals.
                     let outer = g.world.outer_module(h).filter(|&o| o >= 0 && (o as usize) < modules);
-                    if !interp.attach_with_outer(h.to_script(), m as u32, outer.map(|o| o as u32)) {
-                        g.outer_refused += 1;
+                    match (outer, ordinals.get(&h.index())) {
+                        (None, Some(&copy)) => interp.attach_copy(h.to_script(), m as u32, copy),
+                        _ => {
+                            if !interp.attach_with_outer(h.to_script(), m as u32, outer.map(|o| o as u32)) {
+                                g.outer_refused += 1;
+                            }
+                        }
                     }
                 }
             }

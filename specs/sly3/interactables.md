@@ -113,6 +113,11 @@ Sly 2's class 38 counterpart (Sly 3 class 36) does not occur on the disc [D].
 Sly 3's water options are new numbers (925 is Sly 2's 877 [R]); 929 lists current points (an object and a vector,
 18 entries in one world) [D]; 930 to 932 name the splash and spray effects [I]. Behaviour: Sly 2 section 7 [R].
 
+**Falling and water: open** (low priority). Whether Sly 3 has a kill height or an out-of-bounds respawn, and what
+a fall into a canal (class 101) does (death or respawn, and the penalty), were not traced. Sly 2's water damage
+(option 876, −1,000) has no Sly 3 option of the same layout in the table above. Command `0x69` (put the player back
+at the nearest mission waypoint, scripts.md 7.3) is the one respawn path found so far [I].
+
 ## 5. Use points (class 33)
 
 | Option | Uses | Worlds | Commonest values | Sly 2 option [R] |

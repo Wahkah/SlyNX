@@ -133,6 +133,15 @@ pub const GUARD_STRIKE: (f32, u32) = (10.0, 0x200);
 /// A swarmer's strike: most species bite for −3 with knock-back (guards.md 6.3; goose −5 and some parts −10 with other
 /// kinds; the per-part values are in the collision parts, read once `formats-sly2` gives their contact fields).
 pub const SWARMER_STRIKE: (f32, u32) = (3.0, 0x200);
+/// Gravity on a thrown creature: the gang's gravity (characters.md 3, the jump speeds' 2275).
+pub const FLIGHT_GRAVITY: f32 = -2275.0;
+/// The radius a thrown creature meets surfaces with. *Placeholder*: its collision parts are not read yet.
+pub const FLIGHT_RADIUS: f32 = 30.0;
+/// How long a thrown creature passes through what it starts inside (characters.md 4.6: a dropped load does not
+/// collide with Murray until 0.1 s after they part).
+pub const FLIGHT_CLEAR: f32 = 0.1;
+/// The longest flight before a thrown creature stops where it is. *Placeholder*, a guard against flying forever.
+pub const FLIGHT_TIME: f32 = 3.0;
 /// Hit points one attack of the gang takes. *Placeholder*: characters.md does not give them.
 pub const GANG_HIT: f32 = 20.0;
 /// An action's animation reference (guards.md 6.4): (object ID of a clip or state machine, start index).
@@ -392,6 +401,11 @@ pub struct Sly2Guard {
     pub counted_at: f32,
     /// Game time from which Bison's second attack may be used again.
     pub second_allowed_at: f32,
+    /// Lifted by Murray (characters.md 4.6): the carrier places it, and it does nothing of its own.
+    pub held: bool,
+    /// Thrown or dropped (characters.md 4.6): its velocity while it flies, under [`FLIGHT_GRAVITY`], until it
+    /// meets a surface (or after [`FLIGHT_TIME`]).
+    pub flight: Option<([f32; 3], f32)>,
 }
 
 impl Sly2Guard {
@@ -424,6 +438,8 @@ impl Sly2Guard {
             counted_at: o.and_then(|o| o.f32(opt::HIT_POINTS)).unwrap_or(40.0),
             counted_hits: 0,
             second_allowed_at: 0.0,
+            held: false,
+            flight: None,
             acting: None,
             parts: damage_parts(world, h),
             job: Job::Patrol,
@@ -557,7 +573,35 @@ impl Sly2Guard {
             q = [p[0] + d[0] * s, p[1] + d[1] * s, p[2]];
         }
         self.place(cx.world, cx.me, q);
-        (dist - stop).max(0.0)
+        // Left to go; within ARRIVED of the stop distance it has arrived (the last step lands on the stop ring, and
+        // rounding left a remainder just above 0 for good, stalling path following: Dimitri's list 1825).
+        let left = dist - stop;
+        if left <= ARRIVED { 0.0 } else { left }
+    }
+
+    /// One step of a throw's flight: ballistic, stopping where a sphere of [`FLIGHT_RADIUS`] meets a surface. A
+    /// trigger volume it passes counts it by its position (missions.md 4.3: the rats tossed into the water main).
+    fn fly(&mut self, cx: &mut Cx<'_>, v: [f32; 3], t: f32) {
+        let Some(p) = cx.world.position(cx.me) else {
+            self.flight = None;
+            return;
+        };
+        let v2 = [v[0], v[1], v[2] + FLIGHT_GRAVITY * cx.dt];
+        let to = [p[0] + v2[0] * cx.dt, p[1] + v2[1] * cx.dt, p[2] + v2[2] * cx.dt];
+        // Not against the characters (the thrower, characters.md 4.6), nor against what it starts inside while
+        // leaving the thrower's hands.
+        let hit = cx.collision.sweep_sphere(cx.world, p, to, FLIGHT_RADIUS, cx.me).filter(|h| {
+            let character = cx.world.class(h.object).is_some_and(|c| (53..=55).contains(&c));
+            !character && !(t < FLIGHT_CLEAR && h.t <= 0.0)
+        });
+        let at = hit.map_or(to, |h| [0, 1, 2].map(|i| p[i] + (to[i] - p[i]) * h.t));
+        self.place(cx.world, cx.me, at);
+        let t = t + cx.dt;
+        self.flight = if hit.is_some() || t >= FLIGHT_TIME { None } else { Some((v2, t)) };
+        if self.flight.is_none() {
+            self.post = at;
+            self.job = Job::Return;
+        }
     }
 
     fn place(&self, world: &mut World, me: Handle, p: [f32; 3]) {
@@ -572,6 +616,10 @@ impl Sly2Guard {
             let by_player = by.is_some() && by == cx.world.player;
             let e = if self.swarmer || by_player { KILLED_BY_PLAYER } else { KILLED_OTHERWISE };
             super::sly2_props::send_task_event_from(cx.world, e, Some(cx.me));
+            // Sly 3 hook (guards.md 4b): the session plays the knock-out clip, which removes the guard.
+            if cx.world.sly3.is_some() {
+                cx.world.shared.sly3_knocked_out.push(cx.me);
+            }
         }
         self.job = Job::KnockedOut;
         self.hit_points = 0.0;
@@ -661,6 +709,9 @@ impl Sly2Guard {
             .map(|n| n.position)
     }
 }
+
+/// A walk within this of its stop distance has arrived.
+pub const ARRIVED: f32 = 0.5;
 
 /// Task events a guard raises about itself (missions.md 4.3).
 pub mod task_events {
@@ -837,6 +888,13 @@ impl ClassBehavior for Sly2Guard {
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
+        if self.held {
+            return;
+        }
+        if let Some((v, t)) = self.flight {
+            self.fly(cx, v, t);
+            return;
+        }
         self.take_notices(cx);
         if self.knocked_out() {
             return;

@@ -78,6 +78,9 @@ struct Expect<'w> {
     objects: Vec<(i16, i32, Affine)>,
     copies: Vec<BTreeSet<i32>>,
     groups: BTreeMap<usize, BTreeSet<i32>>,
+    /// The groups spawn points name outside the crew, and the copies placements made, for the guard pools.
+    spawn_groups: BTreeSet<i32>,
+    instances: BTreeMap<i32, i32>,
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +154,9 @@ impl Expect<'_> {
                 let m = Self::at(&f, p.parent).mul(&p.matrix);
                 self.objects.push((r.class, r.id, m));
                 if p.mode == 2 {
+                    if !matches!(f.parent_class, 52..=54) {
+                        self.spawn_groups.insert(p.group_id);
+                    }
                     // A core crew member's spawner gets one pooled copy of its group (the loader's Sly 3 hook,
                     // gadgets.md 3).
                     if matches!(f.parent_class, 52..=54)
@@ -162,7 +168,10 @@ impl Expect<'_> {
                     return;
                 }
                 let copy = match self.world.group_by_id(p.group_id) {
-                    Some(g) if f.depth < 8 => self.group(g, m, f.depth + 1),
+                    Some(g) if f.depth < 8 => {
+                        *self.instances.entry(p.group_id).or_insert(0) += 1;
+                        self.group(g, m, f.depth + 1)
+                    }
                     _ => self.copy(),
                 };
                 if !p.fresh {
@@ -219,10 +228,31 @@ fn every_world_loads_with_the_formats_counts() {
         let w = load(d, i);
         let fw = formats_sly3::World::parse_with(bytes, &d.options, d.multipliers).unwrap();
         let ctx = fw.fresh_context(Some(*slot as i16));
-        let mut e = Expect { world: &fw, ctx, objects: Vec::new(), copies: Vec::new(), groups: BTreeMap::new() };
+        let mut e = Expect {
+            world: &fw,
+            ctx,
+            objects: Vec::new(),
+            copies: Vec::new(),
+            groups: BTreeMap::new(),
+            spawn_groups: BTreeSet::new(),
+            instances: BTreeMap::new(),
+        };
         for (g, entry) in fw.groups.iter().enumerate() {
             if entry.shared != 0 {
                 e.group(g, Affine::IDENTITY, 0);
+            }
+        }
+        // The guard pools (the loader's Sly 3 spawn hook, missions.md 4.1a): a guard group a spawn point names gets
+        // the copies its copy count leaves, at the top level.
+        let counts = &w.sly3.as_deref().unwrap().copy_counts;
+        for gid in core::mem::take(&mut e.spawn_groups) {
+            let Some(g) = fw.group_by_id(gid) else { continue };
+            if !fw.bodies[g].objects.iter().any(|r| r.class == 58) {
+                continue;
+            }
+            let want = counts.get(&gid).copied().unwrap_or(0) - e.instances.get(&gid).copied().unwrap_or(0);
+            for _ in 0..want.max(0) {
+                e.group(g, Affine::IDENTITY, 1);
             }
         }
         let mut want: BTreeMap<i16, usize> = BTreeMap::new();

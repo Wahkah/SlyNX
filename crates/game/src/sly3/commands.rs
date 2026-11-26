@@ -11,7 +11,8 @@
 //!   its condition holds; `0x06` runs the children of its first branch (`0x07`, `0x08`) whose condition holds,
 //!   else of its `0x09` branch.
 //! - **Conditions:** 1886 true, 1887 false, 1891 / 1892 an alarm set / not set, 1894 / 1895 no line / a line
-//!   playing. The object-state tests (1888 to 1890) and the module's own conditions are not run yet: false.
+//!   playing; 1888 to 1890 test a task (the first time current, live, restoring); any other value asks the
+//!   script's own module.
 //! - **Waits** (flag bit 0): a dialogue line (`0x52`) until it ends; `0x2F` a random time between its two values;
 //!   `0x17` until the started script ends; `0x0E` until its alarm is set; `0x0C` until the named runners are gone;
 //!   `0x5F` until no line plays. Other commands with the flag complete at once.
@@ -48,6 +49,11 @@ pub mod cond {
     pub const ALARM_CLEAR: i32 = 1892;
     pub const NO_LINE: i32 = 1894;
     pub const LINE: i32 = 1895;
+    /// Tests on the object the condition's second word names (scripts.md 7.4): 1888 its play count is 1 (a task's:
+    /// the first time it is current, inference), 1889 its mode is 0 (live play), 1890 its mode is 1 (restoring).
+    pub const FIRST_TIME: i32 = 1888;
+    pub const LIVE: i32 = 1889;
+    pub const RESTORING: i32 = 1890;
 }
 
 /// The longest a runner goes without waiting in one frame (a loop with no wait in it stops here).
@@ -107,6 +113,10 @@ pub enum Request {
 pub struct View {
     /// A dialogue line is playing.
     pub line_playing: bool,
+    /// Each task's play count (how many times it has been current), by task ID, for condition 1888.
+    pub plays: BTreeMap<i32, i32>,
+    /// The tasks are being restored (task mode 1), for conditions 1889 and 1890.
+    pub restoring: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,6 +169,8 @@ pub struct ScriptRun {
     pub context: i32,
     /// The script object started on (its copy), when known.
     pub copy: Option<engine::object::Handle>,
+    /// The script object the run started on.
+    own: Option<engine::object::Handle>,
     /// Rendezvous (`0x0D`) by meeting ID: the runners arrived, and whether it has opened.
     meets: BTreeMap<i32, (BTreeSet<i32>, bool)>,
 }
@@ -177,6 +189,11 @@ pub struct Scripts {
     /// The scripts started since the session last looked, with the script object each run started on (its own copy,
     /// [`ScriptRun::copy`] when known); the session raises event 5 on that object.
     pub started: Vec<(i32, engine::object::Handle)>,
+    /// The scripts that ran to their end since the session last looked, with their script object; the session
+    /// raises event 6 on it. Working reading [I]: event 5 marks a start (missions.md 4.1a), and the class-135
+    /// handlers of event 6 (1,080 on the disc, scripts.md 6) act as on an end (v_interpol's 88261 sets its caller's
+    /// alarm, which 2113 waits for). A stopped script (`0x11`) raises none.
+    pub ended: Vec<(i32, engine::object::Handle)>,
     /// Conditions that ask a script's module (sly3/scripts.md 7.1: any value but the fixed kinds): (script, its
     /// copy, value), for the session to answer into [`Scripts::answers`] before the next frame.
     pub questions: Vec<(i32, Option<engine::object::Handle>, i32)>,
@@ -203,6 +220,7 @@ impl Scripts {
             requests: Vec::new(),
             unhandled: BTreeMap::new(),
             started: Vec::new(),
+            ended: Vec::new(),
             questions: Vec::new(),
             answers: BTreeMap::new(),
             rng: Rng::new(seed),
@@ -260,6 +278,7 @@ impl Scripts {
             target: -1,
             context: -1,
             copy: near.map(|_| h),
+            own: Some(h),
             meets: BTreeMap::new(),
         });
         true
@@ -279,6 +298,11 @@ impl Scripts {
             self.step_script(world, s, view, &names, dt);
         }
         let stopped = core::mem::take(&mut self.stopped);
+        for s in scripts.iter().filter(|s| s.runners.is_empty() && !stopped.contains(&s.oid)) {
+            if let Some(h) = s.own {
+                self.ended.push((s.oid, h));
+            }
+        }
         scripts.retain(|s| !s.runners.is_empty() && !stopped.contains(&s.oid));
         // Scripts started this frame were pushed onto `self.running`.
         scripts.append(&mut self.running);
@@ -304,9 +328,13 @@ impl Scripts {
     }
 
     /// A condition's value, or `None` while the script's module is being asked (the runner tries again next frame).
-    fn condition(&mut self, s: &ScriptRun, kind: i32, view: &View) -> Option<bool> {
+    fn condition(&mut self, s: &ScriptRun, kind: i32, object: i32, view: &View) -> Option<bool> {
         Some(match kind {
             cond::TRUE => true,
+            // The object tests read tasks (the play count and mode the job system keeps); another object: false.
+            cond::FIRST_TIME => view.plays.get(&object) == Some(&1),
+            cond::LIVE => view.plays.contains_key(&object) && !view.restoring,
+            cond::RESTORING => view.plays.contains_key(&object) && view.restoring,
             cond::ALARM_SET => !self.alarms.is_empty(),
             cond::ALARM_CLEAR => self.alarms.is_empty(),
             cond::NO_LINE => !view.line_playing,
@@ -375,7 +403,9 @@ impl Scripts {
                 r.wait = None;
             }
             if let Some(w) = r.wait.take() {
-                r.wait = self.waited(&w, s, view, scripts, dt);
+                // Runners this runner has just started count as running for its `0x0C` (they join next frame).
+                let started = matches!(&w, Wait::Runners(n) if spawned.iter().any(|x: &Runner| n.contains(&x.name)));
+                r.wait = if started { Some(w.clone()) } else { self.waited(&w, s, view, scripts, dt) };
                 if r.wait.is_some() {
                     return spawned;
                 }
@@ -392,7 +422,7 @@ impl Scripts {
                     Some(Frame::Plain(p)) => r.pc = s.commands.get(p).and_then(|c| link(c.sibling)),
                     Some(Frame::Loop(l)) => {
                         let c = s.commands[l];
-                        match self.condition(s, word(&s.args[l], 0), view) {
+                        match self.condition(s, word(&s.args[l], 0), word(&s.args[l], 1), view) {
                             Some(true) => {
                                 r.stack.push(Frame::Loop(l));
                                 r.pc = link(c.child);
@@ -435,7 +465,7 @@ impl Scripts {
                         s.finish.push(ch);
                     }
                 }
-                0x04 => match self.condition(s, word(&a, 0), view) {
+                0x04 => match self.condition(s, word(&a, 0), word(&a, 1), view) {
                     Some(true) => {
                         r.stack.push(Frame::Loop(i));
                         r.pc = link(c.child);
@@ -453,7 +483,7 @@ impl Scripts {
                     while let Some(k) = b {
                         let bc = s.commands[k];
                         let take = match bc.id {
-                            0x07 | 0x08 => match self.condition(s, word(&s.args[k], 0), view) {
+                            0x07 | 0x08 => match self.condition(s, word(&s.args[k], 0), word(&s.args[k], 1), view) {
                                 Some(t) => t,
                                 None => {
                                     asked = true;
@@ -640,6 +670,7 @@ mod tests {
             target: -1,
             context: -1,
             copy: None,
+            own: None,
             meets: BTreeMap::new(),
         }
     }

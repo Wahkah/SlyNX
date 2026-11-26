@@ -276,6 +276,10 @@ pub struct Interpreter {
     world: EnvRef,
     modules: Vec<EnvRef>,
     attached: BTreeMap<ObjectId, u32>,
+    /// Module frames of package copies 1 and up, by (module, copy) ([`Interpreter::attach_copy`]).
+    copies: BTreeMap<(u32, u32), EnvRef>,
+    /// The frame an object's events run in when it is not its module's own (a copy's clone).
+    object_env: BTreeMap<ObjectId, EnvRef>,
     /// Custom-property entries per object, oldest first (at most [`CUSTOM_SLOTS`]).
     custom: BTreeMap<ObjectId, Vec<(u32, Value)>>,
     pub(crate) scheduled: Vec<ScheduledCall>,
@@ -307,6 +311,8 @@ impl Interpreter {
             world,
             modules: Vec::new(),
             attached: BTreeMap::new(),
+            copies: BTreeMap::new(),
+            object_env: BTreeMap::new(),
             custom: BTreeMap::new(),
             scheduled: Vec::new(),
             quotes: BTreeMap::new(),
@@ -396,6 +402,8 @@ impl Interpreter {
     /// environment (scripts.md section 1). Calling it again starts the modules over.
     pub fn load(&mut self, host: &mut dyn ScriptHost) {
         self.modules.clear();
+        self.copies.clear();
+        self.object_env.clear();
         for m in 0..self.program.module_count() {
             let env = self.heap.alloc(Some(self.world));
             self.modules.push(env);
@@ -445,6 +453,41 @@ impl Interpreter {
         }
     }
 
+    /// Attaches an object of package copy `copy` to `module` (specs/sly2/scripts.md 1; both games). Copy 0 uses the
+    /// module's loaded frame; every further copy gets its own clone of it, made on its first object (the same
+    /// parent, the bindings copied, procedures re-closed over the clone), shared by that copy's objects. A module
+    /// reached through a placement's bind is not cloned: attach those objects with [`Interpreter::attach`] or
+    /// [`Interpreter::attach_with_outer`]. Call it after [`Interpreter::load`] and before event 0 (world start), so
+    /// each copy's `set`s land in its own frame.
+    pub fn attach_copy(&mut self, object: ObjectId, module: u32, copy: u32) {
+        self.attach(object, module);
+        if copy == 0 {
+            self.object_env.remove(&object);
+            return;
+        }
+        let env = match self.copies.get(&(module, copy)) {
+            Some(&e) => Some(e),
+            None => self.modules.get(module as usize).copied().and_then(|m| self.heap.clone_env(m)),
+        };
+        if let Some(e) = env {
+            self.copies.insert((module, copy), e);
+            self.object_env.insert(object, e);
+        }
+    }
+
+    /// The frame `object`'s events run in: its copy's clone, else its module's frame.
+    pub fn frame_of(&self, object: ObjectId) -> Option<EnvRef> {
+        self.object_env
+            .get(&object)
+            .copied()
+            .or_else(|| self.modules.get(*self.attached.get(&object)? as usize).copied())
+    }
+
+    /// A binding as `object`'s events see it (its copy's frame first).
+    pub fn lookup_for(&self, object: ObjectId, symbol: u32) -> Option<Value> {
+        self.heap.lookup(self.frame_of(object)?, symbol)
+    }
+
     /// The module whose environment `module`'s continues in (from [`Interpreter::attach_with_outer`]).
     pub fn outer_module(&self, module: u32) -> Option<u32> {
         let parent = self.heap.parent(*self.modules.get(module as usize)?)?;
@@ -459,6 +502,7 @@ impl Interpreter {
     /// Detaches an object (and forgets its custom properties).
     pub fn detach(&mut self, object: ObjectId) {
         self.attached.remove(&object);
+        self.object_env.remove(&object);
         self.custom.remove(&object);
     }
 
@@ -496,7 +540,10 @@ impl Interpreter {
                 m
             }
         };
-        let handler = self.lookup(module, event)?;
+        let handler = match self.object_env.get(&object) {
+            Some(&env) => self.heap.lookup(env, event)?,
+            None => self.lookup(module, event)?,
+        };
         if !handler.is_callable() {
             return None;
         }
@@ -613,6 +660,7 @@ impl Interpreter {
         let mut envs: Vec<EnvRef> = Vec::with_capacity(self.modules.len() + 1);
         envs.push(self.world);
         envs.extend_from_slice(&self.modules);
+        envs.extend(self.copies.values().copied());
         let vals = self
             .custom
             .values()

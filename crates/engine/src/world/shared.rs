@@ -244,9 +244,9 @@ pub struct Shared {
     /// Sly 3 hook (missions.md 4.1a): whether the tasks are in mode 1 (the restore and world-start step 2, until step
     /// 3 runs); scripts read a task's mode as script ID 1280 (stream 1411): 1 then, else 0 (live play).
     pub sly3_restore_mode: bool,
-    /// Sly 3 hook: command scripts started by scripts (method 747 on class 135): (script, object ID or −1), for the
-    /// session's runner.
-    pub sly3_script_starts: Vec<(i32, i32)>,
+    /// Sly 3 hook: command scripts started by scripts (method 747 on class 135): (script, object ID or −1, the
+    /// script object called: its own copy), for the session's runner.
+    pub sly3_script_starts: Vec<(i32, i32, Handle)>,
     /// Sly 3 hook: command scripts stopped by scripts (method 749 on class 135, script ID 583), for the session's
     /// runner.
     pub sly3_script_stops: Vec<i32>,
@@ -265,6 +265,8 @@ pub struct Shared {
     pub sly3_context_writes: Vec<(i32, i32)>,
     /// Sly 3 hook (missions.md 4.1a): hit records (class 196) by slot: (the object hit, the hitter).
     pub sly3_hits: BTreeMap<u32, (Handle, Handle)>,
+    /// Sly 3 hook (guards.md 4b): guards knocked out since the session last looked (it plays their knock-out clip).
+    pub sly3_knocked_out: Vec<Handle>,
     /// Sly 3 hook: each class's derived classes (a class derives from itself), set by the session at load, for
     /// scripts' "derived from class n" test (script ID 3).
     pub sly3_derived: BTreeMap<i16, Vec<i16>>,
@@ -398,6 +400,7 @@ impl Default for Shared {
             sly3_alarms: Vec::new(),
             sly3_context_writes: Vec::new(),
             sly3_hits: BTreeMap::new(),
+            sly3_knocked_out: Vec::new(),
             sly3_derived: BTreeMap::new(),
             sly3_crew_moves: Vec::new(),
             sly3_use_users: BTreeMap::new(),

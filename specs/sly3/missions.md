@@ -516,6 +516,8 @@ macro group is therefore present in every world of the episode.
     **the last guard leaves the trigger** (or is taken out). Event 18 also removes the trigger.
   - In play the two guards walk to anchor 140811 inside 139753 and stay there. **The player has to get both
     guards out of the zone**, by knocking them out or luring them away, to open the way.
+  - A knocked-out guard leaves the zone because its knock-out clip removes it from the world with an animation
+    event of kind 8 ([guards.md](guards.md) 4b).
 - **Script 2317:**
   1. removes **139754**, a class-47 object of `v_gauntlet_rig` that 2314's 1416 keeps in states 0 and 1. It is the
      laser barrier [I];
@@ -536,6 +538,34 @@ walks Sly (24) and Bentley (25), turns them to face each other (`0x77`), and ste
 *Interpretation:* Bentley is an AI partner here, and `0x76` toggles a scripted mode on him [I]. **Open
 question:** how a class-114 bomb comes to hit the door in play (Bentley's AI, or the player switching). Neither
 was traced. Nor was the gadget-slot pad path (gadgets.md).
+
+**Brawl spawners and related methods (v_gauntlet, 2322 / 2327)** [X, with names from the reference's function
+map; partial]:
+
+- **Script ID 825** exists only on placements (class 8): stream option 1282, handler `0x0010D2B8` →
+  `0x001FBE30` (the reference's PloAcquireProxyObject). It **takes a new instance of the placement** and returns
+  it. That is the script-side form of command `0x6F`.
+- **Script ID 35** (stream option 21, two arguments, handler `0x00100958` → `0x001C7A00` → `0x001C7A30`)
+  **re-parents an object** under a new parent: it changes +0x10 and updates the parent's child lists and the
+  world's root list (`0x00479278`). The spawner uses it to hang the new instance under its spawn point.
+- **Built-in 113** postpones an object's updates (scripts.md 4). The spawner's "timer" is the per-frame
+  **event 1** (frame time) that the object's module defines, as in Sly 1 / 2. Built-in 113 delays the next
+  updates; it does not raise an event of its own [R].
+- **Commands:**
+  - `0x1D` (six floats) is a **time-scale ramp** (`0x0022A430`; scripts.md 7.2);
+  - `0x43` **plays a sound** through `0x0025DB38` (with a pitch offset);
+  - `0x44` (sound) **stops** it (`0x0025DCA8`, the reference's StopAsegaSound).
+- **Class 163 (`jt`'s screen object 139786):**
+  - script ID 1149 (stream option 1215) calls the screen object's vtable slot 56;
+  - 1150 (stream option 1216) calls slot 54, the **hide** slot (+0x1B0, scripts.md 7.3);
+  - 1153 (stream option 1220, two arguments) calls `0x00261580`, a screen-object setter.
+  - The exact meaning of slot 56 is not settled [I: show or reset].
+- **Script ID 424 on a guard** (class 58, stream option 297, one argument) returns an integer computed from a
+  vector field of the guard (`0x002533C0` → `0x00253190`). Its meaning is not settled.
+- **Crew option 938** (stream option 936, value type `0x102A`, read through an accessor; Sly 2's 1111 in the
+  reference's option map) is an enum on the playable characters. **Whether 2 means "down", and how guards' strikes
+  damage the crew in Sly 3, are open questions.** Sly 2's health rules (Sly 2 characters.md 2) are the reference
+  until traced.
 
 **Back-filling prerequisites: on every request, not on the restore** [X]:
 

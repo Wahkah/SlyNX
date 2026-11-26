@@ -158,6 +158,8 @@ pub struct Sly2Level {
     /// Task events raised for the job system, oldest first (operation 139 raises 59), with the object each concerns
     /// (missions.md 4.3: a volume's 26 and 27 carry the volume).
     pub task_events: Vec<(u32, Option<Handle>)>,
+    /// Slots whose module a placement's patch bound (scripts.md 1: those share the module's frame, not a copy's).
+    pub bound: alloc::collections::BTreeSet<u32>,
     /// Noise objects made by option 1095: (slot, game time it expires at; negative never).
     pub noise_objects: Vec<(u32, f32)>,
     objects: Vec<Sly2Object>,
@@ -396,6 +398,34 @@ pub enum CustomValue {
     Object(i32),
 }
 
+/// Each scripted object's copy ordinal within its package (scripts.md 1: copy 0 keeps the package's module frames,
+/// copies 1 and up get clones), by slot: copies numbered in load order per package. Objects whose module a
+/// placement bound are left out, so they keep the shared frame. Empty for other worlds.
+pub fn copy_ordinals(world: &World) -> alloc::collections::BTreeMap<u32, u32> {
+    use alloc::collections::BTreeMap;
+    if world.sly3.is_some() {
+        return world.sly3_copy_ordinals(); // Sly 3 hook (scripts.md 7.4)
+    }
+    let mut out = BTreeMap::new();
+    let Some(l) = world.sly2.as_deref() else { return out };
+    let mut seen: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+    for (slot, o) in l.objects.iter().enumerate() {
+        let slot = slot as u32;
+        let copies = seen.entry(o.package).or_default();
+        let n = match copies.iter().position(|&c| c == o.copy) {
+            Some(n) => n,
+            None => {
+                copies.push(o.copy);
+                copies.len() - 1
+            }
+        };
+        if !l.bound.contains(&slot) {
+            out.insert(slot, n as u32);
+        }
+    }
+    out
+}
+
 /// The custom script properties a Sly 2 world's option lists declare (options 3, 4, 5 and 8), in load order; none
 /// for other worlds. The aim managers' properties 1314 to 1317 are among them: without them their searches find
 /// nothing and call the undefined procedure 1533.
@@ -427,12 +457,14 @@ pub fn custom_properties(world: &World) -> Vec<CustomProperty> {
 /// Sly 3 hook (missions.md 4.2): stream option 8 is the custom-property setter for every class, a load-time method
 /// (property ID as tag 21, value); the value keeps its own kind. A placement's (class 8) setters apply to its placed
 /// copy's root (its first child), after the objects' own, so they override them: v_ext's placement 121540 sets
-/// waypoint 35785's property 1990 (its task) to 2086 over the waypoint's own −1.
+/// waypoint 35785's property 1990 (its task) to 2086 over the waypoint's own −1. Stream options 3, 4 and 5 with the
+/// same shape (a tag-21 property ID, then a bool, an integer or a float) set them too: a working reading [I] by
+/// shape, as Sly 2's typed setters (v_gauntlet's spawner 139785: 1979 off, 1981 at most 3 alive, 1983 every 6 s).
 fn sly3_custom_properties(world: &World) -> Vec<CustomProperty> {
     let Some(l) = world.sly3.as_deref() else { return Vec::new() };
     let (mut own, mut placed) = (Vec::new(), Vec::new());
     for (slot, option, args) in &l.actions {
-        if *option != 8 {
+        if !matches!(*option, 3 | 4 | 5 | 8) {
             continue;
         }
         let (Some(h), [Arg::Short(21, id), value]) = (world.handle(*slot), &args[..]) else { continue };

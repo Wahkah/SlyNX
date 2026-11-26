@@ -119,6 +119,22 @@ impl Heap {
         true
     }
 
+    /// A clone of `r` (specs/sly2/scripts.md 1: a package copy's module frame): the same parent, the bindings copied
+    /// (lists copied too), and every procedure closed over `r` re-created closed over the clone. `None` when `r` is
+    /// freed.
+    pub fn clone_env(&mut self, r: EnvRef) -> Option<EnvRef> {
+        let (parent, bindings) = {
+            let e = self.get(r)?;
+            (e.parent, e.bindings.clone())
+        };
+        let new = self.alloc(parent);
+        let bindings = bindings.into_iter().map(|(s, v)| (s, reclose(&v, r, new))).collect();
+        if let Some(e) = self.get_mut(new) {
+            e.bindings = bindings;
+        }
+        Some(new)
+    }
+
     /// The parent of `r` (`None` for a root or a freed environment).
     pub fn parent(&self, r: EnvRef) -> Option<EnvRef> {
         self.get(r)?.parent
@@ -195,5 +211,114 @@ impl Heap {
             }
         }
         self.since_collect = 0;
+    }
+}
+
+/// `v` with procedures closed over `from` re-created over `to`, and lists copied (cells are not shared with the
+/// original); other values as they are.
+///
+/// A list can contain itself (operations 35 and 36 replace a cell's halves), so the copy keeps a map from each
+/// original cell to its copy: a cell reached twice, or through a loop, gives the same copy, and shared cells stay
+/// shared. The walk uses an explicit stack, not recursion, and copies at most [`MAX_LIST_ITEMS`] cells; cells past
+/// that limit are shared with the original rather than copied.
+fn reclose(v: &Value, from: EnvRef, to: EnvRef) -> Value {
+    use crate::value::{Cons, MAX_LIST_ITEMS};
+    use alloc::collections::BTreeMap;
+    use core::cell::RefCell;
+    let mut copies: BTreeMap<*const Cons, Rc<Cons>> = BTreeMap::new();
+    let mut pending: Vec<(Rc<Cons>, Rc<Cons>)> = Vec::new();
+    let map = |v: &Value, copies: &mut BTreeMap<*const Cons, Rc<Cons>>, pending: &mut Vec<(Rc<Cons>, Rc<Cons>)>| match v
+    {
+        Value::Procedure(p) if p.env == from => Value::Procedure(Rc::new(crate::value::Procedure {
+            node: p.node,
+            params: p.params.clone(),
+            rest: p.rest,
+            env: to,
+        })),
+        Value::List(c) => {
+            if let Some(n) = copies.get(&Rc::as_ptr(c)) {
+                return Value::List(n.clone());
+            }
+            if copies.len() >= MAX_LIST_ITEMS {
+                return v.clone();
+            }
+            let n = Rc::new(Cons { car: RefCell::new(Value::Nil), cdr: RefCell::new(Value::Nil) });
+            copies.insert(Rc::as_ptr(c), n.clone());
+            pending.push((c.clone(), n.clone()));
+            Value::List(n)
+        }
+        _ => v.clone(),
+    };
+    let out = map(v, &mut copies, &mut pending);
+    while let Some((old, new)) = pending.pop() {
+        let car = map(&old.car.borrow(), &mut copies, &mut pending);
+        let cdr = map(&old.cdr.borrow(), &mut copies, &mut pending);
+        *new.car.borrow_mut() = car;
+        *new.cdr.borrow_mut() = cdr;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::Procedure;
+
+    #[test]
+    fn a_clone_has_its_own_bindings_and_reclosed_procedures() {
+        let mut h = Heap::default();
+        let world = h.alloc(None);
+        let m = h.alloc(Some(world));
+        let proc_ = Value::Procedure(Rc::new(Procedure { node: 0, params: Vec::new(), rest: None, env: m }));
+        h.define(m, 1, Value::Int(5));
+        h.define(m, 2, proc_);
+        h.define(m, 3, Value::list([Value::Int(1), Value::Int(2)]));
+        let c = h.clone_env(m).unwrap();
+        assert_eq!(h.parent(c), Some(world));
+        // A `set` in the clone leaves the original as it was (each copy's event 0 lands in its own frame).
+        h.set(c, 1, Value::Int(7));
+        assert!(matches!(h.lookup(m, 1), Some(Value::Int(5))));
+        assert!(matches!(h.lookup(c, 1), Some(Value::Int(7))));
+        // Procedures closed over the module frame are closed over the clone.
+        assert!(matches!(h.lookup(c, 2), Some(Value::Procedure(p)) if p.env == c));
+        assert!(matches!(h.lookup(m, 2), Some(Value::Procedure(p)) if p.env == m));
+        // Lists are copied, not shared.
+        let (a, b) = (h.lookup(m, 3).unwrap(), h.lookup(c, 3).unwrap());
+        assert!(!crate::value::same_value(&a, &b) && a.to_vec().len() == 2 && b.to_vec().len() == 2);
+    }
+
+    #[test]
+    fn a_clone_copies_a_list_that_contains_itself() {
+        let mut h = Heap::default();
+        let world = h.alloc(None);
+        let m = h.alloc(Some(world));
+        let proc_ = Value::Procedure(Rc::new(Procedure { node: 0, params: Vec::new(), rest: None, env: m }));
+        // (p . <itself>) in the car and a loop in the cdr: the list holds itself twice over.
+        let l = Value::list([proc_, Value::Int(2)]);
+        let Value::List(c) = &l else { unreachable!() };
+        let second = match &*c.cdr.borrow() {
+            Value::List(n) => n.clone(),
+            _ => unreachable!(),
+        };
+        *second.car.borrow_mut() = l.clone();
+        *second.cdr.borrow_mut() = l.clone();
+        h.define(m, 1, l.clone());
+        let k = h.clone_env(m).unwrap();
+        let copy = h.lookup(k, 1).unwrap();
+        assert!(!crate::value::same_value(&copy, &l));
+        let Value::List(cc) = &copy else { panic!("not a list") };
+        assert!(matches!(&*cc.car.borrow(), Value::Procedure(p) if p.env == k));
+        // The copy loops back on itself, not on the original.
+        let next = match &*cc.cdr.borrow() {
+            Value::List(n) => n.clone(),
+            _ => panic!("no second cell"),
+        };
+        assert!(crate::value::same_value(&next.car.borrow(), &copy));
+        assert!(crate::value::same_value(&next.cdr.borrow(), &copy));
+        // Break the loops so the test does not leak them.
+        *second.cdr.borrow_mut() = Value::Nil;
+        *second.car.borrow_mut() = Value::Nil;
+        *next.cdr.borrow_mut() = Value::Nil;
+        *next.car.borrow_mut() = Value::Nil;
     }
 }

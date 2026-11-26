@@ -194,6 +194,40 @@ speeds and the arrival test are Sly 2's guard movement [R]; they are not re-trac
 So **the list itself sets the alarm when the lion reaches the path's end**. Script 2243 then goes on: it starts
 2246 and requests task 2242 → 2.
 
+## 4b. Knocked-out guards leave the world [D] [R] [X]
+
+A knocked-out guard **removes itself from the world at the end of its knock-out clip**, through an animation event
+rather than a timer or a flag:
+
+- Animation event **kind 8**, "remove an object", has the payload (object ID, fade time). The reference's dispatch
+  is `0x00138270`, which calls `0x0025D740`, the same add / remove routine that command `0x39` uses. Kind 7 adds.
+  The object is found **near the clip's owner**, so a pooled guard removes **its own instance**, not the first
+  copy with that ID [R]. With a fade time above 0 the guard fades out and is then removed; with 0 it is removed at
+  once.
+- **Disc check, v_gauntlet** (`ecto_swarmer`, template 56250). Clips that end in removing 56250 itself, with the
+  event time and fade:
+
+  | Clip | Length | Event time | Fade |
+  |---:|---:|---:|---:|
+  | 56542 | 1.0 s | end | 0 |
+  | 56544 | 2.33 s | 0.92 s | 0.4 |
+  | 56546 | 1.5 s | 1.17 s | 0.3 |
+  | 56550 | 1.75 s | 1.42 s | 0.5 |
+  | 56552 | 1.0 s | 0.92 s | 0 |
+  | 56554 | 2.0 s | 1.67 s | 0.6 |
+  | 56556 | 1.0 s | 1.0 s | 0 |
+  | 51423 | 1.58 s | 0.42 s | 0.4 |
+  | 25217 | 1.0 s | end | 0 |
+  | 9170 | 2.33 s | 0.92 s | 0.4 |
+
+  These are the knock-out and defeat clips [I for which clip plays for which hit].
+- **Triggers then lose the guard.** A trigger counts only members that are in the world (`0x001C8610`: byte +0x2F
+  bit 0, and the object on the world's root list `0x00479278`), and the member scan (`0x0015D2F0`) also tests the
+  shape. So when the guard leaves the world, the next scan drops it, and event 9 follows. The scan itself has no
+  knocked-out test: a knocked-out guard **still counts until its clip removes it**.
+- A port must run the clip's kind-8 event on the guard's own instance. A guard that stays in the world after its
+  knock-out keeps triggers such as v_gauntlet's 139753 occupied (missions.md 4.1a, lasers 2).
+
 ## 5. Test vectors [D]
 
 - 65 class-58 records in 28 worlds; v_ext holds four templates (`doberman_guard`, `endo_swarmer`, `ecto_swarmer`,

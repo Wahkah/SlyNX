@@ -121,6 +121,21 @@ const RAISE_FIVE: u16 = 11;
 /// Script ID 32 (stream 18), on any object: whether the object is the one with the given ID or a copy of it, as task
 /// 2115's handler tests the lock (missions.md 4.1a).
 const IS_ID: u16 = 18;
+/// Script ID 825 (stream 1282), on placements: takes a new instance of the placement (missions.md 4.1a, the brawl's
+/// spawners; `World::sly3_acquire`).
+const TAKE_INSTANCE: u16 = 1282;
+/// Script ID 35 (stream 21, two arguments), on any object: re-parents it (the new parent, flags; missions.md 4.1a).
+const REPARENT: u16 = 21;
+/// The screen object class (`jt`, missions.md 4.1a) and its script IDs 1149, 1150 (hide) and 1153 (a two-argument
+/// setter), streams 1215, 1216, 1220.
+const SCREEN_CLASS: i16 = 163;
+const SCREEN_METHODS: [u16; 3] = [1215, 1216, 1220];
+/// Script ID 424 (stream 297) on a guard: an integer from a vector field (missions.md 4.1a, meaning open).
+const GUARD_VALUE: u16 = 297;
+/// The guard class.
+const GUARD_CLASS: i16 = 58;
+/// Crew option 938 (stream 936): an enum on the playable characters (missions.md 4.1a, meaning open).
+const CREW_STATE: u16 = 936;
 
 impl WorldHost<'_> {
     /// The root of the copy placement `slot` (class 8) made: the first object of that copy, below the placement.
@@ -203,8 +218,8 @@ impl WorldHost<'_> {
         self.world.handle(s).map(Handle::to_script)
     }
 
-    /// Options the game computes rather than stores: the world object's methods 984 and 1000, and a crew member's
-    /// option 30 (stream 16) is its owner code
+    /// Options the game computes rather than stores: the world object's methods 984 and 1000, and option 30 (stream
+    /// 16): a crew member's owner code, any other object's ID
     /// (Sly 24, Bentley 25, Murray 26; the item table's owner codes, characters.md 3.1), which mission waypoints
     /// compare with their custom property 1991 (missions.md 4.2).
     pub(super) fn sly3_live_option(&mut self, object: ObjectId, option: u16) -> Option<Value> {
@@ -226,9 +241,22 @@ impl WorldHost<'_> {
             return Some(Value::Int(i32::from(self.world.shared.sly3_restore_mode)));
         }
         // Whether the object is the one with an ID (or a copy of it): same object ID. Adding to and removing from the
-        // world. Whether its class derives from another.
-        if matches!(option, IS_ID | ADD_TO_WORLD | REMOVE_FROM_WORLD | DERIVED_FROM) {
+        // world. Whether its class derives from another. Re-parenting.
+        if matches!(option, IS_ID | ADD_TO_WORLD | REMOVE_FROM_WORLD | DERIVED_FROM | REPARENT) {
             return Some(Value::Method { object, option });
+        }
+        // A placement's new instance; the screen object's methods; the guard's value.
+        let class = self.world.class(h);
+        if (option == TAKE_INSTANCE && class == Some(PLACEMENT_CLASS))
+            || (SCREEN_METHODS.contains(&option) && class == Some(SCREEN_CLASS))
+            || (option == GUARD_VALUE && class == Some(GUARD_CLASS))
+        {
+            return Some(Value::Method { object, option });
+        }
+        // Crew option 938. Working choice (missions.md 4.1a: the enum's meaning and the guards' damage to the crew are
+        // open): 0, never 2 ("down"), as the guards' strikes do not hurt the crew here.
+        if option == CREW_STATE && matches!(class, Some(52..=54)) {
+            return Some(Value::Int(0));
         }
         // A trigger shape's members (the tracked objects inside) and its flag. Working reading: the flag is whether
         // the shape is in the world (its meaning is not given).
@@ -292,7 +320,9 @@ impl WorldHost<'_> {
             52 => 24,
             54 => 25,
             53 => 26,
-            _ => return None,
+            // Working reading [I]: on any other object it is the object's ID, as the crew's codes are their IDs and
+            // 2291's module compares a task's with task IDs; v_interpol's 88261 finds its caller script by it.
+            _ => self.world.sly3_id(h)?,
         };
         Some(Value::Int(code))
     }
@@ -350,6 +380,31 @@ impl WorldHost<'_> {
             self.world.set_in_world(h, option == ADD_TO_WORLD);
             return Some(Value::Void);
         }
+        // A placement's new instance (none when its pool has none free).
+        if option == TAKE_INSTANCE {
+            let h = self.obj(object)?;
+            return Some(Value::Object(self.world.sly3_acquire(h).map(Handle::to_script)));
+        }
+        // Re-parenting: the new parent (none: the top level); flags bits 0 and 1 keep the world transform, as Sly 2's
+        // set-parent action does.
+        if option == REPARENT {
+            let h = self.obj(object)?;
+            let parent = match args.first() {
+                Some(Value::Object(Some(o))) => self.obj(*o),
+                _ => None,
+            };
+            let keep = args.get(1).and_then(|a| a.as_i32()).unwrap_or(0) & 3 != 0;
+            self.world.reparent(h, parent, keep);
+            return Some(Value::Void);
+        }
+        // Not modelled (missions.md 4.1a): the screen object's methods (the Sly 3 2D layer does not draw it), and the
+        // guard's value 424 (meaning open; working choice 0).
+        if SCREEN_METHODS.contains(&option) {
+            return Some(Value::Void);
+        }
+        if option == GUARD_VALUE {
+            return Some(Value::Int(0));
+        }
         // Event 5 raised on the lock (its part forwards its own).
         if option == RAISE_FIVE {
             let h = self.obj(object)?;
@@ -403,8 +458,8 @@ impl WorldHost<'_> {
             let script = self.world.sly3_id(h)?;
             let with = self.world.player.and_then(|p| self.world.sly3_id(p)).unwrap_or(-1);
             let starts = &mut self.world.shared.sly3_script_starts;
-            if !starts.iter().any(|&(s, _)| s == script) {
-                starts.push((script, with));
+            if !starts.iter().any(|&(_, _, o)| o == h) {
+                starts.push((script, with, h));
             }
             return Some(Value::Void);
         }
@@ -419,10 +474,10 @@ impl WorldHost<'_> {
                 Some(Value::Object(Some(o))) => self.obj(*o).and_then(|o| self.world.sly3_id(o)).unwrap_or(-1),
                 _ => -1,
             };
-            // One start per script per frame, however often a script loops over the call.
+            // One start per script object per frame, however often a script loops over the call.
             let starts = &mut self.world.shared.sly3_script_starts;
-            if !starts.iter().any(|&(s, _)| s == script) {
-                starts.push((script, with));
+            if !starts.iter().any(|&(_, _, o)| o == h) {
+                starts.push((script, with, h));
             }
             return Some(Value::Void);
         }

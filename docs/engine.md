@@ -1917,11 +1917,37 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
     task, takes a door whose script asks for a task of the job, photographs targets, and walks no more once placed
     in a volume of a world; when a sequence waits for a signal it walks into the volume or uses the spot that sends
     it, and it opens the binocucom when the job's photo targets wait. Episode 1's first three jobs play with no task
-    finished by request. In `m1_follow_dimitri` the route follows: while a trigger volume is attached to a character
-    (the leash) it sends no pattern input, records the character's trail (every 50 units) and keeps the played
-    character on it at least 400 units back (at its start while still far away), holds the stall timer (journalled),
-    and puts it inside the volume the character's list's script names when the list ends. Not finished: Dimitri
-    stops stepping list 1825 after its first leg;
+    finished by request, `m1_follow_dimitri` included. The route follows: while a trigger volume is attached to a
+    character (the leash) it sends no pattern input, records the character's trail (every 50 units) and keeps the
+    played character on its newest point that is out of the character's view volume, inside the leash and at least
+    1,300 units away (farther than the view reaches to its sides, so a turn does not bring the follower into it),
+    holds the stall timer (journalled), and on the list's last leg puts it on a floor inside the volume the list's
+    script names, out of view;
+  - after the follow the route goes on (`SLYNX_SLY2_JOBS=6`): it also finds objects a declared custom property ties
+    to a task (option 8: a box prop's 1374 holds its task, `m1_waterpump`), and for a task that starts at a checkpoint
+    in another world it uses the interaction spot whose sequence's script fires a door to that checkpoint (`m1_bug`:
+    spot 123837's 132610 fires door 1734 at 1811's checkpoint 398). Still forced: the tank of `m1_waterpump` after
+    its first rat (the rat generator, an open question), and 1813 / 1814 of `m1_bug`;
+  - each package copy past the first runs in its own clone of the package's module frames (scripts.md 1;
+    `world::sly2::copy_ordinals` numbers the copies per package in load order and leaves out the objects a
+    placement's patch bound, `level.bound`, which keep the shared frame; the attach loop calls
+    `Interpreter::attach_copy`). The second box of `m1_waterpump` now asks for 1881 itself;
+  - the water main (missions.md 4.3, 1884): trigger volumes count the objects of the classes their option 433 names
+    in both games (no longer Sly 3 only) and remember the first one found on entry (option 447, script ID 534). The
+    host answers the parent field (option 19, script ID 32; a copy root's parent is its placement's parent [I]), the
+    leasing placement (option 18, script ID 31, given as its copy's root), and the methods 25 / 26 (script IDs 39 /
+    40: into and out of the world) and 11 (script ID 12: raise script event 5). Murray lifts a guard or creature
+    (`GangEvent::Lift`): it is held (`Sly2Guard::held`) and rides above him until he throws it, when it flies under
+    gravity 2275 from his hands with the throw's velocity (`Sly2Guard::flight`) until a sphere of 30 meets a surface,
+    passing through characters and, for 0.1 s, what it starts inside; a drop without a throw gets (−400, 0, 600) in
+    his frame (characters.md 4.6). The route tosses: for a task whose script names a creature's placement and a
+    volume counting its class, Murray is placed beside the creature facing the volume, lifts it, steers the aim
+    onto the volume and throws (`sly2_toss_input`). The first rat goes in and counts; the next ones would come from
+    generator 17346, whose spawning is not understood yet;
+  - a guard's walk counts as arrived within 0.5 of its stop distance (`behavior::sly2::ARRIVED`): the last step lands
+    on the stop ring and rounding left a remainder above 0, which stalled path following (Dimitri's list 1825);
+  - the world's option 926 (script ID 844) is the current character, and an object's option 21 (script ID 34) its
+    position (1826's end test asks volume 123886 about the current character's position);
   - a guard raises task events about itself (missions.md 4.3): 19 when its detector's entry for the player goes to
     "seen", 21 when it enters a hit reaction, 22 when it enters investigate (`behavior::sly2::task_events`), so being
     seen fails the follow as in the game.
@@ -2886,10 +2912,56 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
             2317 removes the laser barrier 139754, moves Bentley and asks for 2314's state 2.
           - Operation 25 is "is the empty list", so 2317 starts once the trigger is in the world and no guard is left
             inside: the player knocks out or lures away the guards. The route knocks them out: Sly stands behind each
-            guard inside (put there, no path-finding) and jumps and attacks. Both of 2316's guards go down within
-            2 s, then the two of placements 140791 and 140792, which also stand inside.
-          - It stops there: a knocked-out guard stays in the world where it fell, so the trigger still counts it and
-            the set never empties. What takes a knocked-out guard out of the set is open with the spec (an 800 s run).
+            guard inside (put there, no path-finding) and jumps and attacks.
+          - A knocked-out guard plays its knock-out clip, whose remove event takes it out of the world (guards.md 4b,
+            `game::sly3::clips`), so the trigger loses it. The three guards inside go down by 795.2 s and 2317 starts
+            a second later.
+      29. `t1_gauntlet_simuldoor_3` (2318), as the other two timed buttons (script 2319 runs 2291; context 139713).
+          Sly is put on his button (placement 145224). He lands off it (stand-in: the route puts him back on it), and
+          the press 0.2 s after Bentley's line 1290 opens the door at the first try.
+      30. `t1_gauntlet_brawl_intro` (2320): trigger 140815. Its script 2321 is all inside an `0x06` whose test is
+          1889 (live play) on task 2320; the cutscene plays (9 s).
+      31. `t1_gauntlet_brawl` (2322; missions.md 4.1a): script 2323 sends spawner 139785 waves (message 139779; its
+          module 147 on copy root 25351 takes instances with script ID 825 and hangs them with 35). Trigger 139787
+          counts the guards in the arena and sets alarm 139784 on each change.
+          - Each copy of group 25351 has its own module frame (scripts.md 7.4), so 139785's spawner keeps its own
+            spawn points (145213, 145216) beside 140134's. The waves come out in the arena; the route knocks each
+            guard out (Sly put beside it) and waits where he stands between waves. Four waves, one guard each, go
+            down between 818.8 and 863.9 s; 2322 is done at 878.5 s.
+      32. `t1_gauntlet_complete` (2327) loads v_ext at arrival 140590 (892.3 s). The route has nothing to do there
+          (the next job is not traced) and stops 30 s later (a 1,100 s run).
+      - Module frames (scripts.md 7.4): each object attaches with its copy's ordinal within its group
+        (`World::sly3_copy_ordinals`, through `world::sly2::copy_ordinals` and `script::Interpreter::attach_copy`):
+        a group's first copy keeps the module frame of the load, every further copy gets a clone (bindings copied,
+        procedures re-closed). Stand-in for the leases: the guard pool's copies are cloned at load, and a copy taken
+        again keeps the frame it had.
+      - Conditions 1888 to 1890 (scripts.md 7.4) test the task the condition's second word names: 1888 its play
+        count is 1 (the first time current, inference), 1889 live play, 1890 restoring. Another object: false.
+      - Working readings [I]: a command script that runs to its end gets script event 6 (its class-135 handlers act
+        as on an end: v_interpol's 88261 sets its caller's alarm); option 30 (stream 16) is any object's ID (the
+        crew's owner codes are their IDs). A script started by another (747) starts on the object called, its own
+        copy.
+      - The binocucom view opens and closes with a script's photo mode (`0x46` / `0x6E`), so R3 afterwards closes
+        both (it used to turn the view on with the mode closed, holding the stick).
+      - Route stand-ins (no path-finding): a walk to a photo target that has not closed 50 units in 5 s puts the
+        character at the framing distance; after a load with no target and no script running the character stands
+        still, and the route stops after 30 s (or when, with no target, it has fallen 20,000 units).
+      - Instances (script ID 825, missions.md 4.1a): stand-in for the pool's size. A group that spawn points (mode-2
+        placements outside the crew) name, when it holds a guard (class 58) at its top level, gets the copies its
+        copy count leaves after the placed ones, made at load at the top level and out of the world. 825 takes a
+        free one (none of its top-level objects in the world), puts it at the placement, makes its behaviours
+        afresh and brings it into the world; none free gives no instance. v_gauntlet: 144809 has 7, 3 placed, so
+        4 in the pool. Script ID 35 re-parents (flags bits 0 and 1 keep the world transform).
+      - Custom properties: stream options 3, 4 and 5 with a tag-21 property ID (a bool, an integer, a float) set
+        them as option 8 does (working reading by shape; the spawner's 1979, 1981, 1983).
+      - Not modelled (missions.md 4.1a, working choices): crew option 938 reads 0 (never 2, "down", as the guards'
+        strikes do not hurt the crew); guard script ID 424 gives 0; the screen object's (class 163) 1149, 1150 and
+        1153 do nothing.
+      - `game::sly3::clips` (guards.md 4b): kind-7 and kind-8 clip events add and remove an object found near the
+        clip's owner (a pooled guard removes its own instance); apply events fire at the start, timed events at
+        their frame, retract events at the end. A removal with a fade waits out the fade first (no per-object alpha
+        is drawn). Stand-in for which clip a knock-out plays: the first clip of the guard's group with a kind-8
+        event on its own ID (56250: 56542; 19900: 24874). The clip also drives the guard's pose.
       - Instances (`0x6F` / `0x70`): stand-in, one per placement, the copy the load made. Taking brings the
         placement into the world (its copy stands at the placement), releasing takes it out. Flags 1 (the current
         instance) and 2 (locked) change nothing here.
@@ -2907,6 +2979,8 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
         - A condition other than the fixed kinds (1886 to 1895) asks the script's own module (scripts.md 7.1). The
           runner queues the question and tries the command again next frame. The session answers it by raising the
           module's event 4 with the value at once (`Game::raise_now`).
+        - `0x0C` counts the runners its own runner has just started (they join the script the next frame), so a
+          loop that starts runners and waits for them does not go round twice in one frame.
         - `0x0D` is a rendezvous: the runners it names (`0x0C`'s layout: a count, then the names) wait at a meeting
           (the ID after the names) until every one still running is there, then all go on.
         - `0x0E` with a non-zero second argument clears its alarm when the wait passes (missions.md 4.1a).

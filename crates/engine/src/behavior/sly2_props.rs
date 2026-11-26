@@ -370,6 +370,9 @@ pub struct TriggerVolume {
     /// The played character counts as inside next frame (a route standing in for the player walking in; the smoke
     /// tool's job route).
     pub visit: bool,
+    /// The first counting object found inside at the last entry (script ID 534, stream option 447; interactables.md
+    /// 4).
+    pub first: Option<Handle>,
 }
 
 impl TriggerVolume {
@@ -416,9 +419,10 @@ impl ClassBehavior for TriggerVolume {
                 // The characters, and the objects option 432 names (missions.md 4.1: 150658 waits for the van's
                 // carrier 150849), by their position.
                 let mut candidates = characters(cx.world);
-                // Sly 3 hook (missions.md 4.1a): the objects of the classes the shape counts (option 433) count by
-                // their position too (v_gauntlet's 139753 counts guards, class 58).
-                if cx.world.sly3.is_some() {
+                // The objects of the classes the shape counts (option 433) count by their position too, in both games
+                // (missions.md 4.1a: v_gauntlet's 139753 counts guards, class 58; missions.md 4.3: the water main's
+                // 125273 counts the swarming rats, class 57). The playable families are the characters above.
+                {
                     let classes: Vec<i16> = cx
                         .world
                         .options(cx.me)
@@ -482,6 +486,7 @@ impl ClassBehavior for TriggerVolume {
         }
         match self.state {
             0 if !inside.is_empty() => {
+                self.first = inside.first().copied();
                 cx.raise(5, Vec::new());
                 send_task_event_from(cx.world, task_event::ENTERED, Some(cx.me));
                 // Option 441: the sequence it starts, with the entering object as starter.

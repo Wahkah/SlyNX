@@ -169,6 +169,53 @@ impl WorldHost<'_> {
         {
             return v; // Sly 3 hook: options the game computes.
         }
+        // Object-model hook (missions.md 4.3: 1826's end test asks volume 123886 about the current character's
+        // position): the world's option 926 (script ID 844, a getter) is the character the player controls, and
+        // option 21 (script ID 34) is an object's position.
+        if self.world.sly3.is_none() {
+            if object == WORLD_SCRIPT_ID && option == WORLD_CURRENT_CHARACTER {
+                return Value::Object(self.world.player.map(Handle::to_script));
+            }
+            if option == OBJECT_POSITION
+                && let Some(p) = self.obj(object).and_then(|h| self.world.position(h))
+            {
+                return Value::Vector(p);
+            }
+            // The parent field (script ID 32, option 19) and the placement leasing the object's copy (script ID 31,
+            // option 18), as missions.md 4.3 reads them for the water main: a copy root's parent is the placement's
+            // parent (the tank root's parent is the rig 123922, not placement 124106) [I], and the placement is
+            // given as a search for its ID finds it, its copy's root (scripts.md 5).
+            if option == OBJECT_PARENT
+                && let Some(h) = self.obj(object)
+            {
+                let is_placement = |p: Handle| self.world.class(p).is_some_and(|c| crate::world::sly2::is_a(c, 6));
+                let parent =
+                    self.world.parent(h).and_then(|p| if is_placement(p) { self.world.parent(p) } else { Some(p) });
+                return Value::Object(parent.map(Handle::to_script));
+            }
+            if option == OBJECT_PLACEMENT
+                && let Some(h) = self.obj(object)
+            {
+                let mut at = self.world.parent(h);
+                while let Some(p) = at {
+                    if self.world.class(p).is_some_and(|c| crate::world::sly2::is_a(c, 6)) {
+                        break;
+                    }
+                    at = self.world.parent(p);
+                }
+                let given = at.map(|p| {
+                    self.world.slot(p).and_then(|s| self.copy_root(s)).and_then(|r| self.world.handle(r)).unwrap_or(p)
+                });
+                return Value::Object(given.map(Handle::to_script));
+            }
+            // A trigger volume's first counting object found inside (script ID 534, option 447; interactables.md 4).
+            if option == VOLUME_FIRST
+                && let Some(h) = self.obj(object)
+                && let Some(crate::behavior::Behavior::Sly2Volume(t)) = self.world.behavior(h)
+            {
+                return Value::Object(t.first.map(Handle::to_script));
+            }
+        }
         let stored = if object == WORLD_SCRIPT_ID {
             self.world.world_options.get(option).cloned()
         } else {
@@ -493,6 +540,29 @@ impl WorldHost<'_> {
                 _ => Value::Bool(shared.sequence_signals.get(&s).is_some_and(|set| set.contains(&v))),
             });
         }
+        // Object-model hook: script IDs 39 and 40 (stream options 25 and 26, any object) put the object in the world
+        // and take it out (classes/placement.md 2.1; missions.md 4.3: the water main removes the rat that fell in, the
+        // rat generator 17346 adds its root when it starts), and script ID 12 (option 11) raises script event 5 on it
+        // (missions.md 4.3: the volume tells the tank root).
+        if (option == ADD_TO_WORLD || option == REMOVE_FROM_WORLD)
+            && args.is_empty()
+            && let Some(h) = self.obj(object)
+        {
+            self.world.set_in_world(h, option == ADD_TO_WORLD);
+            // A creature taken out mid-throw starts afresh when it is leased again.
+            if let Some(crate::behavior::Behavior::Sly2Guard(g)) = self.world.behavior_mut(h) {
+                g.held = false;
+                g.flight = None;
+            }
+            return Some(Value::Void);
+        }
+        if option == RAISE_FIVE
+            && args.is_empty()
+            && let Some(h) = self.obj(object)
+        {
+            self.world.raise(h, 5, alloc::vec::Vec::new());
+            return Some(Value::Void);
+        }
         // Object-model hook: script ID 3 (stream option 2 on every class) is the class test "is-a"
         // (object-stream.md 3.1): `((op111 x 3) 26)` asks whether x is a door. No object is of no class.
         if option == 2
@@ -788,6 +858,22 @@ const RUN_LIST: u16 = 317;
 const VOLUME_HOLDS: u16 = 366;
 /// An interaction spot's "used by" (script ID 235).
 const SPOT_USE: u16 = 1071;
+/// The world's current character (script ID 844).
+const WORLD_CURRENT_CHARACTER: u16 = 926;
+/// An object's position (script ID 34).
+const OBJECT_POSITION: u16 = 21;
+/// The parent field (script ID 32).
+const OBJECT_PARENT: u16 = 19;
+/// The placement leasing the object's copy (script ID 31).
+const OBJECT_PLACEMENT: u16 = 18;
+/// A trigger volume's first counting object inside (script ID 534).
+const VOLUME_FIRST: u16 = 447;
+/// Put the object in the world (script ID 39).
+const ADD_TO_WORLD: u16 = 25;
+/// Take the object out of the world (script ID 40).
+const REMOVE_FROM_WORLD: u16 = 26;
+/// Raise script event 5 on the object (script ID 12).
+const RAISE_FIVE: u16 = 11;
 /// A sequence's signal options (dialogue-and-voice.md 2.1): send, remove, test.
 const SIGNAL_SEND: u16 = 617;
 /// See [`SIGNAL_SEND`].
