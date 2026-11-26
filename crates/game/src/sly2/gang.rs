@@ -58,6 +58,12 @@ pub const GUARD_HIT: f32 = 1.0;
 /// launched as pickups (`gang::pocket::give`).
 pub const COLLECT_REACH: f32 = 150.0;
 
+/// How long a character flashes after a hit, taking no further damage (characters.md 2).
+const FLASH_TIME: f32 = 2.0;
+
+/// Guards and creatures: class 56 and its derived classes (object-stream.md 3.1).
+const ACTOR_CLASS: i32 = 56;
+
 /// Interaction spots and the option naming the sequence they start (options-by-class.md 2.3).
 pub const SPOT_CLASS: i16 = 35;
 /// See [`SPOT_CLASS`].
@@ -89,10 +95,14 @@ pub fn collision_from_world(world: &World) -> Option<CollisionWorld> {
         if world.flags(h) & engine::object::flags::ACTIVE == 0 {
             continue;
         }
+        // Not the characters' bodies, nor the guards' and creatures' (class 56 and derived): they move, and fixed
+        // bodies left where they were loaded are floors and walls that are not there (a rat's at its post).
         let mut a = Some(h);
         let mut held = false;
         while let Some(x) = a {
-            held |= world.class(x).is_some_and(|c| CHARACTER_CLASSES.iter().any(|k| k.1 == c));
+            held |= world.class(x).is_some_and(|c| {
+                CHARACTER_CLASSES.iter().any(|k| k.1 == c) || engine::world::sly2::is_a(c, ACTOR_CLASS)
+            });
             a = world.parent(x);
         }
         let Some(r) = world.sly2_record(h) else { continue };
@@ -253,6 +263,8 @@ pub struct GangPlayer {
     pub clips: engine::anim::sly2_gang::GangClips,
     /// The guard or creature Murray carries (characters.md 4.6).
     carried: Option<Handle>,
+    /// Seconds each member still flashes after a hit, taking no further damage (characters.md 2), by member.
+    flashing: [f32; 3],
 }
 
 impl GangPlayer {
@@ -268,6 +280,7 @@ impl GangPlayer {
             in_safe_house: false,
             clips: Default::default(), // Sly 2 pose hook
             carried: None,
+            flashing: [0.0; 3],
         }
     }
 
@@ -426,11 +439,19 @@ impl PlayerSystem for GangPlayer {
         if let Some(who) = self.gang.as_ref().map(|g| g.player) {
             let gang = self.gang.as_mut().unwrap();
             let consts = gang.shared.consts;
+            // After a hit a character flashes for 2 s and takes no further damage (characters.md 2).
+            for f in &mut self.flashing {
+                *f = (*f - step.game_dt).max(0.0);
+            }
+            let flashing = &mut self.flashing;
             for d in hurt {
                 let source = world.position(d.source).unwrap_or(at);
                 let h = Hit { amount: GUARD_HIT, kind: 0, source, source_yaw: 0.0, vector: [0.0; 3], shrunk: false };
-                if let Some(c) = gang.get_mut(who) {
+                if flashing[who.index()] <= 0.0
+                    && let Some(c) = gang.get_mut(who)
+                {
                     c.hit(&consts, &h, &gw, &mut events);
+                    flashing[who.index()] = FLASH_TIME;
                 }
             }
             // Hits from the world (lasers): on whichever member they reached.
@@ -448,8 +469,11 @@ impl PlayerSystem for GangPlayer {
                     vector: knock_vector(wh.source, to, wh.kind),
                     shrunk: false,
                 };
-                if let Some(c) = gang.get_mut(member) {
+                if flashing[member.index()] <= 0.0
+                    && let Some(c) = gang.get_mut(member)
+                {
                     c.hit(&consts, &h, &gw, &mut events);
+                    flashing[member.index()] = FLASH_TIME;
                 }
             }
         }
@@ -567,6 +591,23 @@ impl PlayerSystem for GangPlayer {
                     });
                     self.carried = None;
                 }
+            }
+        }
+        // A character whose health ran out stays in its hit reaction (it gets up only with health left). Stand-in
+        // for the defeat (characters.md 2.1: task event 0x10, then the job restarts at its checkpoint or the world
+        // reloads), held back until the controller returns characters from drops to safe ground (physics.md 5.1):
+        // without that, a knock off a ledge ends the job. Once it lies on the ground past the reaction time, its
+        // counters are refilled (health to the capacity, power to the most) and it gets up where it is.
+        if let Some(g) = self.gang.as_mut() {
+            let hurt = g.shared.tun.hurt_time;
+            let who = g.player;
+            if let Some(c) = g.get_mut(who)
+                && c.health.value <= 0.0
+                && c.grounded
+                && c.state_time >= hurt
+            {
+                c.health.value = c.health.capacity;
+                c.power.value = c.power.max;
             }
         }
         // Medicine the played character touches: taken unless its health and power are both full.

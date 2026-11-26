@@ -129,13 +129,60 @@ const REPARENT: u16 = 21;
 /// The screen object class (`jt`, missions.md 4.1a) and its script IDs 1149, 1150 (hide) and 1153 (a two-argument
 /// setter), streams 1215, 1216, 1220.
 const SCREEN_CLASS: i16 = 163;
-const SCREEN_METHODS: [u16; 3] = [1215, 1216, 1220];
+const SCREEN_METHODS: [u16; 4] = [1215, 1216, 1217, 1220];
 /// Script ID 424 (stream 297) on a guard: an integer from a vector field (missions.md 4.1a, meaning open).
 const GUARD_VALUE: u16 = 297;
 /// The guard class.
 const GUARD_CLASS: i16 = 58;
 /// Crew option 938 (stream 936): an enum on the playable characters (missions.md 4.1a, meaning open).
 const CREW_STATE: u16 = 936;
+/// The canal chase (missions.md 4.1a). A player record (class 49) hands out its pad, script ID 943 (stream 942): a
+/// pad object (class 187) whose script IDs 1072 (stick x) and 1074 (stick size) are values, and 1078 (a button mask
+/// pressed) and 1079 (a button mask held) tests; streams 1081, 1083, 1087 and 1088.
+const PLAYER_RECORD_CLASS: i16 = 49;
+const PAD: u16 = 942;
+const PAD_CLASS: i16 = 187;
+const PAD_STICK_X: u16 = 1081;
+const PAD_STICK: u16 = 1083;
+const PAD_PRESSED: u16 = 1087;
+const PAD_HELD: u16 = 1088;
+/// The key of the pad among the game's objects.
+const PAD_OBJECT: u32 = 1_000_187;
+/// A state machine (class 132) run on an object: script ID 226 (stream 412) gives the run (class 173), whose script
+/// IDs 529 (stream 416, the state) and 532 (stream 419, the state before) are kept as options, and 248 (stream 423)
+/// sets the state.
+const MACHINE_CLASS: i16 = 132;
+const MACHINE_RUN: u16 = 412;
+const RUN_CLASS: i16 = 173;
+const RUN_STATE: u16 = 416;
+const RUN_PREVIOUS: u16 = 419;
+const RUN_SET: u16 = 423;
+/// An animation segment (class 130) applied by script ID 226 (stream 112) gives a segment run (class 171) whose
+/// 248 (stream 129) is not modelled.
+const SEGMENT_CLASS: i16 = 130;
+const SEGMENT_APPLY: u16 = 112;
+const SEGMENT_RUN_CLASS: i16 = 171;
+const SEGMENT_RUN_SET: u16 = 129;
+/// A reactive object's (class 111) last hitter, script ID 1105 (stream 1126).
+const REACTIVE_CLASS: i16 = 111;
+const LAST_HIT: u16 = 1126;
+
+/// The PS2 pad's masks of the Switch pad's buttons (pad layout [I]): Cross 0x40, Square 0x80, R1 0x08, Triangle
+/// 0x10, Circle 0x20, L1 0x04, L2 0x01, R2 0x02.
+fn ps2_mask(bits: u32) -> i32 {
+    use platform_api::Buttons;
+    let map = [
+        (Buttons::B, 0x40),
+        (Buttons::Y, 0x80),
+        (Buttons::ZR, 0x08),
+        (Buttons::X, 0x10),
+        (Buttons::A, 0x20),
+        (Buttons::L, 0x04),
+        (Buttons::ZL, 0x01),
+        (Buttons::R, 0x02),
+    ];
+    map.iter().filter(|(b, _)| bits & b.0 != 0).fold(0, |m, (_, v)| m | v)
+}
 
 impl WorldHost<'_> {
     /// The root of the copy placement `slot` (class 8) made: the first object of that copy, below the placement.
@@ -258,6 +305,30 @@ impl WorldHost<'_> {
         if option == CREW_STATE && matches!(class, Some(52..=54)) {
             return Some(Value::Int(0));
         }
+        // The canal chase: the player record's pad; the pad's, the machines', runs' and segments' methods; a reactive
+        // object's last hitter.
+        if option == PAD && class == Some(PLAYER_RECORD_CLASS) {
+            return Some(Value::Object(self.sly3_game_object(PAD_OBJECT, PAD_CLASS)));
+        }
+        // The stick's values are read; the buttons' tests are called.
+        if class == Some(PAD_CLASS) && matches!(option, PAD_STICK_X | PAD_STICK) {
+            let input = if self.world.shared.driving.is_some() { self.world.shared.input } else { Default::default() };
+            let [x, y] = input.left;
+            return Some(Value::Float(if option == PAD_STICK_X { x } else { crate::math::sqrt(x * x + y * y) }));
+        }
+        if (class == Some(PAD_CLASS) && matches!(option, PAD_PRESSED | PAD_HELD))
+            || (class == Some(MACHINE_CLASS) && option == MACHINE_RUN)
+            || (class == Some(RUN_CLASS) && option == RUN_SET)
+            || (class == Some(SEGMENT_CLASS) && option == SEGMENT_APPLY)
+            || (class == Some(SEGMENT_RUN_CLASS) && option == SEGMENT_RUN_SET)
+        {
+            return Some(Value::Method { object, option });
+        }
+        if option == LAST_HIT && class == Some(REACTIVE_CLASS) {
+            let slot = self.world.slot(h)?;
+            let by = self.world.shared.sly3_last_hit.get(&slot).copied();
+            return Some(Value::Object(by.map(Handle::to_script)));
+        }
         // A trigger shape's members (the tracked objects inside) and its flag. Working reading: the flag is whether
         // the shape is in the world (its meaning is not given).
         if self.world.class(h) == Some(TRIGGER_CLASS) && matches!(option, TRIGGER_MEMBERS | TRIGGER_FLAG) {
@@ -378,6 +449,16 @@ impl WorldHost<'_> {
         if matches!(option, ADD_TO_WORLD | REMOVE_FROM_WORLD) {
             let h = self.obj(object)?;
             self.world.set_in_world(h, option == ADD_TO_WORLD);
+            // A placement and its copy are one object in the game (a search for the placement's ID finds the copy's
+            // root, scripts.md 5), so adding the root adds its placement too when the placement was taken out at the
+            // start (option 27 on the placement record; v_canal's enemy boats, 139842 and on, missions.md 4.1a).
+            if option == ADD_TO_WORLD
+                && let Some(p) = self.world.parent(h)
+                && self.world.class(p) == Some(PLACEMENT_CLASS)
+                && self.world.slot(p).and_then(|s| self.sly3_copy_root(s)) == self.world.slot(h)
+            {
+                self.world.set_in_world(p, true);
+            }
             return Some(Value::Void);
         }
         // A placement's new instance (none when its pool has none free).
@@ -404,6 +485,49 @@ impl WorldHost<'_> {
         }
         if option == GUARD_VALUE {
             return Some(Value::Int(0));
+        }
+        // The pad (missions.md 4.1a): player 0's, while the player drives a machine (control handed to the player
+        // record); idle otherwise. "Pressed within a time" reads as pressed this frame [I].
+        if matches!(option, PAD_PRESSED | PAD_HELD) {
+            let driving = self.world.shared.driving.is_some();
+            let input = if driving { self.world.shared.input } else { Default::default() };
+            let mask = args.first().and_then(|a| a.as_i32()).unwrap_or(0);
+            let bits = if option == PAD_PRESSED { input.pressed } else { input.buttons };
+            return Some(Value::Bool(ps2_mask(bits) & mask != 0));
+        }
+        // A machine run on an object: one per machine (made on first use, out of the world), its state set from
+        // the call (the object, the state, a flag).
+        if option == MACHINE_RUN {
+            let machine = self.obj(object)?;
+            let key = 2_000_000_000 + self.world.slot(machine)?;
+            let run = self.sly3_game_object(key, RUN_CLASS)?;
+            let rh = self.obj(run)?;
+            if let Some(state) = args.get(1).and_then(|a| a.as_i32())
+                && let Some(o) = self.world.options_mut(rh)
+            {
+                o.set(RUN_STATE, OptionValue::Int(state));
+            }
+            return Some(Value::Object(Some(run)));
+        }
+        if option == RUN_SET {
+            let rh = self.obj(object)?;
+            let state = args.first().and_then(|a| a.as_i32()).unwrap_or(-1);
+            if let Some(o) = self.world.options_mut(rh) {
+                let before = o.get(RUN_STATE).and_then(OptionValue::as_i32).unwrap_or(-1);
+                o.set(RUN_PREVIOUS, OptionValue::Int(before));
+                o.set(RUN_STATE, OptionValue::Int(state));
+            }
+            return Some(Value::Void);
+        }
+        // An animation segment applied by a script: its run, whose controls are not modelled (the segment itself
+        // is not played this way; `0x16` plays segments).
+        if option == SEGMENT_APPLY {
+            let seg = self.obj(object)?;
+            let key = 2_100_000_000 + self.world.slot(seg)?;
+            return Some(Value::Object(self.sly3_game_object(key, SEGMENT_RUN_CLASS)));
+        }
+        if option == SEGMENT_RUN_SET {
+            return Some(Value::Void);
         }
         // Event 5 raised on the lock (its part forwards its own).
         if option == RAISE_FIVE {

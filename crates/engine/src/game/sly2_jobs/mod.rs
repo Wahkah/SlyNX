@@ -667,6 +667,12 @@ impl Jobs {
         self.save_state(t);
         self.effects.push(Effect::Script { slot, event: script_event::STATE, task_event: None });
         self.effects.push(Effect::Broadcast { event: event::STATE_AFTER, object: here });
+        // Sly 3 (sly3/missions.md 4.1a, "Clearing the job and task keys"): in live play a task whose new state is 0
+        // or 3 stops being current, which clears the remembered task (closing a job's last task leaves none to carry
+        // into the next world). Sly 2's spec has no such rule.
+        if self.sly3_rules && !self.restoring && (s == state::LOCKED || s == state::CLOSED) && self.current == Some(t) {
+            self.stop_current();
+        }
         if self.sly3_rules && !self.restoring {
             self.pending.push(t);
             self.backfill(t, s);
@@ -753,11 +759,9 @@ impl Jobs {
         }
     }
 
-    /// Makes task `t` the current task (missions.md 4, "Becoming current").
-    pub fn make_current(&mut self, t: usize) {
-        if self.current == Some(t) {
-            return;
-        }
+    /// The current task, if any, stops being current (missions.md 4, "Becoming current": switch group 5, its script's
+    /// end event, event 0x24, its objective prompt removed); none is current then.
+    fn stop_current(&mut self) {
         if let Some(prev) = self.current.take() {
             self.switch(prev, state::STOPPED_CURRENT, false);
             let slot = self.graph.tasks[prev].slot;
@@ -765,6 +769,14 @@ impl Jobs {
             self.effects.push(Effect::Broadcast { event: event::TASK_NOT_CURRENT, object: None });
             self.notices.push(Notice::Objective(None));
         }
+    }
+
+    /// Makes task `t` the current task (missions.md 4, "Becoming current").
+    pub fn make_current(&mut self, t: usize) {
+        if self.current == Some(t) {
+            return;
+        }
+        self.stop_current();
         // missions.md 4.2: the new task is current, its checkpoint remembered and its job begun; then (its record
         // being loaded) its play count, switch group 4, goals and prompt, and event 19 to its script; only then its
         // exit (fired by `after_current`, after a 1405 "done").

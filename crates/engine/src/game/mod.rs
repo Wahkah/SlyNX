@@ -167,13 +167,24 @@ impl Game {
             // Sly 2 hook: each package copy past the first runs in its own clone of the module frames (scripts.md
             // 1); objects a placement bound, and Sly 1 worlds, keep the shared frame.
             let ordinals = crate::world::sly2::copy_ordinals(&g.world);
+            let sly3_bound = g.world.sly3_copy_ordinals_with(true);
             for &h in &handles {
                 let m = g.world.module(h);
                 if m >= 0 && (m as usize) < modules {
                     // A module given by a proxy override continues in the object's earlier module (scripts.md
                     // 11.3); the interpreter keeps the first outer module a module gets and counts refusals.
                     let outer = g.world.outer_module(h).filter(|&o| o >= 0 && (o as usize) < modules);
+                    // Sly 3 hook (classes/placement.md 1): a bind's override continues in its copy's own frame of the
+                    // earlier module.
+                    let override_copy =
+                        outer.filter(|_| g.world.sly3.is_some()).and_then(|_| sly3_bound.get(&h.index()).copied());
                     match (outer, ordinals.get(&h.index())) {
+                        (Some(o), _) if override_copy.is_some() => {
+                            let copy = override_copy.unwrap_or(0);
+                            if !interp.attach_override(h.to_script(), m as u32, o as u32, copy) {
+                                g.outer_refused += 1;
+                            }
+                        }
                         (None, Some(&copy)) => interp.attach_copy(h.to_script(), m as u32, copy),
                         _ => {
                             if !interp.attach_with_outer(h.to_script(), m as u32, outer.map(|o| o as u32)) {
@@ -182,6 +193,14 @@ impl Game {
                         }
                     }
                 }
+            }
+            // Sly 3 hook (classes/placement.md 1): a proxy override's module sees its outer module's event 1 too
+            // (v_canal's boat: override 335 over 330), so the table is read again now that the outer modules are set.
+            if g.world.sly3.is_some() {
+                let event1: Vec<bool> = (0..modules as u32)
+                    .map(|m| interp.lookup(m, script::event::UPDATE).is_some_and(|v| v.is_callable()))
+                    .collect();
+                g.world.set_event1_modules(event1);
             }
             {
                 // Sly 2 script hook: custom properties declared by the option lists (none for other worlds).

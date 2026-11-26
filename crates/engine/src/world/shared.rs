@@ -267,6 +267,12 @@ pub struct Shared {
     pub sly3_hits: BTreeMap<u32, (Handle, Handle)>,
     /// Sly 3 hook (guards.md 4b): guards knocked out since the session last looked (it plays their knock-out clip).
     pub sly3_knocked_out: Vec<Handle>,
+    /// Sly 3 hook (missions.md 4.1a): the last object to hit each reactive object (by slot), read by scripts as
+    /// script ID 1105 (`behavior::sly3::projectile`).
+    pub sly3_last_hit: BTreeMap<u32, Handle>,
+    /// Sly 3 hook: objects projectiles no longer hit (the canal chase's defeated enemy boats; stand-in, set by the
+    /// session).
+    pub sly3_unhittable: Vec<Handle>,
     /// Sly 3 hook: each class's derived classes (a class derives from itself), set by the session at load, for
     /// scripts' "derived from class n" test (script ID 3).
     pub sly3_derived: BTreeMap<i16, Vec<i16>>,
@@ -298,6 +304,8 @@ pub struct Shared {
     pub sequence_signals: alloc::collections::BTreeMap<u32, Vec<i32>>,
     /// Sly 2: placements (by slot) whose copy is leased (classes/placement.md 2.1).
     pub leased: alloc::collections::BTreeSet<u32>,
+    /// Sly 2: placements (by slot) whose lease is locked (1023 / 1024; classes/placement.md 2.1).
+    pub lease_locked: alloc::collections::BTreeSet<u32>,
     /// Sly 2 / Sly 3: the object mask the camera's visibility volumes select (camera.md 7.1; `0xFF` in none).
     /// Objects whose zone mask shares no bit with it are not updated.
     pub visibility_mask: u32,
@@ -401,6 +409,8 @@ impl Default for Shared {
             sly3_context_writes: Vec::new(),
             sly3_hits: BTreeMap::new(),
             sly3_knocked_out: Vec::new(),
+            sly3_last_hit: BTreeMap::new(),
+            sly3_unhittable: Vec::new(),
             sly3_derived: BTreeMap::new(),
             sly3_crew_moves: Vec::new(),
             sly3_use_users: BTreeMap::new(),
@@ -414,6 +424,7 @@ impl Default for Shared {
             job_prompt: None,
             sequence_signals: alloc::collections::BTreeMap::new(),
             leased: alloc::collections::BTreeSet::new(),
+            lease_locked: alloc::collections::BTreeSet::new(),
             visibility_mask: 0xFF,
             damage: Vec::new(),
             groups: Vec::new(),

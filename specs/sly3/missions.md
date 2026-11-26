@@ -567,6 +567,127 @@ map; partial]:
   damage the crew in Sly 3, are open questions.** Sly 2's health rules (Sly 2 characters.md 2) are the reference
   until traced.
 
+**Clearing the job and task keys** [X]:
+
+- The keys are written only by the current-job setter (`0x0018AA48`) and the current-task setter (`0x0018AAB8`):
+  game +0x1498 and +0x149C hold the OID, or −1 for none (saving.md 3).
+- **A task that stops being current clears the task key.** `0x00188928` (called from `0x00188620`, "stop being
+  current if current") calls the setter with none.
+- In live play (mode 0) the state setter (`0x0018A3E8`) calls `0x00188620` whenever a task's new state is **0
+  or 3**. So **closing the current task**, as when the job's last task 2327 closes, clears +0x149C to −1. In mode
+  1 (restoring) this follow-up is skipped.
+- **A job that ends clears the job key.** The job end (`0x00186298` → `0x00186610`) calls the job setter with
+  none.
+- **Make-current does not test the state.** `0x00188540` returns early only when the task is already current.
+  The world start's step 2 relies on the keys having been cleared, and does not refuse a closed task.
+- So a build that still holds 2327 in the key after the exit is missing the "state 0 or 3 → stop being current"
+  follow-up (or the job-end clear). The exit itself does not touch the keys.
+
+**m1_canal_chase** (tasks 2331 to 2350) [D] [I where marked]:
+
+| Task | World (1401) | Character (1402) | Script (1408) | What happens / what completes it |
+|---|---|---|---|---|
+| 2331 `t1_canal_chase_intro` (waypoint 140821, checkpoint 139815) | 3 v_ext | 25 Bentley | 2332 | opens the binocucom on Bentley at 24 (`0x46`), plays lines 1080 to 1086 and the boat set-up, then requests 2331 → 2 and **fires exit 2047 to v_canal** (point 424) |
+| 1804 `minigame_intro` (1399) | 4 v_canal | 25 | 2333 | requests 1804 → 2 at once, starts 2336 (the minigame) and 2337 (a hook loop every 0.2 s), and plays the intro cameras (line 1087 the first time, test 1888) |
+| 2334 `overheat` | — | — | 2335 | line 1088 the first time (1888), then 2334 → 2. *Interpretation:* a one-time tutorial line, made current when the gun first overheats [I] |
+| 2341, 2343, 2345 `enemy_1` to `enemy_3` | — | — | 2342, 2344, 2346 | each starts 2340 (line 1089 or 1090, chosen by hook conditions 139859 / 139860) and then requests its task → 2. *Interpretation:* each is made current when that enemy boat is sunk [I] |
+| 2347 `minigame_complete` (1399; prerequisites 2341, 2343, 2345) | — | — | 2348 | a slow-motion ramp (`0x1D`), cameras, line 1091, activates checkpoint 2349 (`0x12`), restores the time scale, requests 2347 → 2 and **fires exit 2045 to point 51592** |
+| 2350 `complete` (1399) | 3 v_ext | 25 | 2351 | the closing scene in v_ext (Bentley removed and re-added, lines 1075 and 1076); successor 1826 |
+
+- **The minigame (script 2336)** [D]:
+  - it gives **player 0 control of object 2003** (`0x13` (2003, 0)). 2003 is a class-49 controller in group
+    `v_boat_player`;
+  - it starts the boat-art scripts (50657, 139819) and an animation (139836, flags 8);
+  - it shows hint 1092 until alarms 139838 and 139839 are both set.
+- **The boat** is object 139806 (class 47, `v_boat_player` module 0). Its state is kept in the controller 2003:
+  **939 = maximum hull and 940 = current hull**. On each start (event 17) the hull is refilled to the maximum.
+  - **Taking damage** (event 12, a hit on the boat, when the hull is above 0 and the player is not held):
+    - the camera shakes (built-in 138, (10, 0.5));
+    - the hull loses the hit's amount (the hit record's 124), or all of it if the hit is fatal (125);
+    - dropping below 25 % starts the warning object 150018;
+    - at 0, effect 37190 plays, the boat removes itself, and Sly (24) and Bentley (25) get method 130 with (256, 0,
+      #t, boat). *Interpretation:* the fail and retry [I];
+    - otherwise the hit reaction 150009 starts.
+  - **Firing:** the boat takes an instance of projectile placement **150052** (`v_boat_player_missile`, class
+    89) with script ID 825. It calls 2749 / 2748 on the art script 139819 for the heat counter [I: the overheat
+    gauge]. The rest of the firing code was not decoded here.
+- **Enemy boats** (`v_boat_enemy`, class-111 body 150654, module 0) [D]:
+  - health 100 (s2415 / s2416, settable through custom method 1941);
+  - on event 19 (hit by a projectile), when the projectile is class 89 its damage (549) is subtracted, and the
+    health bar (screen object, 1153) is updated;
+  - at 0 the enemy's crew object is re-parented and hidden, and 150681 (the sinking / defeat object) is placed
+    and started (41, 544).
+- **The boat's frame update** (`v_boat_player` module 0, event 1, decoded) [D]. The pad is the controller's
+  object 943 (s6506). Built-in calls on it: 1079 (button held), 1078 (button pressed within 0.1 s), 1072 (stick
+  value), 1074 (stick magnitude). The meaning of the masks is from the pad layout [I].
+  - **Forward motion is not the player's.** The boat sits under an owner (+0x10, s1665) that carries it along
+    the canal. The script only sets the boat's own velocity (script ID 194) to (0, lateral, vertical).
+  - **Vertical:** vertical = clamp(owner z − boat z, −1,500, 1,500), so the boat follows the owner's height.
+  - **Steering (lateral):**
+    - when |stick| > 0.2, lateral −= stick × 1,000 / k, where k = 4 normally and 12 in the air (state machine
+      150013 not in 152160), then the result is clamped to ±1,000. The lean state is 1 or 2 by the stick's
+      sign;
+    - otherwise lateral × 0.89 each frame;
+    - lateral resets to 0 when it changes sign.
+  - The two wake effects 150043 / 150038 follow the lateral speed (none below 50).
+  - **Jump:** button mask `0x40` pressed sets state machine 150013 to 15663 (lean state 3 in the air) and sets
+    alarm 139839 on the hint script. Triggers 139802, 139805 and 150109 (modules 1 to 3 of
+    `v_canal_canal_chase`) force the same jump on any newly entering member (ramps).
+  - The animation rate (state machine 150011) follows 1 + stick + (distance to the owner's goal / 400), clamped;
+    the art script 50657 gets the lean state (2750).
+  - **Heat gauge:** screen object 150062, value 1 when overheated, else a lerp by heat / 100 (part 892).
+- **Firing and heat** (same module) [D]:
+  - while button mask `0x80` or `0x08` is held, the time is past the next-shot time, and the gun is not
+    overheated, the boat **fires**:
+    - it takes a missile instance of placement 150052 with ID 825;
+    - it lifts it by 2 when not in the jump state, sets its damage (549) to 1, and re-parents it to the world;
+    - it gives it velocity (16,000, 0, 0) in its own frame;
+    - the next shot is allowed 0.1 s later, so 10 shots a second;
+  - **heat** rises by 3 per shot (at most 100). At **100** the gun is **overheated** and stops firing;
+  - while the button is not held, heat falls by 0.75 per frame. **Overheat ends below 80**;
+  - at heat ≥ 60, script 139807 runs (a small camera shake, built-in 138 (0, 0.01)); otherwise it is stopped;
+  - the first shot sets alarm 139838 on the hint script (the tutorial). The art script's 2749 / 2748 mark a
+    shot and a reload [I].
+- **What makes the side tasks current** [D]:
+  - **Overheat 2334:** job 2329's module (v_macro module 76) answers task event 29. When the object is **script
+    139807**, which starts when heat reaches 60 (and a script start raises event 5, scripts.md 7.4), and 2334 is
+    available, it requests **2334 → 4 (make current)**. 2334's script then plays line 1088 the first time and
+    closes it.
+  - When the object is the **boat 139806** (its event 5 is raised when the hull reaches 0), the job calls its
+    method 1260 with (−1, 2338): the failure path [I].
+  - **Enemies 2341 / 2343 / 2345:** modules 7, 6 and 5 of `v_canal_canal_chase` are override modules, attached
+    to the enemy copies through their placements. On event 5 they call the inherited handler (built-in 141) and
+    then **request their enemy task → 4**. Each enemy task's script (2340, then a request for 2) closes it at
+    once. *Interpretation:* an enemy boat gets event 5 when it is defeated [I: the raise was not found in the
+    enemy module itself]. Lines 1089 and 1090 are chosen by how many of the three enemy tasks are still at
+    state 1 (2340's module: 0 left or 1 left).
+- **Enemy boats:** health 100 and damage per player missile 1, so 100 hits; the defeat object 150681 is placed
+  at 150682 (v_boat_enemy module, above).
+- **The owner that carries the boat** [D]:
+  - The boat's owner is **139840** (class 47, `v_canal_rig`). Script 2336 applies the clip **139836** with flags
+    8 (`0x16`).
+  - That clip is **104.63 s** long and moves two objects along keyed position tracks: 139840 and 149995. Each
+    closes on itself: the track starts and ends at (65, −11,815, 0), a loop round the canal.
+  - Sampled over 1,046 steps the loop is **314,065 units** long, run at a **steady ≈ 3,000 units/s**
+    (10th to 90th percentile 2,980 to 3,022). There is no deliberate speed-up or slow-down.
+  - The track keys only position; heading follows the motion [I]. 149995 runs alongside, about 1,560 units
+    away. *Interpretation:* the chase camera's or the pacer's carrier [I].
+- **Enemy boats** (`v_boat_enemy`, class-111 body 150654) [D, partial]:
+  - the enemy keeps a crew member taken from a pool (option 2737's object, script ID 1207 to take, 1209 to place)
+    through custom method 1954. It poses it with command list **150691**, a single 743 (play clip 56517,
+    flags 8), and sets its options 69, 951, 435, 449, 421 and 482. Method 2735 returns the crew member;
+  - **defeat:** at health 0 the crew member is re-parented and hidden, and object **150681** (class 89, a
+    projectile body) is moved to anchor 150682, added and started (544). *Interpretation:* the sinking
+    explosion [I]. Below half health, and on ordinary hits, the hit flag 1110 = 1 is set.
+- **Placements** [D] (correction). The enemy boats are copies of `v_boat_enemy` placed by **139842, 139845 and
+  139848** in `v_canal_canal_chase`. Their binds attach override modules 5, 6 and 7 and set 2736 (2330, the
+  health-bar screen object), 2738 (139853, 139852, 139851, the bar's part) and 2737 (150689, 150687, 150685).
+  Those last three are placements inside `v_boat_enemy` of **`ecto_swarmer` guards (class 58), the crews**,
+  each bound with an option-8 property. The copies are removed at the start (option 27 on the placement); which
+  script adds them was not found.
+- **Still open:** the camera during the chase, the enemies' own movement, how the crew shoots at the player and how much of the hull (939 / 940)
+  a hit takes, and what raises event 5 on a defeated enemy, which the override modules 5 to 7 need.
+
 **Back-filling prerequisites: on every request, not on the restore** [X]:
 
 - Every state change made by a request goes through `0x00189B08`. That routine first collects the affected tasks

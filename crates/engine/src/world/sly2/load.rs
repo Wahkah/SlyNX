@@ -163,6 +163,7 @@ impl World {
                 hud: Default::default(),
                 task_events: Vec::new(),
                 bound: Default::default(),
+                placed: Default::default(),
                 noise_objects: Vec::new(),
                 objects: Vec::new(),
                 ids: Default::default(),
@@ -439,6 +440,19 @@ impl<'b> Loader<'b> {
                     }
                 };
                 let root = (copied && first < w.slot_count() as u32).then_some(first);
+                // The copy's root and its number of top-level objects, kept for leases: a script can detach the root
+                // from the placement later (classes/placement.md 2.1).
+                if let Some(r) = root {
+                    let ph = w.handle(slot);
+                    let tops = (first..w.slot_count() as u32)
+                        .filter(|&s| {
+                            w.handle(s).and_then(|h| w.parent(h)) == ph
+                                && self.level.objects.get(s as usize).is_some_and(|o| o.copy == copy)
+                        })
+                        .count() as u32;
+                    let local = w.handle(r).and_then(|h| w.local(h)).unwrap_or(Affine::IDENTITY);
+                    self.level.placed.insert(slot, (r, tops, local));
+                }
                 let extra = Cx {
                     copy,
                     parent: slot,

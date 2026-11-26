@@ -448,10 +448,12 @@ fn the_take_out_script_runs() {
     assert_eq!(use_point(&s), Some(false), "the use point is removed while the character walks out");
     let j = s.jobs.as_ref().unwrap();
     let state = |id: i32| j.graph.task_ids.get(&id).map(|&t| j.states[t]);
-    // Its requests are checked (command 0x1E, missions.md 4.1a). After the intro, 2083 is available and is made
-    // current; 2138, 2227 and 2418 are locked on a new game, so closing them is refused.
+    // Its requests are checked (command 0x1E, missions.md 4.1a). After the intro, 2083 is available: it is made
+    // current, then closed, and closing the current task in live play stops it being current (missions.md 4.1a,
+    // "Clearing the job and task keys"); 2138, 2227 and 2418 are locked on a new game, so closing them is refused.
     assert_eq!((state(2138), state(2227), state(2418)), (Some(0), Some(0), Some(0)));
-    assert_eq!(j.current.map(|t| j.graph.tasks[t].id), Some(2083), "task 2083 made current");
+    assert_eq!(state(2083), Some(3), "task 2083 closed");
+    assert_eq!(j.current, None, "no task current once 2083 closed");
     // ...and its finish block puts the use point back when it ends.
     for _ in 0..600 {
         if !s.scripts.is_running(2061) {

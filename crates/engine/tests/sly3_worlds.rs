@@ -247,7 +247,7 @@ fn every_world_loads_with_the_formats_counts() {
         let counts = &w.sly3.as_deref().unwrap().copy_counts;
         for gid in core::mem::take(&mut e.spawn_groups) {
             let Some(g) = fw.group_by_id(gid) else { continue };
-            if !fw.bodies[g].objects.iter().any(|r| r.class == 58) {
+            if !fw.bodies[g].objects.iter().any(|r| matches!(r.class, 58 | 89)) {
                 continue;
             }
             let want = counts.get(&gid).copied().unwrap_or(0) - e.instances.get(&gid).copied().unwrap_or(0);

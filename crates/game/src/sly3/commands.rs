@@ -84,6 +84,9 @@ pub enum Request {
     Place { target: i32, at: i32 },
     /// `0x77`: a character turns to face an object (missions.md 4.1a).
     Face { target: i32, at: i32 },
+    /// `0x16` with an animation-segment object (class 130) and no character (scripts.md 7.3): the segment plays on
+    /// its own; flag 8 loops it [I] (2336's owner path, missions.md 4.1a).
+    Segment { segment: i32, object: i32, flags: u8 },
     /// `0x6F` / `0x70`: take or release a run-time instance of a placement (class 8; missions.md 4.1a).
     Instance { placement: i32, take: bool },
     /// `0x13`: player `player`'s control goes to `object`.
@@ -618,6 +621,14 @@ impl Scripts {
                 0x77 => {
                     let target = [c.object, s.context, s.target, s.object].into_iter().find(|&o| o != -1).unwrap_or(-1);
                     self.requests.push(Request::Face { target, at: word(&a, 0) });
+                }
+                0x16 => {
+                    self.requests.push(Request::Segment {
+                        segment: word(&a, 0),
+                        object: word(&a, 1),
+                        flags: a.get(8).copied().unwrap_or(0),
+                    });
+                    *self.unhandled.entry(c.id).or_default() += 1;
                 }
                 0x45 => {
                     // The key's time: the third float after the two vectors.

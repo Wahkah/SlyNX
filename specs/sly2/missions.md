@@ -652,6 +652,71 @@ tank one stage, and the fifth finishes 1884.
 
   Guards thrown in do not count, because the volume counts only class 57.
 
+**The rat generator (17346, package `generator_rig`, row 7)** (added 2026-11-26). It spawns the rats Murray throws.
+Its module 0 reads these custom properties, which placement 17346's root patch sets (option 3 bool, 4 int, 5 float,
+8 object). A property left unset reads as "no value" [D for the bytes and the code; I for the names]:
+
+| Property | Type | Value | Use in the module |
+|---:|---|---|---|
+| 1346 | object | 123922 (the rig object) | spawn root: if not −1, the nearest object with that OID (op115) becomes the context, and the spawn list is op120 class 6 under it |
+| 1347 | object | −1 | a path given to each spawn through the child 19959 (its method 625); −1: none |
+| 1348 | object | 123922 | an object told of spawns through its property 1351 (20524 on a spawn, 17021 when the current spawn is gone) |
+| 1349 | bool | false | start running at load (true calls the start method 1236) |
+| 1350 | int | 2 | most live spawns at once |
+| 1352 | bool | true | sets each spawn's option 437 to true and 440 to null |
+| 1353 | bool | false | each spawn's option 415 = not 1353; set back to true on release when 1353 is true |
+| 1354 | float | 5.0 | seconds between spawn attempts (op107); task 1884 sets 4, 3, 2, 2, 5 |
+| 1355 | int | unset | total spawn limit: if above 0 and reached, the generator stops (1237); unset means no limit |
+
+- **Methods the module adds:** 1288 (add the generator and spawn), 1236 / 1237 (start / stop), 1341 (running),
+  1342 (current spawn), 1343 (spawn count), 1344 (release; called by child volume 19960's event 6), 1345 (reset
+  the count).
+- **Correction (2026-11-26).** An earlier version of this table gave 1346 and 1348 as 124946 and said no such object
+  exists, so the spawn list would be the whole world. That was a misreading of the patch bytes `12 e4 01 00`, which
+  are 0x1E412 = **123922** [D]. The spawn root is therefore the rig object 123922 (class 48, top-level in
+  `f_nightclub_waterpump_rig`, module 0).
+- **The spawn list** is op120 class 6 under 123922: the class-6/7 objects whose parent chain reaches the rig
+  (scripts.md 4.2) [D for the call]. Only **fresh** placements are class-6 objects (kind 1, or −1 with a shared
+  package): the placement loader creates an object for them (`0x0013E3C8` at `0x001C9C08`). The copy branch
+  (`0x001C9E14` on) creates none [D for the absence of the call], and a copy's root answers to the placement's OID
+  instead (scripts.md 5). So copy placements such as the big tank 123921 are **never in the list**. The free rat
+  123920 (top-level, not under the rig) is not either [I for its parent chain]. The intended entry is **125315**, a
+  fresh placement of `npc_swarmer_rat` (local position (−318, 98, −163)) stored inside the generator's own records. It
+  is fixed (option 1178 = 1), so its pool's copies stay free for the generator [D].
+- **Each attempt** walks the list cyclically from after the last success and leases with script ID 1019
+  (classes/placement.md 2.1).
+- **After a lease** (the spawn routine):
+  1. The copy is detached with `((op111 copy 33) null 3)`. Script ID 33 is stream option 20 (handler `0x00100958` →
+     `0x001A58D0` → the object's set-parent slot `0x50`), "set parent with mode". A null parent and mode 3 take the
+     copy out of its parent and keep its world position and orientation [D for the calls, R for the mode bits: 1
+     position, 2 orientation, 4 and 8 the velocities].
+     - The lease had already put the copy at the placement's matrix under the placement's parent
+       (classes/placement.md 2.1), so the rat stays where 125315 is in the world, beside the generator.
+     - A copy left at z 0 means the placement's parent transform or matrix was not applied before the detach [I].
+  2. If 19959 (a command list in the generator) exists, the copy is handed to it with method 214.
+  3. Object 1348 (the rig 123922) is told 20524 through its 1351. The rig's handler then:
+     - sets a state machine goal;
+     - calls 28244's 1372;
+     - takes the generator's current spawn (1342) and detaches it again (33, null, 3);
+     - gives it command list **125299** (script ID 441: follow curve 125297 forward). So the rat runs out along that
+       curve.
+  4. If the copy's position is **not** inside volume 19960 (its point test, script ID 108), the current spawn is
+     cleared at once.
+  5. Options 437 and 440 (1352) and 415 (1353) are set on the copy.
+- **Release** [D for the data and code; R for when event 6 fires]:
+  - Volume **19960** is a class-24 trigger nested in the generator. Its option 433 is 56, so classes 56–67 count,
+    rats included; its option 443 makes it a tracking volume.
+  - Module 1 of `generator_rig` handles its event 6, which fires when nothing counting is left inside. The handler
+    calls the parent's (the generator's) property 1344 with the volume's member list (script ID 533 = stream option
+    444, getter `0x00149848`).
+  - 1344 does the following if there is a current spawn and it is not in that list:
+    - sets option 415 when 1353 is true;
+    - tells 1348 (17021);
+    - clears the current spawn;
+    - if the generator runs, postpones its next update by 1354 s (op107); otherwise removes the generator.
+  - In play: once the rat (and anything else counting) has run out of the generator's box, the generator is free.
+    1354 s later its event 1 spawns the next rat, as long as fewer than 1350 (2) of its spawns are alive.
+
 ## 5. Jobs
 
 Rules [R]:

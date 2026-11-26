@@ -321,6 +321,10 @@ impl WorldHost<'_> {
         if !matches!(self.world.sly2_record(h)?.body, formats_sly2::stream::Body::Placement(_)) {
             return None;
         }
+        // As loaded, even once a spawn has detached it from the placement.
+        if let Some(&(r, ..)) = l.placed.get(&slot) {
+            return Some(r);
+        }
         let own = l.object(slot)?.copy;
         self.world
             .children(h)
@@ -353,6 +357,28 @@ impl WorldHost<'_> {
         let mut ranked: Vec<(u8, u32)> = slots.into_iter().map(|s| (rank(s), s)).collect();
         ranked.sort_unstable();
         ranked.into_iter().filter_map(|(_, s)| self.world.handle(s)).collect()
+    }
+
+    /// Operation 120 (scripts.md 4.3): every object of class `class` or a class derived from it, in load order; with
+    /// a context, the context itself and what lies below it, else every object of the world.
+    pub(super) fn sly2_find_by_class(&mut self, class: i16, context: Option<ObjectId>, out: &mut Vec<ObjectId>) {
+        let ctx = self.ctx(context);
+        if context.is_some() && ctx.is_none() {
+            return;
+        }
+        let hits: Vec<Handle> = self
+            .world
+            .handles()
+            .filter(|&h| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, i32::from(class))))
+            .filter(|&h| ctx.is_none_or(|c| self.below(h.index(), c)))
+            // Only fresh placements are class-6 objects in the game; a copy placement makes none (classes/placement.md
+            // 2.1: the big tank 123921 is not among the generator's candidates).
+            .filter(|&h| {
+                !matches!(self.world.sly2_record(h).map(|r| &r.body),
+                    Some(formats_sly2::stream::Body::Placement(p)) if !p.fresh)
+            })
+            .collect();
+        out.extend(hits.into_iter().map(Handle::to_script));
     }
 
     pub(super) fn sly2_find(&mut self, id: i32, context: Option<ObjectId>) -> Option<ObjectId> {
@@ -448,10 +474,13 @@ impl WorldHost<'_> {
         // (1175) leases one, 1021 (1177) gives the lease (taken first if none). The world holds one copy per placement,
         // so the lease is that copy's root. Taking it puts the copy in the world, which the placement's own option 26
         // does not hold back, and raises script event 14 on the placement and the copy; the placement's blocks and
-        // matrix were applied to the copy at load. Simplifications (the pool is not modelled): 1017 (1174, can one be
-        // leased) answers whether the placement has a copy, ignoring the lease state; 1019 always gives that one
-        // root; 1023 / 1024 (1179 / 1180, lock and unlock the lease) are stand-ins that do nothing. 1020 (the current
-        // lease, 1176) is a getter, not a method, and is not answered here.
+        // matrix were applied to the copy at load. Leases go by the copy's grade (classes/placement.md 2.1): 0 locked
+        // (1023 / 1024, 1179 / 1180, lock and unlock), 4 held by no placement, 1 held with an object in the world, 3
+        // all removed (2, flagged in the world but not really, is not modelled). 1019 needs at least 2, and a
+        // non-fixed placement already holding its copy re-takes it only at 3 or more; 1021 needs at least 1. A copy
+        // is held from load by a non-fixed placement (its copy is in the world), and by any placement once leased.
+        // Simplifications: one copy per placement (the pool is that copy); 1017 (1174, can one be leased) answers
+        // whether the placement has a copy. 1020 (the current lease, 1176) is a getter, not a method.
         // A search for the placement's ID finds the copy's root (scripts.md 5), so the call can arrive there.
         let is_placement = |h: Handle| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 6));
         let placement = self.obj(object).and_then(|h| {
@@ -464,9 +493,53 @@ impl WorldHost<'_> {
         if (LEASE_CAN..=LEASE_UNLOCK).contains(&option)
             && let Some(h) = placement
         {
-            let root = self.world.children(h).next();
-            let take = option == LEASE_TAKE || option == LEASE_OF && !self.world.shared.leased.contains(&h.index());
+            // The copy's root as loaded (a spawn detaches it from the placement), else the first child.
+            let placed = self.world.slot(h).and_then(|s| self.world.sly2.as_deref()?.placed.get(&s).copied());
+            let root = placed.and_then(|(r, ..)| self.world.handle(r)).or_else(|| self.world.children(h).next());
+            let slot = h.index();
+            match option {
+                LEASE_LOCK => {
+                    self.world.shared.lease_locked.insert(slot);
+                    return Some(Value::Void);
+                }
+                LEASE_UNLOCK => {
+                    self.world.shared.lease_locked.remove(&slot);
+                    return Some(Value::Void);
+                }
+                _ => {}
+            }
+            let fixed = self.world.options(h).and_then(|o| o.i32(FIXED_PLACEMENT)) == Some(1);
+            let held = self.world.shared.leased.contains(&slot) || !fixed;
+            let grade = match root {
+                _ if self.world.shared.lease_locked.contains(&slot) => 0,
+                None => 0,
+                Some(_) if !held => 4,
+                Some(r) if self.world.in_world(r) => 1,
+                Some(_) => 3,
+            };
+            // 1019 (1175) also needs a single-root prefab: one top-level object (the rat pool 125315).
+            let single = placed.is_some_and(|(_, tops, _)| tops == 1);
+            let can_take = single && if held && !fixed { grade >= 3 } else { grade >= 2 };
+            if option == LEASE_TAKE && !can_take {
+                return Some(Value::Object(None));
+            }
+            if option == LEASE_OF && grade < 1 {
+                return Some(Value::Object(None));
+            }
+            let take = option == LEASE_TAKE || option == LEASE_OF && !self.world.shared.leased.contains(&slot);
             if take && let Some(r) = root {
+                // The copy goes back under its placement at its loaded matrix (classes/placement.md 2.1: at the
+                // placement's matrix, beside the generator), wherever a spawn had left it.
+                if let Some((_, _, local)) = placed
+                    && self.world.parent(r) != Some(h)
+                {
+                    self.world.reparent(r, Some(h), false);
+                    self.world.set_local(r, local);
+                    if let Some(crate::behavior::Behavior::Sly2Guard(g)) = self.world.behavior_mut(r) {
+                        g.held = false;
+                        g.flight = None;
+                    }
+                }
                 self.world.shared.leased.insert(h.index());
                 self.world.set_in_world(h, true);
                 self.world.set_in_world(r, true);
@@ -475,7 +548,6 @@ impl WorldHost<'_> {
             }
             return Some(match option {
                 LEASE_CAN => Value::Bool(root.is_some()),
-                LEASE_LOCK | LEASE_UNLOCK => Value::Void,
                 _ => Value::Object(root.map(Handle::to_script)),
             });
         }
@@ -848,6 +920,8 @@ const LEASE_TAKE: u16 = 1175;
 const LEASE_OF: u16 = 1177;
 /// The script event a lease raises on the placement and the copy.
 const LEASE_EVENT: u32 = 14;
+/// A fixed placement (its copy kept out of the world as a pool; classes/placement.md 2.1).
+const FIXED_PLACEMENT: u16 = 1178;
 /// See [`LEASE_CAN`].
 const LEASE_LOCK: u16 = 1179;
 /// See [`LEASE_CAN`].

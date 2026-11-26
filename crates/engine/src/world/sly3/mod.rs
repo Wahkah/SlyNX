@@ -155,6 +155,9 @@ pub struct Sly3Level {
     pub pools: BTreeMap<i32, Vec<u32>>,
     /// Sly 3 spawn hook: each pooled copy's top-level objects' transforms as loaded (relative to the group's origin).
     pub pool_origins: BTreeMap<u32, Affine>,
+    /// Sly 3 script hook: the objects a placement's bind gave a module (classes/placement.md 1), which keep that
+    /// module's frame.
+    pub bound: alloc::collections::BTreeSet<u32>,
     objects: Vec<Sly3Object>,
     /// Slots by object ID (built at load; a destroyed object leaves it), for the ID searches.
     ids: alloc::collections::BTreeMap<i32, Vec<u32>>,
@@ -250,6 +253,12 @@ impl World {
     /// copies are cloned here at load, standing in for the clone the spec makes at each lease (825, `0x6F`); a
     /// copy taken again keeps the frame it had.
     pub fn sly3_copy_ordinals(&self) -> BTreeMap<u32, u32> {
+        self.sly3_copy_ordinals_with(false)
+    }
+
+    /// [`World::sly3_copy_ordinals`], with the objects placement binds gave a module too (`bound`): their copy
+    /// still clones the earlier module's frame, which the override module's frame continues in.
+    pub fn sly3_copy_ordinals_with(&self, bound: bool) -> BTreeMap<u32, u32> {
         let mut out = BTreeMap::new();
         let Some(l) = self.sly3.as_deref() else { return out };
         let mut seen: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
@@ -259,7 +268,9 @@ impl World {
                 copies.push(o.copy);
                 copies.len() - 1
             });
-            out.insert(slot as u32, n as u32);
+            if bound || !l.bound.contains(&(slot as u32)) {
+                out.insert(slot as u32, n as u32);
+            }
         }
         out
     }

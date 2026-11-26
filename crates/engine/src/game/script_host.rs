@@ -204,6 +204,10 @@ impl WorldHost<'_> {
                 Some(id) => Arg::Int(id),
                 None => Arg::Short(6, self.world.oid(self.obj(*o)?)?),
             },
+            // Sly 2 and Sly 3 hook: the null object keeps its place among the arguments (classes/placement.md 2.1:
+            // `((op111 copy 33) null-object 3)` detaches the copy keeping its world matrix; dropped, the 3 read as
+            // the parent and the keep bits as 0, which put the rat at the origin).
+            Value::Object(None) if !self.world.sly1_meanings() => Arg::Short(6, -1),
             _ => return None,
         })
     }
@@ -467,6 +471,9 @@ impl ScriptHost for WorldHost<'_> {
     }
 
     fn find_by_class(&mut self, class: i16, context: Option<ObjectId>, out: &mut Vec<ObjectId>) {
+        if self.world.sly2.is_some() {
+            return self.sly2_find_by_class(class, context, out); // Sly 2 hook
+        }
         let ctx = self.ctx(context);
         let mut v = Vec::new();
         self.world.find_class(class, ctx, &mut v);

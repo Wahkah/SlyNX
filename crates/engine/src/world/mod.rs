@@ -990,9 +990,13 @@ impl World {
     /// Whether object `slot` raises event 1 each frame.
     pub fn raises_event1(&self, slot: u32) -> bool {
         let m = self.module[slot as usize];
+        // Sly 2 (scripts.md 4.3): any object whose module binds event 1, while it is in the world and active (the
+        // update loop's test); Sly 1 keeps its placed-class rule.
         m >= 0
             && self.event1_modules.get(m as usize).copied().unwrap_or(false)
-            && crate::object::class_info(self.class[slot as usize]).is_some_and(|c| c.is_placed())
+            && (self.sly2.is_some()
+                || self.sly3.is_some() // Sly 3 hook: Sly 2's rule (missions.md 4.1a: event 1 each frame)
+                || crate::object::class_info(self.class[slot as usize]).is_some_and(|c| c.is_placed()))
     }
 
     fn rebuild_order(&mut self) {

@@ -65,6 +65,12 @@ sources:
   - kind: executable
     what: SCUS_973.16 (SHA-256 a511a94b…6a73), the module frame lookup 0x001FFA40, the module evaluation 0x001FFA70, the object clone 0x0013E510 / 0x001A6730 (frame clone call at 0x001A6824) and the bind 0x001C9F74 (2026-11-21)
     used_for: module frames per package copy and per bind (section 1) [D]
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), op120's handler 0x00124730 and the class search 0x0015E9C8, the base update 0x001A5E28 (2026-11-26)
+    used_for: op120 (section 4.2) and when event 1 is raised (section 6) [D]
+  - kind: reference-project
+    what: sly2-decomp @ 33e2bab9 (object search match); SafeHouse @ c70803ce, Sly2-Release/update.cpp, gamebif.cpp (op107, start of world)
+    used_for: the search's context rule, op107 and the event-1 update list [R]
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/splicemap.cpp, sw.cpp, loaders.cpp, update.cpp; sly2-decomp @ 33e2bab9 (object clone, frame clone, procedure clone)
     used_for: when modules are evaluated (section 1) [R]
@@ -273,7 +279,7 @@ Sly 1 section 7 applies.
 | 104 | 0 | 67 | always the integer 0: the routine behind it returns 0 unconditionally in the retail executable (its two instructions at `0x00210B68` are a return with result 0) [D] | |
 | 105 | 2+ | 1,824 | schedule a call: delay, procedure, arguments; gives an integer call ID (4.3) | 97 |
 | 106 | 1 | 312 | cancel the scheduled call with that ID (4.3) | |
-| 107 | 2 | 157 | postpone an object's updates | 98 |
+| 107 | 2 | 157 | postpone an object's updates: `(op107 object dt)` sets the object's next-update time (+0x30) to now + dt, so its event 1 waits until then (section 6) [R] | 98 |
 | 108 | 3 | 2,814 | add a custom property to an object | 99 |
 | 109 | 3 | 156 | ensure a custom property | 100 |
 | 110 | 3 | 11,789 | set an option | 101 |
@@ -285,7 +291,7 @@ Sly 1 section 7 applies.
 | 117 | 0 | 770 | the world object (the object that reads world option list 1) [R] | 108 |
 | 118 | 0 | 1,454 | the **sound manager** object (music and sound control; the scripts use the options of class 152 on it) [R]; not the player | |
 | 119 | 0 | 194 | the camera object (the object that reads world option list 2) [R] | 109 |
-| 120 | 2 | 302 | find all objects of a class | 110 |
+| 120 | 2 | 302 | find all objects of a class: `(op120 class context)` gives a list (at most 384). The class test is is-a: every class from C to 198 that derives from C is searched, so class 6 also returns class 7. With a context object (search flags `0x401`) only objects whose parent chain reaches the context are kept: the context itself and its descendants. With the null object (flags `0x405`) every object of the class in the world is returned. Handler `0x00124730`, search `0x0015E9C8` [D for the calls and the flag choice, R for the context rule] | 110 |
 | 121 | 2 | 1 | the solid objects whose collision overlaps an axis-aligned box given by two corner points; a list, each object once (4.3) [R] | |
 | 123, 124 | 3 | 5, 6 | hit-test a segment against a list of objects (4.3): 123 gives every hit as (object, hit position, surface normal); 124 gives the first hit as (object, surface normal) [R] | |
 | 125, 126 | 3 | 55, 51 | convert a position, a direction between object spaces | 115, 116 |
@@ -451,6 +457,19 @@ derived from it), not exact match. So `((op111 x 3) 56)` is true for every class
 90–95. 26, 81 and 92 are leaves, so they match exactly. The full tree is in [object-stream.md](object-stream.md) 3.1.
 
 ## 6. Events
+
+**When event 1 (the per-frame update) is raised** (added 2026-11-26):
+
+- The base update (`0x001A5E28`, vtable slot 16) raises script event 1 when the object's next-update time (+0x30) is
+  not after the clock [D].
+- At world start, an object whose module binds symbol 1 is put in the update list, and its state 2 becomes 0. Every
+  other object gets next-update = the largest `f32`, so it never receives event 1 [R].
+- It then runs only while the object updates: it must be in the world and active, which includes the visibility
+  mask ([clock-and-loop.md](clock-and-loop.md) 3) [R].
+- `op107` spaces the calls by setting next-update to now + dt [R].
+- Classes that replace slot 16 raise event 1 only if they call the base update (projectiles and spawners do) [R].
+- So there is no gate by class: what matters is the module's binding, being in the world and active, and the op107
+  time.
 
 As in Sly 1 section 6, an object raises an event by number; if its module binds the symbol with that number to a
 procedure, the procedure is called with the object first [R]. Sly 2 numbers 30 events (symbols 0 to 29) and

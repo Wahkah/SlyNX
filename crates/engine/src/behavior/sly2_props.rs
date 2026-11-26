@@ -385,8 +385,13 @@ impl TriggerVolume {
         }
         let class = world.class(h).unwrap_or(0) as i32;
         let character = super::sly3::character_classes(world).contains(&(class as i16)); // Sly 3 hook
+        // Sly 2 counts a class and the classes derived from it (object-stream.md 3.1: 19960's 56 counts the rats,
+        // class 57).
+        let sly2 = world.sly2.is_some();
         ids.iter().any(|&id| world.sly2_id(h).or_else(|| world.sly3_id(h)) == Some(id)) // Sly 3 hook: Sly 3 IDs
-            || classes.iter().any(|&c| c == class || (character && (c == 52 || c == 51)))
+            || classes.iter().any(|&c| {
+                c == class || (character && (c == 52 || c == 51)) || (sly2 && crate::world::sly2::is_a(class as i16, c))
+            })
     }
 }
 
@@ -428,13 +433,33 @@ impl ClassBehavior for TriggerVolume {
                         .options(cx.me)
                         .map(|o| o.all(433).filter_map(|v| v.as_i32()).map(|c| c as i16).collect())
                         .unwrap_or_default();
-                    for c in classes.into_iter().filter(|&c| !matches!(c, 51..=54)) {
-                        for &s in cx.world.slots_of_class(c) {
-                            if let Some(h) = cx.world.handle(s)
-                                && cx.world.is_active(h)
-                                && let Some(p) = cx.world.position(h)
-                            {
-                                candidates.push((h, p));
+                    let classes: Vec<i16> = classes.into_iter().filter(|&c| !matches!(c, 51..=54)).collect();
+                    if cx.world.sly2.is_some() {
+                        // Sly 2: the classes derived from them too (the counting test above).
+                        if !classes.is_empty() {
+                            let found: Vec<(Handle, [f32; 3])> = cx
+                                .world
+                                .handles()
+                                .filter(|&h| {
+                                    cx.world.class(h).is_some_and(|k| {
+                                        !matches!(k, 51..=54)
+                                            && classes.iter().any(|&c| crate::world::sly2::is_a(k, i32::from(c)))
+                                    })
+                                })
+                                .filter(|&h| cx.world.is_active(h))
+                                .filter_map(|h| Some((h, cx.world.position(h)?)))
+                                .collect();
+                            candidates.extend(found);
+                        }
+                    } else {
+                        for c in classes {
+                            for &s in cx.world.slots_of_class(c) {
+                                if let Some(h) = cx.world.handle(s)
+                                    && cx.world.is_active(h)
+                                    && let Some(p) = cx.world.position(h)
+                                {
+                                    candidates.push((h, p));
+                                }
                             }
                         }
                     }

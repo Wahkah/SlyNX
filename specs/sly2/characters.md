@@ -85,8 +85,11 @@ sources:
       (the action-mode routine, the cane catch test, the kept points), climb.cpp (the pipe grip's mode), jumptgt.cpp
       and jt.cpp (hook targeting), jump.cpp (the reach start and jump kind 2's launch)
     used_for: the swing physics (9.1.1) and the cane modes 2 and 11 (9.3.1) [R] (2026-11-20)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/damage.cpp (damage states, the end of a reaction), task.cpp (event 0x10) (2026-11-26)
+    used_for: death: the reactions, the defeat event, the restart (section 2.1) [R]
 reviewed_by: pending
-date: 2026-11-20
+date: 2026-11-26
 ---
 
 # Sly 2 playable characters
@@ -278,6 +281,35 @@ outright unless the difficulty help exceeds 2/3 [I]. Per-boss windows: [vehicles
    recovers as from a stun [R]. The clip for each phase comes from the character's damage-reaction clips.
 
 Like every hit, it also makes the fixed hit noise (template 712) that guards hear (guards.md 4.1) [R].
+
+### 2.1 Death (added 2026-11-26) [R]
+
+There are **no lives**. A gang character whose counter reaches 0 plays a death reaction, then the game counts a
+defeat and restarts. In order:
+
+1. **The hit.** The counter is lowered and clamped at 0. The hit's kind (its filter) chooses the reaction:
+
+| Hit kind (filter) | Counter still above 0 | Counter at 0 |
+|---|---|---|
+| knock-back `0x100`, `0x200`, `0x40` | thrown, then "get up" (reaction 0) | thrown, then reaction **8**: thrown backward when its velocity against the facing is below −250, else **9** |
+| stun `0x800`, `0x1000` | reaction 1 or 2, then recover | reaction 1 or 2, then **8** |
+| fall `0x400` (velocity set to (0, 0, −1000)) | reaction 4 | reaction **12** |
+| water `0x2000` | reaction 3, then recover | reaction **10**, turned to face the camera |
+| `0x4000` | reaction 5, then recover | reaction **11**, turned to face the camera |
+| burn `0x8000` | reaction 7, then 6 | reaction 7, then 6, then **8** |
+
+2. **The death reaction.** Reactions 8 to 12 play their clip (the character's reaction table) and the character takes
+   no input.
+3. **The defeat.** When the clip is retracted, the character's eyes close and **task event 0x10** is broadcast with
+   the character.
+4. **What 0x10 does:**
+   - **difficulty help +0.1** ([missions.md](missions.md) 6);
+   - during a job, the job restarts at its checkpoint task, whose world and checkpoint load (missions.md 5);
+   - outside a job, the current world reloads at the current arrival point with wipe 778
+     ([level-flow.md](level-flow.md) 8).
+5. **After the restart** the counter is refilled to 40 and power to 100 (section 2).
+
+A carried loot item is dropped by any hit that would empty the counter, or that hits a fragile item.
 
 ## 3. Sly (class 53): delta from Sly 1
 

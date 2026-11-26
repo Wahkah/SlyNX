@@ -250,6 +250,68 @@ pub fn run_gang(title: Title, cfg: &Config, mut progress: impl FnMut(&Stage)) ->
     stages
 }
 
+/// A waypoint for one character (custom property 1991, else option 1483; missions.md 4.2) when another is played: the route goes through the safe house (entered at once, standing in for the walk to it) and takes that
+/// character out (characters.md 6), as the start does for Sly.
+fn take_out_for(
+    s: &mut game::sly3::Sly3Session<NullBackend, DiscFile>,
+    h: engine::object::Handle,
+    f: u32,
+    journal: &mut Vec<String>,
+) {
+    // The character the waypoint lets start its task: custom property 1991 (an owner code: Sly 24, Bentley 25,
+    // Murray 26; missions.md 4.2), on the waypoint or its placement, else its class (option 1483).
+    let Some(class) = s.waypoints.iter().find(|w| w.handle == h).map(|w| w.player_class) else { return };
+    let owner = s.game.as_ref().and_then(|g| {
+        let w = &g.world;
+        let l = w.sly3.as_deref()?;
+        [Some(h), w.parent(h)].into_iter().flatten().find_map(|o| {
+            let slot = w.slot(o);
+            l.actions.iter().find_map(|a| match (&a.2[..], Some(a.0) == slot) {
+                ([engine::object::Arg::Short(21, 1991), engine::object::Arg::Int(v)], true) => Some(*v),
+                _ => None,
+            })
+        })
+    });
+    let (want, code) = match (owner, class) {
+        (Some(24), _) | (None, 52) => (52, 24),
+        (Some(25), _) | (None, 54) => (54, 25),
+        (Some(26), _) | (None, 53) => (53, 26),
+        _ => return,
+    };
+    let playing = s.game.as_ref().and_then(|g| g.world.player.and_then(|p| g.world.class(p)));
+    if playing == Some(want) {
+        return;
+    }
+    // A script holding the pad (the arrival's) is waited out first: the safe house reads no input meanwhile.
+    for _ in 0..20 * FPS {
+        if !s.script_paused && !s.screens_hold() {
+            break;
+        }
+        s.update(&FrameInput::default(), 1.0 / FPS as f32);
+    }
+    if !s.enter_safe_house() {
+        return;
+    }
+    for _ in 0..6 {
+        if s.safe_house.as_ref().and_then(|x| x.state()) == Some(code) {
+            break;
+        }
+        let b = platform_api::Buttons::RIGHT.0;
+        s.update(&FrameInput { pressed: b, buttons: b, ..Default::default() }, 1.0 / FPS as f32);
+    }
+    let shown = s.safe_house.as_ref().and_then(|x| x.state());
+    let b = platform_api::Buttons::B.0;
+    s.update(&FrameInput { pressed: b, buttons: b, ..Default::default() }, 1.0 / FPS as f32);
+    for _ in 0..3 {
+        s.update(&FrameInput::default(), 1.0 / FPS as f32);
+    }
+    journal.push(format!(
+        "{:.1} s: waypoint for class {want}: took out {code} at the safe house (shown {shown:?}), playing {:?}",
+        f as f32 / FPS as f32,
+        s.game.as_ref().and_then(|g| g.world.player.and_then(|p| g.world.class(p)))
+    ));
+}
+
 /// Where the route heads (missions.md 4.2): with no job running, the waypoint of the first available task that has
 /// one; during a job, a trigger shape naming the current task's successor, else the nearest active waypoint used
 /// during jobs (kind 1). `None` when there is none or the
@@ -490,6 +552,31 @@ fn knockout_input(
         g.systems.player.place(&mut g.world, to);
     }
     Some(sly2_attack_input(k))
+}
+
+/// The canal chase (missions.md 4.1a), while the player drives the boat (control handed to the player record): the
+/// route steers back to the middle of the canal (the boat's offset across its owner's track), holds Square to fire,
+/// lets go for a second every three so the gun cools, and jumps (Cross) now and then.
+fn boat_input(s: &game::sly3::Sly3Session<NullBackend, DiscFile>, f: u32) -> Option<FrameInput> {
+    let w = &s.game.as_ref()?.world;
+    w.shared.driving?;
+    let owner = w.find_sly3_id(game::sly3::boat::OWNER_RIG, None)?;
+    let boat = w.slots_of_class(47).iter().filter_map(|&k| w.handle(k)).find(|&h| {
+        w.options(h).and_then(|o| o.vec3(77)).is_some() && w.parent(h).and_then(|p| w.parent(p)) == Some(owner)
+    })?;
+    let (b, o) = (w.world_transform(boat)?, w.world_transform(owner)?);
+    let d = [b.t[0] - o.t[0], b.t[1] - o.t[1]];
+    // Across the track: the boat's y axis.
+    let side = d[0] * b.cols[1][0] + d[1] * b.cols[1][1];
+    let mut i = FrameInput { left: [(side / 300.0).clamp(-1.0, 1.0), 0.0], ..Default::default() };
+    if f % (3 * FPS) >= FPS {
+        i.buttons |= platform_api::Buttons::Y.0;
+    }
+    if f.is_multiple_of(4 * FPS) {
+        i.pressed |= platform_api::Buttons::B.0;
+        i.buttons |= platform_api::Buttons::B.0;
+    }
+    Some(i)
 }
 
 /// The gauntlet's timed buttons (missions.md 4.1a): while script 2291 runs, Sly stands at his side's button (the
@@ -809,6 +896,7 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             steering = 0;
             placed = false;
             if let Some(h) = now {
+                take_out_for(&mut s, h, f, &mut journal);
                 let g = &s.game.as_ref().unwrap().world;
                 journal.push(format!(
                     "{:.1} s: heading for {:?} (class {:?})",
@@ -903,6 +991,10 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             input = i;
         }
         if let Some(i) = knockout_input(&mut s, f, &mut journal, &mut knocking) {
+            input = i;
+        }
+        // Driving a machine (the canal chase's boat): the route's own pad replaces the wander input.
+        if let Some(i) = boat_input(&s, f) {
             input = i;
         }
         s.update(&input, 1.0 / FPS as f32);
@@ -1209,6 +1301,14 @@ fn sly2_play_for(s: &mut Sly2, t: usize, visited: &mut Vec<engine::object::Handl
             && w.sly2.as_deref().is_some_and(|l| l.actions.iter().any(|a| Some(a.0) == w.slot(h) && a.1 == 26))
     };
     let fallback = w.handles().find(|&h| !visited.contains(&h) && w.in_world(h) && added_volume(h));
+    let spot_names = |h: engine::object::Handle| {
+        w.sly2.as_deref().is_some_and(|l| {
+            let slot = w.slot(h);
+            l.actions.iter().any(|a| {
+                Some(a.0) == slot && a.1 == 1076 && matches!(a.2.first(), Some(engine::object::Arg::Int(n)) if *n == id)
+            })
+        })
+    };
     let pick = w
         .handles()
         .filter(|h| !visited.contains(h) && w.in_world(*h))
@@ -1232,6 +1332,9 @@ fn sly2_play_for(s: &mut Sly2, t: usize, visited: &mut Vec<engine::object::Handl
                     })
                     .then_some((h, 2)),
                 35 => names(o.i32(1070), h).then_some((h, 1)),
+                // An interaction spot of a derived class whose task requests (1076) name the task: the player uses it
+                // (missions.md 4.3: m1_bug's spot 17366 asks for 1815).
+                c if engine::world::sly2::is_a(c, 35) && spot_names(h) => Some((h, 4)),
                 // A photo target whose task (1201) is this one: the player takes its picture (missions.md 4.3).
                 c if c == game::sly2::photo::CLASS => {
                     (o.i32(game::sly2::photo::OPTIONS.task) == Some(id)).then_some((h, 3))
@@ -1256,6 +1359,11 @@ fn sly2_play_for(s: &mut Sly2, t: usize, visited: &mut Vec<engine::object::Handl
             j.fire_exit_id(w, id)
         });
         return Some(format!("left by exit {oid:?}"));
+    }
+    if pick.1 == 4 {
+        let user = g.world.player;
+        engine::behavior::sly2_commands::use_spot(&mut g.world, pick.0, user);
+        return Some(format!("used interaction spot {oid:?}, whose task requests name the task"));
     }
     if pick.1 == 0 {
         sly2_enter_volume(s, pick.0)
@@ -2013,13 +2121,13 @@ fn sly2_play_by_script(
 }
 
 /// A volume that counts creatures (option 433 naming a class other than the playable families) for task `id`, whose
-/// script names the placement of a creature of that class: the nearest such creature standing free and the volume
-/// (missions.md 4.3: 1884 names rat placement 123920, and water main volume 125273 counts class 57).
+/// script names the placement of a creature of that class: the creature standing free nearest the volume, and the
+/// volume (missions.md 4.3: 1884 names rat placement 123920, and water main
+/// volume 125273 counts class 57).
 fn sly2_toss_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engine::object::Handle)> {
     use engine::behavior::Behavior;
     let g = s.game.as_ref()?;
     let w = &g.world;
-    let me = w.position(w.player?)?;
     let task = w.handles().find(|&h| w.class(h) == Some(133) && w.sly2_id(h) == Some(id))?;
     let names_placement = |h: engine::object::Handle| {
         w.parent(h)
@@ -2031,6 +2139,7 @@ fn sly2_toss_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engine
         let classes: Vec<i16> =
             w.options(v).map(|o| o.all(433).filter_map(|x| x.as_i32()).map(|c| c as i16).collect()).unwrap_or_default();
         for c in classes.into_iter().filter(|c| !matches!(c, 51..=54)) {
+            let Some(at) = w.position(v) else { continue };
             let all: Vec<engine::object::Handle> = w.slots_of_class(c).iter().filter_map(|&sl| w.handle(sl)).collect();
             if !all.iter().any(|&h| names_placement(h)) {
                 continue;
@@ -2042,7 +2151,7 @@ fn sly2_toss_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engine
                     matches!(w.behavior(h), Some(Behavior::Sly2Guard(g)) if !g.knocked_out() && !g.held && g.flight.is_none())
                 })
                 .filter_map(|h| Some((h, w.position(h)?)))
-                .min_by(|a, b| d2(a.1, me).total_cmp(&d2(b.1, me)));
+                .min_by(|a, b| d2(a.1, at).total_cmp(&d2(b.1, at)));
             if let Some((h, _)) = free {
                 return Some((h, v));
             }
@@ -2069,39 +2178,99 @@ fn sly2_toss_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::o
     let Some(m) = g.systems.player.gang().and_then(|gg| gg.get(engine::gang::Who::Murray)) else {
         return FrameInput::default();
     };
-    let (state, carrying, me, aim) = (m.state, m.carrying, m.position, m.aim);
-    let creature = g.world.position(c);
+    let (state, carrying, me, aim, my_yaw) = (m.state, m.carrying, m.position, m.aim, m.yaw);
+    // Wedged in the air in a hit reaction (between two steep surfaces near the generator, neither counting as
+    // ground, his reaction never ends): put back on his spot, as a player would steer out.
+    let wedged = state == murray::DAMAGE && !m.grounded && m.state_time > SLY2_TOSS_WEDGED;
     let target = g.world.position(v);
     let a = platform_api::Buttons::A.0;
     let press = |b: u32| FrameInput { pressed: b, buttons: b, ..Default::default() };
+    let class = g.world.class(c);
+    let guard = |h: engine::object::Handle| match g.world.behavior(h) {
+        Some(engine::behavior::Behavior::Sly2Guard(gd)) => Some(gd),
+        _ => None,
+    };
     // While a thrown creature flies, nothing (Circle would lift it again as it leaves); a miss is lifted again
     // once it lands.
-    let flying = matches!(g.world.behavior(c), Some(engine::behavior::Behavior::Sly2Guard(gd)) if gd.flight.is_some());
-    if flying || !g.world.in_world(c) {
+    let creatures: Vec<engine::object::Handle> =
+        g.world.handles().filter(|&h| g.world.class(h) == class && g.world.in_world(h)).collect();
+    if creatures.iter().any(|&h| guard(h).is_some_and(|gd| gd.flight.is_some())) {
         return FrameInput::default();
     }
     if carrying.is_none() {
-        let far = creature.is_none_or(|p| d2(p, me) > SLY2_TOSS_REACH * SLY2_TOSS_REACH);
-        // Beside it on the side away from the volume, facing the volume through it: the lift takes what is ahead,
-        // and the aim then starts toward the volume.
-        if (k == 10 || (k % FPS == 10 && far && state != murray::LIFT))
-            && let (Some(at), Some(t)) = (creature, target)
-        {
-            let (dx, dy) = (t[0] - at[0], t[1] - at[1]);
-            let l = (dx * dx + dy * dy).sqrt().max(1.0);
-            // Dropped from a little above (placed at the creature's own height, Murray's body can start inside a
-            // step of the floor and never fall).
-            let from = [at[0] - dx / l * SLY2_ATTACK_STANDOFF, at[1] - dy / l * SLY2_ATTACK_STANDOFF, at[2] + 60.0];
-            let yaw = dy.atan2(dx);
-            let (sn, cs) = (yaw.sin(), yaw.cos());
-            let to = engine::math::Affine { cols: [[cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]], t: from };
-            if let Some(g) = s.game.as_mut() {
+        let Some(t) = target else { return FrameInput::default() };
+        // Murray waits on a floor SLY2_TOSS_DISTANCE from the volume, toward where the creature was loaded, for the
+        // creatures that pursue him; the nearest free one in reach he faces and lifts.
+        let post = guard(c).map_or(t, |gd| gd.post);
+        let (dx, dy) = (post[0] - t[0], post[1] - t[1]);
+        let l = (dx * dx + dy * dy).sqrt().max(1.0);
+        let spot = [t[0] + dx / l * SLY2_TOSS_DISTANCE, t[1] + dy / l * SLY2_TOSS_DISTANCE];
+        let free = creatures
+            .iter()
+            .copied()
+            .filter(|&h| guard(h).is_some_and(|gd| !gd.knocked_out() && !gd.held))
+            .filter_map(|h| Some((h, g.world.position(h)?)))
+            .min_by(|a, b| d2(a.1, me).total_cmp(&d2(b.1, me)));
+        let near = free.filter(|(_, p)| d2([p[0], p[1], me[2]], me) <= SLY2_TOSS_REACH * SLY2_TOSS_REACH);
+        let away = (me[0] - spot[0]).powi(2) + (me[1] - spot[1]).powi(2) > SLY2_TOSS_SPOT * SLY2_TOSS_SPOT;
+        let ready = matches!(state, murray::STAND | murray::RUN | murray::STANCE | murray::WALK);
+        let face = |to: [f32; 3]| (to[1] - me[1]).atan2(to[0] - me[0]);
+        let place = |s: &mut Sly2, x: f32, y: f32, yaw: f32, above: f32| {
+            let Some(g) = s.game.as_mut() else { return };
+            let floor = g.systems.physics.queries().ground(&g.world, [x, y, above + 100.0], 1000.0).map(|f| f.0[2]);
+            if let Some(z) = floor {
+                let (sn, cs) = (yaw.sin(), yaw.cos());
+                let to = engine::math::Affine {
+                    cols: [[cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]],
+                    t: [x, y, z + 60.0],
+                };
                 g.systems.player.place(&mut g.world, to);
+            }
+        };
+        // Fallen far below his spot (knocked off a ledge over a drop): put back, standing in for the controller's
+        // return to safe ground (interactables.md 8, physics.md 5.1; not built).
+        let fallen = me[2] < post[2] - SLY2_TOSS_FALLEN;
+        if k == 10 || (away && k % FPS == 10 && state != murray::LIFT) || (wedged && k % FPS == 10) || fallen {
+            let yaw =
+                free.map_or((t[1] - spot[1]).atan2(t[0] - spot[0]), |(_, p)| (p[1] - spot[1]).atan2(p[0] - spot[0]));
+            place(s, spot[0], spot[1], yaw, post[2]);
+            return FrameInput::default();
+        }
+        let Some((_, p)) = near else { return FrameInput::default() };
+        if !ready {
+            return FrameInput::default();
+        }
+        // Turned to it where he stands (the lift takes what is within 0.5 rad of his heading).
+        let heading = my_yaw;
+        let want = face(p);
+        let off = (want - heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        if off.abs() > 0.3 {
+            if k % 10 == 0 {
+                place(s, me[0], me[1], want, me[2]);
             }
             return FrameInput::default();
         }
-        let ready = matches!(state, murray::STAND | murray::RUN | murray::STANCE | murray::WALK);
-        return if ready && !far && k % 2 == 0 { press(a) } else { FrameInput::default() };
+        return if k % 2 == 0 { press(a) } else { FrameInput::default() };
+    }
+    // Carrying, farther from the volume than a throw reaches: carried to a floor SLY2_TOSS_DISTANCE from it, on the
+    // line from the volume, facing it (no path-finding).
+    if state == murray::CARRY
+        && let Some(t) = target
+        && d2([me[0], me[1], t[2]], t) > SLY2_TOSS_RANGE * SLY2_TOSS_RANGE
+    {
+        let (dx, dy) = (me[0] - t[0], me[1] - t[1]);
+        let l = (dx * dx + dy * dy).sqrt().max(1.0);
+        let (x, y) = (t[0] + dx / l * SLY2_TOSS_DISTANCE, t[1] + dy / l * SLY2_TOSS_DISTANCE);
+        let Some(g) = s.game.as_mut() else { return FrameInput::default() };
+        let floor = g.systems.physics.queries().ground(&g.world, [x, y, me[2] + 200.0], 600.0).map(|f| f.0[2]);
+        if let Some(z) = floor {
+            let yaw = (-dy).atan2(-dx);
+            let (sn, cs) = (yaw.sin(), yaw.cos());
+            let to =
+                engine::math::Affine { cols: [[cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]], t: [x, y, z + 60.0] };
+            g.systems.player.place(&mut g.world, to);
+        }
+        return FrameInput::default();
     }
     match (state, aim, target) {
         // Spaced presses: a second Circle within the aim's 0.1 s buffer would cancel the aim.
@@ -2132,6 +2301,16 @@ fn sly2_toss_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::o
 
 /// See [`sly2_toss_input`]: how near the creature Murray must be to lift it.
 const SLY2_TOSS_REACH: f32 = 250.0;
+/// See [`sly2_toss_input`]: how far below the creature's height Murray may fall before he is put back.
+const SLY2_TOSS_FALLEN: f32 = 400.0;
+/// See [`sly2_toss_input`]: how long Murray may hang in a hit reaction off the ground before he is put back.
+const SLY2_TOSS_WEDGED: f32 = 2.0;
+/// See [`sly2_toss_input`]: how far Murray may be from his waiting spot before he is put back on it.
+const SLY2_TOSS_SPOT: f32 = 300.0;
+/// See [`sly2_toss_input`]: the farthest Murray throws (characters.md 7: range 200 to 1500).
+const SLY2_TOSS_RANGE: f32 = 1500.0;
+/// See [`sly2_toss_input`]: how far from the volume Murray is carried to throw when he is beyond the range.
+const SLY2_TOSS_DISTANCE: f32 = 1000.0;
 /// The most tosses one run plays.
 const SLY2_TOSSES_MAX: u32 = 12;
 

@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use engine::anim::sly3_pose::Driven3;
 use engine::object::Handle;
 use engine::world::World;
+use formats::geometry::Affine;
 use formats_sly3::anim::{ClipData, FRAMES_PER_SECOND};
 use formats_sly3::stream::Body;
 
@@ -56,12 +57,35 @@ struct Fade {
     total: f32,
 }
 
+/// An animation segment playing on its own (`0x16`; scripts.md 7.3): its position tracks move the objects they key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SegmentPlay {
+    /// The segment (class 130).
+    pub segment: Handle,
+    /// Seconds played.
+    pub time: f32,
+    /// Its length.
+    pub length: f32,
+    /// It starts over at its end.
+    pub looping: bool,
+}
+
 /// The clips playing and the fades running.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clips {
     /// Playing clips.
     pub plays: Vec<ClipPlay>,
+    /// Playing segments.
+    pub segments: Vec<SegmentPlay>,
     fades: Vec<Fade>,
+}
+
+/// The data of a clip record.
+fn clip_data(world: &World, h: Handle) -> Option<&ClipData> {
+    match &world.sly3_record(h)?.body {
+        Body::Clip(c) => c.data.as_ref(),
+        _ => None,
+    }
 }
 
 fn object_events(d: &ClipData) -> Vec<ObjectEvent> {
@@ -124,6 +148,31 @@ impl Clips {
         true
     }
 
+    /// Plays animation segment `segment` (a class-130 clip record) on its own from its start (`0x16`, missions.md
+    /// 4.1a): each channel on transform 0 places the object it keys (by ID, its translation) along its track; the
+    /// object's y axis faces the way it moves (inference, marked [I] in the spec: the canal boat, turned on its
+    /// owner, then fires along the track). A segment already playing starts over.
+    pub fn play_segment(&mut self, world: &World, segment: Handle, looping: bool) {
+        let Some(d) = clip_data(world, segment) else { return };
+        let length = d.duration().max(0.0);
+        self.segments.retain(|p| p.segment != segment);
+        self.segments.push(SegmentPlay { segment, time: 0.0, length, looping });
+    }
+
+    /// Where segment-keyed object `target` (by ID) will be `ahead` seconds from now on a playing segment, looping
+    /// with it.
+    pub fn segment_point(&self, world: &World, target: i32, ahead: f32) -> Option<[f32; 3]> {
+        self.segments.iter().find_map(|p| {
+            let d = clip_data(world, p.segment)?;
+            let c = d.channels.iter().find(|c| c.target == target && c.transform == 0)?;
+            let mut t = p.time + ahead;
+            if p.length > 0.0 {
+                t = if p.looping { t % p.length } else { t.min(p.length) };
+            }
+            engine::anim::curve::eval_vector(c.vector.as_ref()?, t)
+        })
+    }
+
     /// Whether a clip is playing on `owner`.
     pub fn playing(&self, owner: Handle) -> bool {
         self.plays.iter().any(|p| p.owner == owner)
@@ -167,6 +216,42 @@ impl Clips {
             }
         }
         self.fades.retain(|f| f.left > 0.0);
+        // Segments: each keyed object at its track's position, facing along it.
+        for p in &mut self.segments {
+            p.time += dt;
+            if p.time > p.length {
+                p.time = if p.looping && p.length > 0.0 { p.time % p.length } else { p.length };
+            }
+        }
+        for p in &self.segments {
+            let Some(d) = clip_data(world, p.segment) else { continue };
+            let moves: Vec<(i32, [f32; 3], [f32; 3])> = d
+                .channels
+                .iter()
+                .filter(|c| c.transform == 0)
+                .filter_map(|c| {
+                    let v = c.vector.as_ref()?;
+                    let at = engine::anim::curve::eval_vector(v, p.time)?;
+                    let ahead = engine::anim::curve::eval_vector(v, (p.time + 0.1).min(p.length))?;
+                    Some((c.target, at, ahead))
+                })
+                .collect();
+            for (id, at, ahead) in moves {
+                let Some(h) = world.find_sly3_id(id, None) else { continue };
+                let (dx, dy) = (ahead[0] - at[0], ahead[1] - at[1]);
+                let mut m = world.world_transform(h).unwrap_or(Affine::IDENTITY);
+                if dx * dx + dy * dy > 1e-6 {
+                    // The object's y axis along the track: v_canal's boat sits on its owner turned so that its own
+                    // forward (its x axis, where its missiles fly) is the owner's y.
+                    let yaw = engine::math::atan2(dy, dx) - core::f32::consts::FRAC_PI_2;
+                    let (s, c) = (engine::math::sin(yaw), engine::math::cos(yaw));
+                    m.cols = [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]];
+                }
+                m.t = at;
+                world.set_world_transform(h, m);
+            }
+        }
+        self.segments.retain(|p| p.looping || p.time < p.length);
         if let Some(l) = world.sly3.as_deref_mut() {
             for p in &self.plays {
                 l.poser.driven.push(Driven3 { target: p.owner, clips: alloc::vec![(p.clip, p.time, 1.0)] });

@@ -64,6 +64,8 @@ pub fn defined() -> impl Iterator<Item = u32> {
 pub const FIND_LIMIT: usize = 64;
 /// Most objects operation 110 gives.
 pub const CLASS_FIND_LIMIT: usize = 256;
+/// Sly 2's limit for the class search (operation 120).
+pub const SLY2_CLASS_FIND_LIMIT: usize = 384;
 
 enum Num {
     I(i32),
@@ -533,7 +535,9 @@ pub(crate) fn run(
             let (class, ctx) = (c.oid(0)?, c.obj(1)?);
             let mut out = Vec::new();
             host.find_by_class(class, ctx, &mut out);
-            objects(out, CLASS_FIND_LIMIT)
+            // Sly 2 gives at most 384 (scripts.md 4.3, operation 120).
+            let limit = if it.game() == Game::Sly2 { SLY2_CLASS_FIND_LIMIT } else { CLASS_FIND_LIMIT };
+            objects(out, limit)
         }
         112 => {
             let (centre, r) = (c.v(0)?, c.f(1)?);

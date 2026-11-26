@@ -39,6 +39,7 @@ use render::{Backend, Camera, FrameStats, RenderError, Renderer};
 
 use crate::sly2::level::{StaticLevel, upload_stage};
 
+pub mod boat; // Sly 3 hook: the canal chase's boat (movement by option 194, jumps).
 pub mod clips; // Sly 3 hook: clips' add and remove events (knock-out clips).
 pub mod commands;
 pub mod crew;
@@ -108,6 +109,8 @@ enum SessionAction {
     SafeHouse,
     /// `0x60` / `0x61`: a hint shown (string, seconds) or cleared.
     Hint(Option<(i32, f32)>),
+    /// `0x16`: an animation segment plays on its own (looping or not).
+    Segment(engine::object::Handle, bool),
 }
 
 /// Bentley's bomb stand-in (see the session's update): the first press plants, the second sets it off.
@@ -208,6 +211,14 @@ fn apply_request(
                 .filter_map(|&k| world.handle(k))
                 .find(|&h| world.class(h) == Some(formats_sly3::stream::PLACEMENT))?;
             world.set_in_world(h, take);
+        }
+        Request::Segment { segment, object, flags } => {
+            // Only a segment with no character (scripts.md 7.3): a clip for a character is not played here.
+            let h = world.find_sly3_id(segment, None)?;
+            let on_character = world.find_sly3_id(object, None).and_then(|o| world.class(o)) == Some(51);
+            if world.class(h) == Some(engine::anim::sly3_pose::CLIP_CLASS) && !on_character {
+                return Some(SessionAction::Segment(h, flags & 8 != 0));
+            }
         }
         Request::Face { target, at } => {
             let (Some(h), Some(to)) = (world.find_sly3_id(target, None), world.find_sly3_id(at, None)) else {
@@ -379,6 +390,8 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     pub guards: Vec<guards::GuardRun>,
     /// Clips playing for their add and remove events (the guards' knock-out clips, guards.md 4b).
     pub clips: clips::Clips,
+    /// The canal chase's boat movement and jumps.
+    pub boats: boat::Boats,
     /// Sly 3 hook (missions.md 4.1a): the hint scripts show (string, seconds left); drawing it is the 2D layer's.
     pub hint: Option<(i32, f32)>,
     /// The last dialogue line asked for (line ID), for tests.
@@ -469,6 +482,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             photo: None,
             guards: Vec::new(),
             clips: clips::Clips::default(),
+            boats: boat::Boats::default(),
             hint: None,
             last_line: None,
             bomb: None,
@@ -693,6 +707,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             (0..256i16).map(|c| (c, derived_classes(&disc.classes, c))).filter(|(_, d)| d.len() > 1).collect();
         self.bomb = None;
         self.clips = clips::Clips::default();
+        self.boats = boat::Boats::default();
         self.guards.clear();
         self.in_safe_house = false;
         self.shop = None;
@@ -1040,6 +1055,29 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 }
             }
             self.clips.step(&mut g.world, measured);
+            self.boats.step(&mut g.world, measured);
+            boat::Boats::place_enemies(&mut g.world, &self.clips);
+            // Stand-in (missions.md 4.1a, open): an enemy boat whose health reaches 0 gets its defeat event once.
+            let beaten: Vec<engine::object::Handle> = {
+                let w = &g.world;
+                let it = g.scripts();
+                w.slots_of_class(engine::behavior::sly3::projectile::TARGET_CLASS)
+                    .iter()
+                    .filter_map(|&k| w.handle(k))
+                    .filter(|&h| w.is_active(h) && !self.boats.defeated.contains(&h))
+                    .filter(|&h| {
+                        it.and_then(|i| i.lookup_for(h.to_script(), boat::HEALTH_SYMBOL))
+                            .and_then(|v| v.as_f32())
+                            .is_some_and(|v| v <= 0.0)
+                    })
+                    .collect()
+            };
+            for h in beaten {
+                self.boats.defeated.push(h);
+                // Stand-in (open whether a defeated boat leaves the world): it stops taking hits.
+                g.world.shared.sly3_unhittable.push(h);
+                g.world.raise(h, boat::DEFEAT_EVENT, Vec::new());
+            }
             // Sly 3 hook (guards.md 4a): the guards' command lists; their alarms are the command scripts'.
             for r in &mut self.guards {
                 r.update(measured, &mut g.world, &mut self.scripts.alarms);
@@ -1134,6 +1172,9 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     &self.waypoints,
                 ) {
                     Some(SessionAction::TakeOut(m)) => self.take_out = Some(m),
+                    Some(SessionAction::Segment(h, looping)) => {
+                        self.clips.play_segment(&g.world, h, looping);
+                    }
                     Some(SessionAction::Pause(script, on)) => {
                         if on {
                             self.paused_by.insert(script);

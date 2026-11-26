@@ -17,8 +17,11 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 (2026-11-12), the option table entries for gravity and gravity ratio (facts only)
     used_for: which option IDs set gravity (35) and the gravity ratio (225)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/stepphys.cpp (contact setup and update), jump.cpp (the stuck test), damage.cpp (recovery) (2026-11-26)
+    used_for: section 5.1 [R]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-26
 ---
 
 # Sly 2 physics and contact resolution
@@ -116,6 +119,35 @@ Putting a solid to rest (a class operation) sets gravity to (0, 0, −1750) and 
 | 75, 76 | set velocity, angular velocity (object frame) | 76: 66 uses |
 | 80, 81, 82 | the object's sphere entry: radius, mass, height offset (its use is open question 2) (default radius 150 for the player characters, 75 otherwise, mass 1) | 80: 50 (13), 1,000 (12), 25 (6), …; 81: 500 (19), 1,000 (9), 2 (2); 82: −210, −220 |
 | 225 | gravity ratio | 1.3 (126) |
+
+### 5.1 The gang's controller: floors, steep contacts and wedging (added 2026-11-26) [R]
+
+- **What counts as floor.** A probe contact (kind 14) whose normal has z above **0.7** is a floor:
+  - friction 1.5;
+  - its push limited to −4,500 … +9,000 × mass;
+  - its separation sprung toward the probe height.
+
+  A steeper probe contact gets no friction and only the upper push limit, and does not count as floor.
+- **Other contacts** (walls, slopes, other objects) are set to friction 0 and elasticity 0. The solver removes only
+  the part of the velocity that goes into the surface. The rest is kept, so the character **slides** along a blocked
+  contact; the velocity is not zeroed.
+  - When a character's contact faces the other way along z, an extra horizontal contact is added that pushes the two
+    apart.
+- **Wedged between steep surfaces.** A sphere held between two surfaces of normal z 0.07–0.46 has no floor contact.
+  So it is **not standing**: it stays in its jump or fall state, and the solver holds it where the contacts cancel
+  gravity. The jump and damage states then run a "stuck" test (`0x0019A098`):
+  - at least 1 s after the state began, and at most once a second;
+  - with no floor contact;
+  - the contact normals (pointing at the character) are combined with non-negative weights to cancel "down" as far
+    as possible;
+  - if what is left of down has z above −0.1, the character is stuck.
+- **A stuck character is recovered** (`0x0019F590`) to its best remembered safe ground point:
+  - with a jump toward it (jump kind 10);
+  - for the current player, when that jump would take more than 1.25 s, it is placed there instead: facing along
+    the camera, camera cut, jump kind 11, with a fade.
+
+  A port should therefore neither treat the wedge as standing nor push it out at once. It should let the character
+  hang, then recover it after a second.
 
 ## 6. Test vectors
 

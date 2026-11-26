@@ -1926,8 +1926,8 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   - after the follow the route goes on (`SLYNX_SLY2_JOBS=6`): it also finds objects a declared custom property ties
     to a task (option 8: a box prop's 1374 holds its task, `m1_waterpump`), and for a task that starts at a checkpoint
     in another world it uses the interaction spot whose sequence's script fires a door to that checkpoint (`m1_bug`:
-    spot 123837's 132610 fires door 1734 at 1811's checkpoint 398). Still forced: the tank of `m1_waterpump` after
-    its first rat (the rat generator, an open question), and 1813 / 1814 of `m1_bug`;
+    spot 123837's 132610 fires door 1734 at 1811's checkpoint 398). Still forced: 1813 of `m1_bug` (its volume
+    133043 comes in by the event 5 of class-27 object 124027, whose role is not specified);
   - each package copy past the first runs in its own clone of the package's module frames (scripts.md 1;
     `world::sly2::copy_ordinals` numbers the copies per package in load order and leaves out the objects a
     placement's patch bound, `level.bound`, which keep the shared frame; the attach loop calls
@@ -1940,10 +1940,37 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
     (`GangEvent::Lift`): it is held (`Sly2Guard::held`) and rides above him until he throws it, when it flies under
     gravity 2275 from his hands with the throw's velocity (`Sly2Guard::flight`) until a sphere of 30 meets a surface,
     passing through characters and, for 0.1 s, what it starts inside; a drop without a throw gets (−400, 0, 600) in
-    his frame (characters.md 4.6). The route tosses: for a task whose script names a creature's placement and a
-    volume counting its class, Murray is placed beside the creature facing the volume, lifts it, steers the aim
-    onto the volume and throws (`sly2_toss_input`). The first rat goes in and counts; the next ones would come from
-    generator 17346, whose spawning is not understood yet;
+    his frame (characters.md 4.6). The route tosses for a task whose script names a creature's placement and a
+    volume counting its class (`sly2_toss_target`, `sly2_toss_input`; below);
+  - the rat generator 17346 (missions.md 4.3, classes/placement.md 2.1): a Sly 2 object gets script event 1 whenever
+    its module binds it and it is in the world and active (`World::raises_event1`; Sly 1 keeps its placed-class
+    rule), postponed by operation 107. Operation 120 finds a class and its derived classes, with a context the
+    context and what lies below it, else the whole world, at most 384, and leaves out copy placements, which are no
+    objects in the game (`sly2_find_by_class`). Leases go by the copy's grade (classes/placement.md 2.1): 0 locked
+    (1023 / 1024), 4 held by no placement, 1 held with an object in the world, 3 all removed; 1019 needs a
+    single-root prefab and at least 2 (a non-fixed placement re-takes its own copy only at 3), 1021 at least 1. A
+    copy is held from load by a non-fixed placement and by any placement once leased (one copy per placement), so
+    the generator's loop passes the placements whose copies are in use and leases rat pool 125315 (fixed, 1178). The loader keeps each placement's copy root, its top-level count and the root's
+    matrix (`Sly2Level::placed`): a lease puts a detached copy back under its placement at that matrix. A null object
+    passed to a method keeps its place among the arguments (`((op111 copy 33) null-object 3)` detaches the copy
+    keeping its world matrix; dropped, the rat was put at the origin). Volumes count a class and its derived classes
+    in Sly 2 (19960's 56 counts the rats, and its event 6 releases the spawn);
+  - guards and creatures (class 56 and derived) are left out of the gang's collision world: their bodies stayed where
+    they were loaded and were floors and walls that were not there;
+  - after a hit a character flashes for 2 s and takes no further damage (characters.md 2; `GangPlayer::flashing`);
+  - a character whose health ran out gets up once it lies on the ground past the reaction time, with its counters
+    refilled: a stand-in for the defeat of characters.md 2.1 (task event 0x10, then the job restarts at its
+    checkpoint, or the world reloads at its arrival point with wipe 778), which is held back until the controller
+    returns characters from drops to safe ground (physics.md 5.1): without that, a knock off a ledge ends the job.
+    Step physics for creatures (guards.md 5) is not in either: with it, Dimitri's walk drops to the street below and
+    the follow does not end, and the waterpump and bug jobs no longer play through (under study);
+  - the route uses an interaction spot of a derived class whose task requests (1076) name the task (m1_bug's
+    17366 asks for 1815), so 1814 is done by play;
+  - the route's toss: Murray waits on a floor 1,000 from the volume toward where the creature was loaded, for the
+    rats that pursue him; the nearest free one in reach he turns to and lifts, then he steers the aim onto the volume
+    and throws. Hung in a hit reaction off the ground for 2 s (wedged between two steep surfaces near the generator,
+    neither counting as ground), or fallen 400 below the creature's height, he is put back on his spot. Five rats go
+    in and 1884 is done by play;
   - a guard's walk counts as arrived within 0.5 of its stop distance (`behavior::sly2::ARRIVED`): the last step lands
     on the stop ring and rounding left a remainder above 0, which stalled path following (Dimitri's list 1825);
   - the world's option 926 (script ID 844) is the current character, and an object's option 21 (script ID 34) its
@@ -2928,8 +2955,32 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
             spawn points (145213, 145216) beside 140134's. The waves come out in the arena; the route knocks each
             guard out (Sly put beside it) and waits where he stands between waves. Four waves, one guard each, go
             down between 818.8 and 863.9 s; 2322 is done at 878.5 s.
-      32. `t1_gauntlet_complete` (2327) loads v_ext at arrival 140590 (892.3 s). The route has nothing to do there
-          (the next job is not traced) and stops 30 s later (a 1,100 s run).
+      32. `t1_gauntlet_complete` (2327) closes and so stops being current (sly2_jobs, Sly 3 rule: a current task
+          whose new state is 0 or 3 in live play stops being current), and m1_gauntlet ends; the exit loads v_ext
+          at arrival 140590 (892.3 s) with no task or job carried.
+      33. m1_canal_chase (missions.md 4.1a). Waypoint 140821 is Bentley's (custom property 1991 = 25): stand-in, the
+          route enters the safe house at once and takes him out, then walks to it. 2331 (Bentley's briefing) runs
+          and fires exit 2047; 1804 loads v_canal (924.1 s) and starts 2336 (the minigame) and 2337 (the hook loop).
+          - 2336 hands control to player record 2003 and plays segment 139836 on its own (`0x16`, looping), which
+            carries owner 139840 round the canal (`clips::Clips::play_segment`); the boat, rig 139806 under it, runs
+            its own script (module 330, event 1 now raised for Sly 3 objects as for Sly 2's).
+          - The pad: 2003's script ID 943 gives a pad object (class 187: stick values 1072 / 1074, button tests 1078 /
+            1079, PS2 masks from the Switch buttons [I]). The boat's velocity, option 194, moves it in its own frame
+            (`sly3::boat`); its drive machine's run (class 173) jumps and lands after 0.8 s (stand-in [I]).
+          - Firing takes pooled missile instances of placement 150052 (projectile groups are pooled like guards');
+            they fly by option 64 and hit the first active class-111 object within 300 units (stand-in [I]), giving
+            it event 19 with the missile as its last hitter (script ID 1105).
+          - Enemies: 2337's module brings their placements in (adding a copy root adds its placement, scripts.md 5)
+            and sets their health. Stand-in [I] for their movement: each rig keeps 2337's distance ahead (1800,
+            2600, 3300 units) on the owner's track. At health 0 they get event 5 once (stand-in, open).
+          - Proxy overrides (classes/placement.md 1): a placement bind with a module index attaches its target to
+            that module of the placement's own group, continuing in the target's earlier module, as the copy's own
+            clone of it (`script::Interpreter::attach_override`). The enemy boats' overrides (modules 5, 6, 7 of the
+            chase's group) answer event 5 by making 2345, 2343 and 2341 current; the boat's (335 over 330) adds to
+            its hit handling. A module whose outer module answers event 1 raises it too.
+          - A defeated enemy stops taking hits (stand-in [I]; whether it leaves the world is open). In the route the
+            three go down between 935.0 and 976.8 s; 2347 and 2350 follow (979.3 s), which loads v_ext; chalk talk
+            2 (1826) plays and m1_turf_war begins at 2141 (1015.8 s; a 1,150 s run).
       - Module frames (scripts.md 7.4): each object attaches with its copy's ordinal within its group
         (`World::sly3_copy_ordinals`, through `world::sly2::copy_ordinals` and `script::Interpreter::attach_copy`):
         a group's first copy keeps the module frame of the load, every further copy gets a clone (bindings copied,

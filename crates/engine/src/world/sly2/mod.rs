@@ -160,6 +160,9 @@ pub struct Sly2Level {
     pub task_events: Vec<(u32, Option<Handle>)>,
     /// Slots whose module a placement's patch bound (scripts.md 1: those share the module's frame, not a copy's).
     pub bound: alloc::collections::BTreeSet<u32>,
+    /// Each placement that copied its package: (the copy's root, its number of top-level objects, the root's local
+    /// matrix under the placement), by placement slot.
+    pub placed: alloc::collections::BTreeMap<u32, (u32, u32, Affine)>,
     /// Noise objects made by option 1095: (slot, game time it expires at; negative never).
     pub noise_objects: Vec<(u32, f32)>,
     objects: Vec<Sly2Object>,

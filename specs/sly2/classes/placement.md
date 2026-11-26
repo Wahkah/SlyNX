@@ -17,6 +17,11 @@ sources:
       SCUS_973.16 (SHA-256 a511a94b…6a73), class 6's script map (script IDs 1017-1025 → stream options 1174-1181) and the handlers
       0x0010E248, 0x0010E2B8, 0x0010E328, 0x0010E398, 0x0010E420 with the routines they call (2026-11-21)
     used_for: section 2.1 [D]
+  - kind: executable
+    what: >-
+      SCUS_973.16 (SHA-256 a511a94b…6a73), the placement loader's fresh/copy test 0x001C9BC8-0x001C9BF4, the object creation at 0x001C9C08
+      and the package-entry pointer at 0x001C9C60, the package table fill 0x0013DA18 (word 0 at 0x0013DDCC) (2026-11-26)
+    used_for: which placements are objects and what 1019 tests (section 2.1) [D]
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9, nonmatching and src/new_1c90d0 (lease routines)
     used_for: what the lease routines do (section 2.1) [R]
@@ -95,7 +100,7 @@ own methods. These are class-6 script IDs; the class-59 character itself has non
 | Script ID | Stream option | Handler [D] | What it does [R] |
 |---:|---:|---|---|
 | 1017 | 1174 | `0x0010E248` → `0x001CB2C0` | whether a copy can be leased now |
-| 1019 | 1175 | `0x0010E2B8` → `0x001CB250` | lease a copy and return it (0 if the pool has none) |
+| 1019 | 1175 | `0x0010E2B8` → `0x001CB250` | lease a copy and return it (0 if none can be had). It **fails at once unless the placed package has exactly one top-level object** [D]. +0xE0 is the placement's package entry: the 108-byte entry of the world's package table (SW +0x3F08), set by the placement loader at `0x001C9C60`. Word 0 of that entry is the number of top-level objects the package's object list loaded (written at `0x0013DDCC` after the package loads). The test at `0x001CB264`–`0x001CB26C` compares it with 1. No option sets it, so option 1178 is not involved. Only fresh placements have this object at all (section 2.1) |
 | 1020 | 1176 | getter `0x001CB2E0` | the copy currently leased by this placement (0 if none) |
 | 1021 | 1177 | `0x0010E328` → `0x001CB328` | **the leased copy, leasing one first if there is none**; returns it |
 | 1023 | 1179 | `0x0010E398` → `0x001CB488` | **lock** the lease of the given copy, so the pool keeps it for this placement |
@@ -116,6 +121,36 @@ it and 1024 unlocks it.
 
 So a script that calls 1021 gets a copy that is already in the world at the placement's position, whatever the
 placement's own option 26 says. Unlocking (1024) does not remove it. Scripts remove it with script ID 40 on the copy.
+
+**Only fresh placements are objects** [D for the calls]. For a fresh placement (kind 1, or −1 with a shared package;
+test at `0x001C9BC8`–`0x001C9BF4`) the loader creates a class-6 object (`0x0013E3C8` at `0x001C9C08`) and points its
++0xE0 at the package entry. The copy branch (`0x001C9E14` on) creates no placement object: the copy's objects are taken
+from the package's loaded instances, and the copy root answers to the placement's OID (scripts.md 5) [R]. So class
+searches (op120 class 6) and the lease methods only ever see fresh placements.
+
+**Which copy a lease takes: grades** (added 2026-11-26) [R; routines `0x001CADE0` and `0x001CA978`].
+
+The single-root test is only the first gate. The lease routine (`0x001CAEC8`) then asks `0x001CADE0` for the best copy
+with at least a minimum grade: 2 for 1019 and 1 for 1021. Each copy of the package has a lease record (80 bytes,
+after the instances that copy placements use). Its grade is:
+
+| Grade | The copy |
+|---:|---|
+| 0 | locked by its holder (script ID 1023) |
+| 4 | held by no placement |
+| 1 | held, and one of its objects is in the world (its in-world flag set and really in the world) |
+| 2 | held, an object has the in-world flag but is not really in the world (for example its parent is out) |
+| 3 | held, none of its objects has the in-world flag (all removed) |
+
+- **A placement that is not fixed and already holds a copy** only re-takes that same copy, and only if its grade is
+  at least 3 (all its objects removed). Otherwise the lease fails.
+- **A fixed placement, or one holding nothing,** searches the package's spare copies (from the first one not used by
+  copy placements to the last). It takes the one with the highest grade that is at least the minimum.
+- **Taking a copy held by another placement** releases it from that holder first.
+- So for 1019 a copy is free when it is unheld, or held with all its objects out of the world.
+- "The copy must not be in the world" is close to this. The exact rule also covers locks (grade 0), and a non-fixed
+  placement can only take back its own copy.
+- In row 7, a class-79 placement that auto-leased at load, and whose copy is in the world, therefore fails 1019.
 
 **Automatic leases and option 1178** (script ID 1022, field +0xE4, a flag) [D for the test, R for the rest].
 

@@ -49,6 +49,24 @@ The placement is **fresh** when its mode is above 0, or −1 with a group whose 
 fresh. (An earlier version gave 1,474 fresh, 860 mode −1 and 6,743 without binds: those added the 10 fresh
 copy-extra placements to the top-level counts.)
 
+**Binds are the proxy overrides** [D] [X]. Each bind entry is (target, class ID, module index, size, options):
+
+- the target object takes the options (custom properties through option 8, removal through 27, and so on);
+- when the **module index is not −1**, the target is also attached to **module n of the placement's own group**,
+  not the placed group.
+- The loader (`0x001FA778`, the reference's LoadProxyFromBrx) looks the module up in the current block
+  (`0x00249B78`). The module's frame takes **the object's previous frame as its parent**, and the object's
+  environment becomes the module frame (scripts.md 7.4).
+- A handler in the override can reach the object's original handler with built-in 141 (the symbol's value in
+  the defining environment), as `(op141 (quote s5))` does.
+- **Example** (v_canal, group `v_canal_canal_chase`). Placements 139842, 139845 and 139848 place copies of
+  `v_boat_enemy`, each with two binds:
+  - target 7 (the placement) gets option 8 (2736 = 2330, 2738 = 139853 / 139852 / 139851) and option 27
+    (removed at the start);
+  - target 8 (the copy's first object, the enemy boat) is class 2 with **module index 5, 6 or 7**, plus option 8
+    (2737 = 150689, 150687 or 150685, the enemy's crew placement).
+  - Modules 5 to 7 are the overrides that request enemy tasks 2345, 2343 and 2341 on event 5 (missions.md 4.1a).
+
 **Bind targets** (Sly 2's patch targets): 7 names the placement itself and 8 the copy's first object (Sly 2: 5 and
 6) [R]; other values are object IDs within the copied group. On the disc: 7 (796), 8 (592), object IDs (the rest). [D]
 

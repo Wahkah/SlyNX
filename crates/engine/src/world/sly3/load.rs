@@ -81,8 +81,9 @@ struct Cx<'e> {
     held: bool,
 }
 
-/// The guard class (pooled for spawn points).
+/// The guard and projectile classes (pooled for spawn points).
 const GUARD_CLASS: i16 = 58;
+const PROJECTILE_CLASS: i16 = 89;
 
 struct Loader<'b> {
     data: &'b [u8],
@@ -172,6 +173,7 @@ impl World {
                 pickpocket: alloc::collections::BTreeSet::new(), // Sly 3 host hook
                 pools: BTreeMap::new(),                          // Sly 3 spawn hook
                 pool_origins: BTreeMap::new(),                   // Sly 3 spawn hook
+                bound: BTreeSet::new(),                          // Sly 3 script hook
                 poser: Default::default(),                       // Sly 3 pose hook
                 objects: Vec::new(),
                 ids: Default::default(),
@@ -208,11 +210,15 @@ impl World {
         // Sly 3 spawn hook (missions.md 4.1a: script ID 825 takes a new instance of a placement). Stand-in, a working
         // choice [I] for the pool's size: a group a spawn point names gets the copies its copy count (the world's
         // header) leaves after the placed ones, made now at the top level and out of the world; 825 takes a free one.
-        // v_gauntlet: the brawl's guards (144809) have 7, 3 placed, so 4 in the pool. Only groups of guards (a class-58
-        // record at their top level) are pooled; the other spawn points' groups are left as they were.
+        // v_gauntlet: the brawl's guards (144809) have 7, 3 placed, so 4 in the pool. Only groups of guards and of
+        // projectiles (a class-58 or class-89 record at their top level: v_canal's missiles, 150052) are pooled; the
+        // other spawn points' groups are left as they were.
         for gid in core::mem::take(&mut ld.spawn_groups) {
             let Some(g) = ld.by_id.get(&gid).copied() else { continue };
-            if !bodies.get(g).is_some_and(|b| b.objects.iter().any(|r| r.class == GUARD_CLASS)) {
+            if !bodies
+                .get(g)
+                .is_some_and(|b| b.objects.iter().any(|r| matches!(r.class, GUARD_CLASS | PROJECTILE_CLASS)))
+            {
                 continue;
             }
             let placed = ld.instances.get(&gid).copied().unwrap_or(0);
@@ -540,7 +546,21 @@ impl<'b> Loader<'b> {
                 }),
             };
             match target {
-                Some(t) => self.apply(w, t, &b.options),
+                Some(t) => {
+                    self.apply(w, t, &b.options);
+                    // Sly 3 script hook (classes/placement.md 1, a proxy override): a bind with a module index
+                    // attaches its target to that module of the placement's own group; the target's earlier module
+                    // becomes the new one's outer module. Such objects keep the module's frame (no clone).
+                    let m = if b.index >= 0 { self.module_of(cx.group, b.index) } else { -1 };
+                    let old = w.module[t as usize];
+                    if m >= 0 && old != m {
+                        if old >= 0 {
+                            w.outer_module.insert(t, old);
+                        }
+                        w.module[t as usize] = m;
+                        self.level.bound.insert(t);
+                    }
+                }
                 None => self.level.stats.unmatched_binds += 1,
             }
         }

@@ -240,6 +240,14 @@ a deadline [R]. Other guards whose detectors watch the same target take the alar
   patrol at once [R].
 - On the disc, patrol data come mostly from the placement blocks of fresh placements (route 273, region 301, carried
   keys 308 and 309) ([classes/placement.md](classes/placement.md)) [D].
+- **Following a curve does not set the height** (added 2026-11-26) [R]. Command 601's path step (job `0xC0`) takes
+  the nearest point of the curve, then steps a fixed distance along it (forward or back, clamped or wrapped). Each
+  step is handed to an ordinary "go to" job as a target. The guard or creature walks there with its own step physics:
+  gravity, and a floor found by its probe points (physics.md).
+  - Its height comes from the floor under it, not from the curve's z.
+  - Over a void it has no floor, so it falls.
+  - Swarming creatures (class 57) are guards (class 56) and move the same way.
+  - A creature that keeps the curve's height and walks over voids is missing the step physics, not a curve rule.
 
 ## 6. Pursuit, attacks and shots
 

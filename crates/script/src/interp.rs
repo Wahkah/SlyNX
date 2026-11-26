@@ -475,6 +475,27 @@ impl Interpreter {
         }
     }
 
+    /// Attaches `object`, of package copy `copy`, to proxy-override `module` over its earlier module `outer` (Sly 3,
+    /// specs/sly3/classes/placement.md 1): the override module's frame gets the object's previous frame as its
+    /// parent, that is its copy's clone of `outer` (as [`Interpreter::attach_copy`] makes it; `outer`'s own frame
+    /// for copy 0). Returns false when refused, as [`Interpreter::attach_with_outer`] does (a different parent
+    /// already, or a loop).
+    pub fn attach_override(&mut self, object: ObjectId, module: u32, outer: u32, copy: u32) -> bool {
+        self.attach_copy(object, outer, copy);
+        let Some(previous) = self.frame_of(object) else { return false };
+        self.object_env.remove(&object);
+        self.attach(object, module);
+        let Some(&env) = self.modules.get(module as usize) else { return false };
+        match self.heap.parent(env) {
+            Some(p) if p == previous => true,
+            Some(p) if p == self.world && self.heap.set_parent(env, previous) => true,
+            _ => {
+                self.outer_conflicts += 1;
+                false
+            }
+        }
+    }
+
     /// The frame `object`'s events run in: its copy's clone, else its module's frame.
     pub fn frame_of(&self, object: ObjectId) -> Option<EnvRef> {
         self.object_env
