@@ -420,6 +420,12 @@ pub struct Character {
     /// On the ground.
     pub grounded: bool,
     off_floor: f32,
+    /// Sly 2 hook (physics.md 5.1): the contact normals of the last move (pointing at the character), for the stuck
+    /// test; the state time of the last test; and the last floor it stood on, where a stuck character is returned.
+    contacts: Vec<Vec3>,
+    stuck_checked: f32,
+    /// See `contacts`.
+    pub safe: Option<Vec3>,
     /// Health.
     pub health: Health,
     /// Gadget power.
@@ -548,6 +554,9 @@ impl Character {
             state_time: 0.0,
             grounded: true,
             off_floor: 0.0,
+            contacts: Vec::new(),
+            stuck_checked: 0.0,
+            safe: None,
             health: Health::default(),
             power: Power::new(spec::POWER_START, spec::POWER_MAX),
             slots: Slots::default(),
@@ -763,11 +772,61 @@ impl Character {
             Who::Murray => self.murray(dt, input, world, s, out),
             Who::Bentley => self.bentley(dt, input, world, s, out),
         }
+        // Sly 2 hook (physics.md 5.1): a character hanging stuck in a jump, fall or hit reaction is recovered.
+        if !s.items.is_sly3() {
+            self.stuck_recovery(s, out);
+        }
         for d in &mut self.darts {
             d.1 += dt;
         }
         self.darts.retain(|d| d.1 < spec::DART[0]);
         self.dart_reload = (self.dart_reload - dt).max(0.0);
+    }
+
+    /// The stuck test and the recovery (physics.md 5.1). In a jump or fall or a hit reaction, off the floor, at least
+    /// 1 s after the state began and at most once a second: the last contact normals, combined with non-negative
+    /// weights, cancel "down" as far as they can; if what is left of it has z above −0.1, the character is stuck. It
+    /// is then returned to the last floor it stood on: by a jump there, or, when that jump would take more than
+    /// 1.25 s, placed there (the camera cut and fade are the game's).
+    fn stuck_recovery(&mut self, s: &Shared, out: &mut Vec<GangEvent>) {
+        let damage = match self.who {
+            Who::Sly => sly::DAMAGE,
+            Who::Murray => murray::DAMAGE,
+            Who::Bentley => bentley::DAMAGE,
+        };
+        if self.grounded || (self.state != self.air_state() && self.state != damage) {
+            return;
+        }
+        if self.state_time < self.stuck_checked {
+            self.stuck_checked = 0.0;
+        }
+        if self.state_time < STUCK_AFTER
+            || (self.stuck_checked > 0.0 && self.state_time - self.stuck_checked < STUCK_AFTER)
+        {
+            return;
+        }
+        self.stuck_checked = self.state_time;
+        if down_left(&self.contacts)[2] <= STUCK_DOWN {
+            return;
+        }
+        let Some(to) = self.safe else { return };
+        let d = sub(to, self.position);
+        // Jump kind 10's speed is not given: the ordinary jump's [I].
+        let v0 = jump_speed(s.consts.jump_heights[0], 0.0);
+        let g = spec::GRAVITY;
+        let disc = v0 * v0 + 2.0 * g * d[2];
+        let t = if disc >= 0.0 { (-v0 - crate::math::sqrt(disc)) / g } else { f32::INFINITY };
+        if t.is_finite() && t > 0.0 && t <= RECOVER_JUMP {
+            self.velocity = [d[0] / t, d[1] / t, v0];
+            self.jump_kind = 10;
+            self.set_state(self.air_state(), out);
+        } else {
+            self.position = to;
+            self.velocity = [0.0; 3];
+            self.grounded = true;
+            self.off_floor = 0.0;
+            self.set_state(0, out);
+        }
     }
 
     /// The stick as (unit world direction, deflection): the gang's stick reader has applied the games' rule
@@ -799,6 +858,21 @@ impl Character {
         let r = move_and_slide(world.cw, &world.filter, shape, self.origin(s), delta, &params);
         self.position = sub(r.position, [0.0, 0.0, self.body_radius(s)]);
         self.velocity = [want[0], want[1], vz1];
+        // Sly 2 hook (physics.md 5.1): a blocked contact takes away only the part of the velocity going into the
+        // surface, so the character slides along it; held between two steep surfaces it hangs, its fall speed no
+        // longer growing.
+        self.contacts.clear();
+        self.contacts.extend(r.hits.iter().map(|h| h.normal));
+        if !s.items.is_sly3() {
+            for _ in 0..2 {
+                for n in self.contacts.iter().filter(|n| n[2] <= crate::collision::mesh::GROUND_Z) {
+                    let into = dot(self.velocity, *n);
+                    if into < 0.0 {
+                        self.velocity = madd(self.velocity, *n, -into);
+                    }
+                }
+            }
+        }
         // The most head-on wall (a contact with |normal z| < 0.7), for Rocket Boots.
         let facing = heading(self.yaw);
         self.wall = r
@@ -836,6 +910,7 @@ impl Character {
             self.velocity[2] = 0.0;
             self.off_floor = 0.0;
             self.floor_z = self.position[2];
+            self.safe = Some(self.position);
             self.jump_kind = 0;
             self.double_used = false;
             self.steer_factor = 1.0;
@@ -2589,3 +2664,42 @@ impl Character {
         out.push(GangEvent::Crossbow { target, high, mode });
     }
 }
+
+/// Sly 2 (physics.md 5.1): what is left of "down" once the contact normals, with non-negative weights, cancel as
+/// much of it as they can (each normal alone, and each pair).
+fn down_left(normals: &[Vec3]) -> Vec3 {
+    let d = [0.0, 0.0, -1.0];
+    let mut best = d;
+    let mut keep = |r: Vec3| {
+        if dot(r, r) < dot(best, best) {
+            best = r;
+        }
+    };
+    for (i, a) in normals.iter().enumerate() {
+        let w = -dot(d, *a);
+        if w > 0.0 {
+            keep(madd(d, *a, w));
+        }
+        for b in &normals[i + 1..] {
+            let (aa, ab, bb) = (dot(*a, *a), dot(*a, *b), dot(*b, *b));
+            let det = aa * bb - ab * ab;
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            let (ra, rb) = (-dot(d, *a), -dot(d, *b));
+            let wa = (ra * bb - rb * ab) / det;
+            let wb = (rb * aa - ra * ab) / det;
+            if wa >= 0.0 && wb >= 0.0 {
+                keep(add(madd(d, *a, wa), scale(*b, wb)));
+            }
+        }
+    }
+    best
+}
+
+/// Sly 2 (physics.md 5.1): the stuck test runs this long into the state, and at most this often.
+const STUCK_AFTER: f32 = 1.0;
+/// Sly 2 (physics.md 5.1): stuck when what is left of "down" has z above this.
+const STUCK_DOWN: f32 = -0.1;
+/// Sly 2 (physics.md 5.1): a recovery jump longer than this places the character instead.
+const RECOVER_JUMP: f32 = 1.25;

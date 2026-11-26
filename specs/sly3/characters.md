@@ -317,7 +317,7 @@ listed.
   | Penelope | Holland (h_hangar_c), China (c_tilt_hall), pirates | her jobs drive the remote-control vehicles (class 85 RC car and helicopter) and use her own on-foot moves (53 entries, 115 clips) [O] |
   | the Panda King | China (c_apt, c_hall_b) | fireworks attacks and his own moves (49 entries, 102 clips) [O] |
   | Dimitri | v_interpol, h_hotel, p_at_sea, p_dive, p_island_map, m_ext, m_underwater | played mainly diving (class 87, p_dive and m_underwater); on foot a guard-family character (83 clips) [O] |
-  | Carmelita | Venice (v_ext, v_canal, v_interpol), the hubs, Kaine Island (m_ext, m_boss) | a guard-family character, mostly an opponent or bystander; her playable job uses her shock pistol (shooting), late in the game [O, to confirm which world] |
+  | Carmelita | Venice (v_ext, v_canal, v_interpol), the hubs, Kaine Island (m_ext, m_boss) | a guard-family character (class 60). **Played in Venice** in m1_turf_war's battles 2151, 2155, 2159 and 2163, where a pool copy (placement 139252, option 937 = 600) is given player 0's control and fights waves with her shock pistol (missions.md 4.1a) [D]. Her controls and pistol were not traced |
 
 - **Health of the recruits**: not in the data found so far; each has the shared actor table's parts (3.2), so the
   Sly 2 health counter applies by default [I] (open question 2).

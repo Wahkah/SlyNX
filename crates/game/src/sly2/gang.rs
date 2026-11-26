@@ -58,6 +58,17 @@ pub const GUARD_HIT: f32 = 1.0;
 /// launched as pickups (`gang::pocket::give`).
 pub const COLLECT_REACH: f32 = 150.0;
 
+/// Crawl spaces (interactables.md 9), their script events (crawl started, ended) and task events (26, 27).
+const CRAWL_CLASS: i16 = 27;
+const CRAWL_START: u32 = 5;
+const CRAWL_END: u32 = 6;
+const CRAWL_START_TASK: u32 = 26;
+const CRAWL_END_TASK: u32 = 27;
+/// Where the cover test starts above the feet, and how far up a surface covers the crawler. *Placeholders*: the
+/// crawl's clearance is not given.
+const CRAWL_HEAD: f32 = 30.0;
+const CRAWL_COVER: f32 = 150.0;
+
 /// How long a character flashes after a hit, taking no further damage (characters.md 2).
 const FLASH_TIME: f32 = 2.0;
 
@@ -263,6 +274,9 @@ pub struct GangPlayer {
     pub clips: engine::anim::sly2_gang::GangClips,
     /// The guard or creature Murray carries (characters.md 4.6).
     carried: Option<Handle>,
+    /// The crawl space the played character crawls in, and whether it has been covered by it yet
+    /// (interactables.md 9).
+    crawl: Option<(Handle, bool)>,
     /// Seconds each member still flashes after a hit, taking no further damage (characters.md 2), by member.
     flashing: [f32; 3],
 }
@@ -281,6 +295,7 @@ impl GangPlayer {
             clips: Default::default(), // Sly 2 pose hook
             carried: None,
             flashing: [0.0; 3],
+            crawl: None,
         }
     }
 
@@ -409,6 +424,12 @@ impl PlayerSystem for GangPlayer {
             let Some(p) = world.position(h).filter(|&p| dist(p, at) <= TARGET_RANGE) else { continue };
             targets.push(Target { id: h.index(), position: p, yaw: 0.0, kind: TargetKind::Interactable });
         }
+        // Crawl spaces (class 27 and derived, interactables.md 9): Circle near one starts the crawl.
+        for &s in world.slots_of_class(CRAWL_CLASS) {
+            let Some(h) = world.handle(s).filter(|&h| world.in_world(h)) else { continue };
+            let Some(p) = world.position(h).filter(|&p| dist(p, at) <= TARGET_RANGE) else { continue };
+            targets.push(Target { id: h.index(), position: p, yaw: 0.0, kind: TargetKind::Interactable });
+        }
         // Gang hook: hooks Sly can swing on (class 40), as targets.
         for &s in world.slots_of_class(engine::gang::parts::HOOK_CLASS) {
             let Some(h) = world.handle(s).filter(|&h| world.in_world(h)) else { continue };
@@ -512,6 +533,15 @@ impl PlayerSystem for GangPlayer {
                     if let Some(h) = world.handle(id).filter(|&h| world.class(h) == Some(SPOT_CLASS)) {
                         engine::behavior::sly2_commands::use_spot(world, h, Some(me));
                     }
+                    // A crawl space: the crawl starts (crouching in), script event 5 on it and task event 26 with it
+                    // (interactables.md 9).
+                    if self.crawl.is_none()
+                        && let Some(h) = world.handle(id).filter(|&h| world.class(h) == Some(CRAWL_CLASS))
+                    {
+                        self.crawl = Some((h, false));
+                        world.raise(h, CRAWL_START, Vec::new());
+                        engine::behavior::sly2_props::send_task_event_from(world, CRAWL_START_TASK, Some(h));
+                    }
                 }
                 GangEvent::Pickpocket(id) => {
                     if let Some(h) = world.handle(id) {
@@ -608,6 +638,25 @@ impl PlayerSystem for GangPlayer {
             {
                 c.health.value = c.health.capacity;
                 c.power.value = c.power.max;
+            }
+        }
+        // The crawl ends when the character is no longer covered (nothing over it within CRAWL_COVER) and so has room
+        // to stand: script event 6 on the crawl space and task event 27 (interactables.md 9). The crawl's own states
+        // (7 crouching in, 8 standing up) and its movement are the gang's and are not played: the character moves as
+        // it walks. Until it has been covered once (it crouches in beside the opening) the crawl does not end.
+        if let Some((h, was_in)) = self.crawl {
+            let filter = QueryFilter::default();
+            let covered = world.position(me).is_some_and(|p| {
+                self.collision
+                    .ray_cast([p[0], p[1], p[2] + CRAWL_HEAD], [0.0, 0.0, 1.0], CRAWL_COVER, &filter)
+                    .is_some()
+            });
+            if covered {
+                self.crawl = Some((h, true));
+            } else if was_in || !world.in_world(h) {
+                self.crawl = None;
+                world.raise(h, CRAWL_END, Vec::new());
+                engine::behavior::sly2_props::send_task_event_from(world, CRAWL_END_TASK, Some(h));
             }
         }
         // Medicine the played character touches: taken unless its health and power are both full.

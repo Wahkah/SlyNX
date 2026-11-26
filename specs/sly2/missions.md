@@ -717,6 +717,35 @@ Its module 0 reads these custom properties, which placement 17346's root patch s
   - In play: once the rat (and anything else counting) has run out of the generator's box, the generator is free.
     1354 s later its event 1 spawns the next rat, as long as fewer than 1350 (2) of its spawns are alive.
 
+**`t1_bug_vent` (1812) and `t1_bug_office_door` (1813), job `m1_bug`, row 4 `1_nightclub/03_0x03e`** (added
+2026-11-26) [D unless marked]. The player breaks a vent, crawls through, and reaches the spot under Dimitri's office.
+
+1. **1812 `t1_bug_vent`.**
+   - In state 1 its switches bring in waypoint placement 124025 (`mission_interior_waypoint`) and trigger volume
+     124026.
+   - Placement **123876** (package `f_vent_panel_break`, at (−4486, 5164, 778)) binds the vent prop's root to module
+     8 of `f_nightclub_disco_rig`.
+   - One attack hit breaks the prop (interactables.md 3.2) [R/I as in 4.3's vent]. The prop raises script event 5,
+     and module 8 asks **1812 for state 2**.
+2. **The crawl space appears.** 1812's switch for states 2–3 adds **124027**, a class-27 crawl space
+   (interactables.md 9).
+3. **Crawling in.** Sly presses Circle within 250 units of it and starts crawling. The crawl's start raises event 5
+   on 124027 [R], and its module 9 adds volume **133043** (option 26, so it is absent until then).
+   - Crawling out (event 6) removes 133043 again.
+4. **Reaching the spot.** 133043 counts only Sly (option 432 = 7). When he crawls into it:
+   - its option 441 starts sequence **133032**, which runs one command 647 on 133028;
+   - its module 10 removes object 133034;
+   - it asks **1813 for state 2**;
+   - it sets camera object 133041's option 503 to the volume's first object inside (Sly) and adds the camera, so
+     the view switches [I for "view"].
+
+   Leaving 133043 removes the camera, adds 133034 back and removes the volume.
+5. 1813's own switches (states 2–3) add interaction spots 124028 and 124029. They start sequences when used, and
+   lead on into the office.
+
+So the player's actions are: hit the vent, crawl into the space it opened, and crawl to the end, which is volume
+133043. 1813 needs no other condition.
+
 ## 5. Jobs
 
 Rules [R]:

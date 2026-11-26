@@ -1059,9 +1059,9 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             journal.push(format!("{:.1} s: load {:?}", f as f32 / FPS as f32, last_load));
         }
         // After a load the route goes on only while it has something to do. With no target (waypoint, trigger or
-        // use point for the current task) and no script running for 30 s, or once the character, with no target,
-        // has fallen 20,000 units below where it arrived, it stops rather than wander (with a target, the placing
-        // at it after 10 s catches a fall): the gang pattern walks off the world's
+        // use point for the current task) and no script running for 30 s, or once the character has fallen 20,000
+        // units below where it arrived (with no target, or again after being put at the target), it stops rather
+        // than wander: the gang pattern walks off the world's
         // collision, and falling out of the world is not modelled (spec open).
         let idle = target.is_none() && s.scripts.running.is_empty() && !s.script_paused;
         idle_since = if idle { idle_since.or(Some(f)) } else { None };
@@ -1071,7 +1071,19 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             if f == l + FPS {
                 arrival_z = z;
             }
-            let fell = target.is_none() && arrival_z.zip(z).is_some_and(|(a, z)| z < a - 20_000.0);
+            let mut fell = arrival_z.zip(z).is_some_and(|(a, z)| z < a - 20_000.0);
+            // With a target not yet stood at, a fall puts the character there at once (as the 10 s placing would);
+            // a second fall, or one with no target, stops the route.
+            if fell
+                && !placed
+                && let Some(to) = target.and_then(|h| s.game.as_ref().unwrap().world.world_transform(h))
+            {
+                placed = true;
+                let g = s.game.as_mut().unwrap();
+                g.systems.player.place(&mut g.world, to);
+                journal.push(format!("{:.1} s: fell; put at the target (no path-finding)", f as f32 / FPS as f32));
+                fell = false;
+            }
             if fell || idle_since.is_some_and(|i| f >= i.max(l) + 30 * FPS) {
                 journal.push(format!(
                     "{:.1} s: stopped: {} in the world loaded at {:.1} s",
@@ -1517,6 +1529,7 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
     let mut attack_target: Option<engine::object::Handle> = None;
     let mut photo_from: Option<(u32, engine::object::Handle)> = None;
     let mut toss: Option<(u32, engine::object::Handle, engine::object::Handle)> = None;
+    let mut crawl: Option<(u32, engine::object::Handle, engine::object::Handle)> = None;
     let mut tosses = 0u32;
     let mut advanced = 0u32;
     let mut seen_sequences: Vec<engine::object::Handle> = Vec::new();
@@ -1544,7 +1557,11 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
             let b = if k == FPS / 2 { platform_api::Buttons::R.0 } else { 0 };
             FrameInput { pressed: b, buttons: b, ..Default::default() }
         } else if let Some((k, c, v)) =
-            toss.and_then(|(a, c, v)| Some((f.checked_sub(a)?, c, v))).filter(|t| t.0 < 8 * FPS)
+            crawl.and_then(|(a, c, v)| Some((f.checked_sub(a)?, c, v))).filter(|t| t.0 < SLY2_CRAWL_WINDOW)
+        {
+            sly2_crawl_input(&mut s, k, c, v)
+        } else if let Some((k, c, v)) =
+            toss.and_then(|(a, c, v)| Some((f.checked_sub(a)?, c, v))).filter(|t| t.0 < SLY2_TOSS_WINDOW)
         {
             sly2_toss_input(&mut s, k, c, v)
         } else if let Some(k) = attack_from.map(|a| f - a).filter(|&k| k < 3 * FPS) {
@@ -1639,6 +1656,9 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
             current.push(n);
             last_task = task;
             since = 0.0;
+        } else if toss.is_some_and(|(a, ..)| f.saturating_sub(a) < SLY2_TOSS_WINDOW) {
+            // A toss waits for the creatures to come to Murray.
+            since = 0.0;
         } else if following {
             // A follow takes as long as the followed character's walk.
             if !in_follow {
@@ -1692,6 +1712,19 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
                     break;
                 }
             }
+            // A volume a crawl space's script brings in, whose script asks for the task: Sly crawls in, then into it.
+            if did.is_none() {
+                for &k in &target {
+                    let Some(id) = sly2_jobs(&s).map(|j| j.graph.tasks[k].id) else { continue };
+                    if let Some((c, v)) = sly2_crawl_target(&s, id) {
+                        let g = s.game.as_ref().unwrap();
+                        let (co, vo) = (g.world.sly2_id(c), g.world.sly2_id(v));
+                        crawl = Some((f + 1, c, v));
+                        did = Some((k, format!("crawling in crawl space {co:?} to volume {vo:?}")));
+                        break;
+                    }
+                }
+            }
             // Creatures a volume counts, for a task whose script names their placement: Murray tosses them in.
             if did.is_none() && tosses < SLY2_TOSSES_MAX {
                 for &k in &target {
@@ -1720,7 +1753,7 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
                 played += 1;
                 hold_until = f + 2 * FPS;
                 placed_here |= what.contains("placed in it");
-                if what.starts_with("tossing") {
+                if what.starts_with("tossing") || what.starts_with("crawling") {
                     hold_until = f + 1;
                 }
                 if what.starts_with("photographed") {
@@ -2230,6 +2263,27 @@ fn sly2_toss_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::o
         // Fallen far below his spot (knocked off a ledge over a drop): put back, standing in for the controller's
         // return to safe ground (interactables.md 8, physics.md 5.1; not built).
         let fallen = me[2] < post[2] - SLY2_TOSS_FALLEN;
+        // A free creature on a floor within a throw's reach of the volume (and not in reach yet): Murray is put
+        // beside it, facing it, rather than waiting for it (it may stand still, or chase someone else).
+        let floor_under =
+            |p: [f32; 3]| g.systems.physics.queries().ground(&g.world, [p[0], p[1], p[2] + 100.0], 250.0).is_some();
+        let fetch = free.filter(|(_, p)| {
+            near.is_none()
+                && (p[0] - t[0]).powi(2) + (p[1] - t[1]).powi(2) <= SLY2_TOSS_FETCH * SLY2_TOSS_FETCH
+                && floor_under(*p)
+        });
+        if let Some((_, p)) = fetch
+            && k % FPS == 20
+            && ready
+        {
+            let (dx, dy) = (me[0] - p[0], me[1] - p[1]);
+            let l = (dx * dx + dy * dy).sqrt().max(1.0);
+            let (x, y) = (p[0] + dx / l * SLY2_ATTACK_STANDOFF, p[1] + dy / l * SLY2_ATTACK_STANDOFF);
+            let yaw = (p[1] - y).atan2(p[0] - x);
+            place(s, x, y, yaw, p[2]);
+            return FrameInput::default();
+        }
+        let away = away && fetch.is_none();
         if k == 10 || (away && k % FPS == 10 && state != murray::LIFT) || (wedged && k % FPS == 10) || fallen {
             let yaw =
                 free.map_or((t[1] - spot[1]).atan2(t[0] - spot[0]), |(_, p)| (p[1] - spot[1]).atan2(p[0] - spot[0]));
@@ -2299,6 +2353,10 @@ fn sly2_toss_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::o
     }
 }
 
+/// See [`sly2_toss_input`]: how far from the volume a creature may be for Murray to be put beside it.
+const SLY2_TOSS_FETCH: f32 = 2000.0;
+/// How long one toss play lasts: the creatures pursuing Murray may come from far.
+const SLY2_TOSS_WINDOW: u32 = 20 * FPS;
 /// See [`sly2_toss_input`]: how near the creature Murray must be to lift it.
 const SLY2_TOSS_REACH: f32 = 250.0;
 /// See [`sly2_toss_input`]: how far below the creature's height Murray may fall before he is put back.
@@ -2307,6 +2365,51 @@ const SLY2_TOSS_FALLEN: f32 = 400.0;
 const SLY2_TOSS_WEDGED: f32 = 2.0;
 /// See [`sly2_toss_input`]: how far Murray may be from his waiting spot before he is put back on it.
 const SLY2_TOSS_SPOT: f32 = 300.0;
+/// A crawl space (class 27, in the world) whose script brings in a volume (out of the world) whose script asks for
+/// task `id` (interactables.md 9, missions.md 4.3: crawl space 124027 adds 133043 while Sly crawls, and 133043 asks
+/// for 1813).
+fn sly2_crawl_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engine::object::Handle)> {
+    let g = s.game.as_ref()?;
+    let p = g.scripts()?.program();
+    let w = &g.world;
+    let names = |m: i16, needle: i32| {
+        let needle = needle.to_string();
+        m >= 0
+            && (m as usize) < p.module_count()
+            && p.definitions(m as usize).iter().any(|&(_, n)| {
+                format!("{}", p.display(n)).split(|c: char| !c.is_ascii_digit() && c != '-').any(|t| t == needle)
+            })
+    };
+    w.handles().filter(|&v| matches!(w.class(v), Some(24 | 25)) && !w.in_world(v) && names(w.module(v), id)).find_map(
+        |v| {
+            let vid = w.sly2_id(v)?;
+            let c = w.handles().find(|&c| w.class(c) == Some(27) && w.in_world(c) && names(w.module(c), vid))?;
+            Some((c, v))
+        },
+    )
+}
+
+/// The pad for a crawl, `k` frames after it starts (interactables.md 9): Sly (Left) put in the middle of crawl space
+/// `c` on its floor, Circle (A) there starts the crawl, which brings volume `v` in; then Sly is put in `v`.
+fn sly2_crawl_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::object::Handle) -> FrameInput {
+    let b = match k {
+        0 => platform_api::Buttons::LEFT.0,
+        20 | 22 | 24 => platform_api::Buttons::A.0,
+        _ => 0,
+    };
+    if k == 10 {
+        sly2_enter_volume(s, c);
+    }
+    if k == SLY2_CRAWL_INTO && s.game.as_ref().is_some_and(|g| g.world.in_world(v)) {
+        sly2_enter_volume(s, v);
+    }
+    FrameInput { pressed: b, buttons: b, ..Default::default() }
+}
+
+/// See [`sly2_crawl_input`]: when Sly is put in the volume the crawl brought in, and how long a crawl play lasts.
+const SLY2_CRAWL_INTO: u32 = 60;
+const SLY2_CRAWL_WINDOW: u32 = 3 * FPS;
+
 /// See [`sly2_toss_input`]: the farthest Murray throws (characters.md 7: range 200 to 1500).
 const SLY2_TOSS_RANGE: f32 = 1500.0;
 /// See [`sly2_toss_input`]: how far from the volume Murray is carried to throw when he is beyond the range.

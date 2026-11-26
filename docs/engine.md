@@ -1926,8 +1926,7 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
   - after the follow the route goes on (`SLYNX_SLY2_JOBS=6`): it also finds objects a declared custom property ties
     to a task (option 8: a box prop's 1374 holds its task, `m1_waterpump`), and for a task that starts at a checkpoint
     in another world it uses the interaction spot whose sequence's script fires a door to that checkpoint (`m1_bug`:
-    spot 123837's 132610 fires door 1734 at 1811's checkpoint 398). Still forced: 1813 of `m1_bug` (its volume
-    133043 comes in by the event 5 of class-27 object 124027, whose role is not specified);
+    spot 123837's 132610 fires door 1734 at 1811's checkpoint 398). None is forced in the six jobs;
   - each package copy past the first runs in its own clone of the package's module frames (scripts.md 1;
     `world::sly2::copy_ordinals` numbers the copies per package in load order and leaves out the objects a
     placement's patch bound, `level.bound`, which keep the shared frame; the attach loop calls
@@ -1962,13 +1961,36 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
     refilled: a stand-in for the defeat of characters.md 2.1 (task event 0x10, then the job restarts at its
     checkpoint, or the world reloads at its arrival point with wipe 778), which is held back until the controller
     returns characters from drops to safe ground (physics.md 5.1): without that, a knock off a ledge ends the job.
-    Step physics for creatures (guards.md 5) is not in either: with it, Dimitri's walk drops to the street below and
-    the follow does not end, and the waterpump and bug jobs no longer play through (under study);
+  - swarming creatures walking along a curve (a path command) take steps with gravity and floor probes (guards.md
+    5): on the floor under the step within 50 up or down (a ray at the centre, else at four points 30 around it,
+    else the collision trees' one-sided rule; guards' and creatures' own bodies left out), else falling at 2,275
+    until they meet one; until a floor was ever found under them they keep their height. Three deviations from
+    guards.md 5: guards keep their height (with step physics Dimitri's walk drops to the street below and the follow
+    does not end), so do pursuits (rats chasing Murray walked off ledges and were lost), and a creature fallen 3,000
+    below where it was loaded is taken out of the world (nothing specifies what ends such a fall);
+  - the gang's controller in Sly 2 (physics.md 5.1; `gang::character`): floors are contacts above normal z 0.7; a
+    blocked contact takes away only the velocity going into it, so the character slides and a wedged one no longer
+    gathers fall speed; the last floor stood on is remembered (`Character::safe`); in a jump, fall or hit reaction,
+    off the floor, from 1 s into the state and at most once a second, the stuck test combines the last contact
+    normals with non-negative weights to cancel "down" (each one alone and each pair) and calls the character stuck
+    when what is left has z above −0.1; it is then returned to its safe point by a jump (the ordinary jump's speed
+    [I]: jump kind 10's is not given), or placed there when that jump would take more than 1.25 s (the camera cut
+    and fade are not done). Sly 3 is gated out. Not handled: a character wedged against a near-vertical wall whose
+    sweeps along it meet it again at once (`physics::character::move_and_slide`) holds still without the stuck test
+    seeing it (the two walls' normals cannot cancel "down"); easing it off the surfaces regressed `m1_recon`, so the
+    route's toss puts Murray back on his spot instead;
+  - crawl spaces (class 27, interactables.md 9; `game::sly2::gang`): Circle near one starts the crawl, script event 5
+    on it and task event 26 with it; the crawl ends when nothing is over the character within 150 (a cover test by a
+    ray up) once it has been covered, with script event 6 and task event 27. The crawl's states (7 crouching in, 8
+    standing up), clips and movement are not played. The route crawls for a task whose volume a crawl space's script
+    brings in: Sly is put in the crawl space, presses Circle, then is put in the volume (m1_bug: 124027 brings in
+    133043, which asks for 1813);
   - the route uses an interaction spot of a derived class whose task requests (1076) name the task (m1_bug's
     17366 asks for 1815), so 1814 is done by play;
   - the route's toss: Murray waits on a floor 1,000 from the volume toward where the creature was loaded, for the
-    rats that pursue him; the nearest free one in reach he turns to and lifts, then he steers the aim onto the volume
-    and throws. Hung in a hit reaction off the ground for 2 s (wedged between two steep surfaces near the generator,
+    rats that pursue him, or is put beside a free one on a floor within 2,000 of the volume; the nearest free one in
+    reach he turns to and lifts, then he steers the aim onto the volume and throws; a toss lasts up to 20 s and holds
+    the stall timer. Hung in a hit reaction off the ground for 2 s (wedged between two steep surfaces near the generator,
     neither counting as ground), or fallen 400 below the creature's height, he is put back on his spot. Five rats go
     in and 1884 is done by play;
   - a guard's walk counts as arrived within 0.5 of its stop distance (`behavior::sly2::ARRIVED`): the last step lands

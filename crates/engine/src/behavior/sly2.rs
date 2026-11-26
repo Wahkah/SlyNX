@@ -137,6 +137,58 @@ pub const SWARMER_STRIKE: (f32, u32) = (3.0, 0x200);
 pub const FLIGHT_GRAVITY: f32 = -2275.0;
 /// The radius a thrown creature meets surfaces with. *Placeholder*: its collision parts are not read yet.
 pub const FLIGHT_RADIUS: f32 = 30.0;
+/// How far a guard or creature steps up onto a floor, and down onto one without falling. *Placeholder*: guards.md 5
+/// gives the step physics, not these heights.
+pub const STEP_UP: f32 = 50.0;
+/// See [`STEP_UP`].
+pub const STEP_DOWN: f32 = 50.0;
+/// How far below where it was loaded a falling creature is taken out of the world. *Placeholder*.
+pub const FALL_LOST: f32 = 3000.0;
+
+/// The floor under `from` within `drop`, leaving out guards' and creatures' own bodies (they are where they were
+/// loaded, not where they are). The body has a width: when the ray at its centre finds nothing (a seam between two
+/// surfaces), the highest floor under four points [`FOOT_RADIUS`] around it.
+fn floor_below(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
+    floor_below_point(cx, from, drop).or_else(|| {
+        [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]
+            .iter()
+            .filter_map(|o| {
+                floor_below_point(cx, [from[0] + o[0] * FOOT_RADIUS, from[1] + o[1] * FOOT_RADIUS, from[2]], drop)
+            })
+            .reduce(f32::max)
+    })
+}
+
+/// The half-width a guard or creature stands on. *Placeholder*: its collision parts are not read yet.
+pub const FOOT_RADIUS: f32 = 30.0;
+
+fn floor_below_point(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
+    floor_ray(cx, from, drop).or_else(|| {
+        // A floor whose stored surfaces do not cover the point (an incomplete outline; the rats' spawn point beside
+        // the generator): the collision trees' one-sided rule, as the gang's controller uses.
+        let cw = cx.collision.collision_world()?;
+        let g = cw.tree_ground_probe(from, drop, &crate::collision::world::QueryFilter::default())?;
+        g.is_ground.then_some(g.point[2])
+    })
+}
+
+fn floor_ray(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
+    let mut top = from;
+    for _ in 0..4 {
+        let left = drop - (from[2] - top[2]);
+        if left <= 0.0 {
+            return None;
+        }
+        let (p, _, o) = cx.collision.ground(cx.world, top, left)?;
+        let actor = o.is_some_and(|h| cx.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 56)));
+        if !actor {
+            return Some(p[2]);
+        }
+        top = [p[0], p[1], p[2] - 1.0];
+    }
+    None
+}
+
 /// How long a thrown creature passes through what it starts inside (characters.md 4.6: a dropped load does not
 /// collide with Murray until 0.1 s after they part).
 pub const FLIGHT_CLEAR: f32 = 0.1;
@@ -406,6 +458,12 @@ pub struct Sly2Guard {
     /// Thrown or dropped (characters.md 4.6): its velocity while it flies, under [`FLIGHT_GRAVITY`], until it
     /// meets a surface (or after [`FLIGHT_TIME`]).
     pub flight: Option<([f32; 3], f32)>,
+    /// Step physics (guards.md 5): its fall speed, and whether a floor was ever found under it (until then it moves
+    /// at its height, as where no collision queries are available).
+    pub fall: f32,
+    pub floored: bool,
+    /// The step being walked follows a curve (a path command), where the step physics applies (guards.md 5).
+    pub on_curve: bool,
 }
 
 impl Sly2Guard {
@@ -440,6 +498,9 @@ impl Sly2Guard {
             second_allowed_at: 0.0,
             held: false,
             flight: None,
+            fall: 0.0,
+            floored: false,
+            on_curve: false,
             acting: None,
             parts: damage_parts(world, h),
             job: Job::Patrol,
@@ -572,6 +633,19 @@ impl Sly2Guard {
             let s = (speed * cx.dt).min(dist - stop) / dist.max(1e-6);
             q = [p[0] + d[0] * s, p[1] + d[1] * s, p[2]];
         }
+        // Step physics (guards.md 5) for the swarming creatures moving along a curve. Two deviations from
+        // guards.md 5: guards keep their height (with step physics Dimitri's walk drops from his start to the street
+        // below and the follow does not end), and so does a pursuit, which goes straight at its target (rats chasing
+        // Murray walked off ledges and were lost).
+        if self.swarmer && self.on_curve {
+            q[2] = self.step_height(cx, p, q);
+            // Fallen far below where it was loaded (over a drop with no floor under it): taken out of the world.
+            // A deviation from guards.md 5, which does not say what ends such a fall.
+            if q[2] < self.post[2] - FALL_LOST {
+                self.fall = 0.0;
+                cx.world.set_in_world(cx.me, false);
+            }
+        }
         self.place(cx.world, cx.me, q);
         // Left to go; within ARRIVED of the stop distance it has arrived (the last step lands on the stop ring, and
         // rounding left a remainder just above 0 for good, stalling path following: Dimitri's list 1825).
@@ -601,6 +675,30 @@ impl Sly2Guard {
         if self.flight.is_none() {
             self.post = at;
             self.job = Job::Return;
+        }
+    }
+
+    /// Its height after a step from `p` to `q` (guards.md 5): on the floor under `q` within a step up or down, else
+    /// falling under gravity until it meets one. Floors are the world's surfaces, not guards' or creatures' bodies.
+    fn step_height(&mut self, cx: &mut Cx<'_>, p: [f32; 3], q: [f32; 3]) -> f32 {
+        let fall = (-self.fall * cx.dt).max(0.0);
+        let from = [q[0], q[1], p[2] + STEP_UP];
+        let floor = floor_below(cx, from, STEP_UP + STEP_DOWN + fall);
+        match floor {
+            Some(z) => {
+                self.floored = true;
+                if z >= p[2] - STEP_DOWN - fall {
+                    self.fall = 0.0;
+                    return z;
+                }
+                self.fall += FLIGHT_GRAVITY * cx.dt;
+                (p[2] + self.fall * cx.dt).max(z)
+            }
+            None if self.floored => {
+                self.fall += FLIGHT_GRAVITY * cx.dt;
+                p[2] + self.fall * cx.dt
+            }
+            None => p[2],
         }
     }
 
@@ -937,7 +1035,11 @@ impl ClassBehavior for Sly2Guard {
                         self.place(cx.world, cx.me, me);
                     }
                     super::sly2_commands::Step::GoTo(p, speed) => {
-                        if self.walk(cx, p, speed, 30.0) <= 0.0 {
+                        // Along a curve, the step physics (guards.md 5).
+                        self.on_curve = !run.path.is_empty();
+                        let left = self.walk(cx, p, speed, 30.0);
+                        self.on_curve = false;
+                        if left <= 0.0 {
                             // Arrived: the next step moves past the command.
                             run.wait = -1.0;
                         }

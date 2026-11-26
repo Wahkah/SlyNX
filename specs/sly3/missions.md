@@ -378,9 +378,8 @@ macro group is therefore present in every world of the episode.
   - 20 adds 15 and 16;
   - 23 adds 15 and 17.
 
-  Table B gives condition 12 to every m1_follow task (2237 to 2266), and v_ext has no set 12. So by the
-  first-set rule the world loads **set 22**, and the wheel loads ([conditions.md](conditions.md) 3) [I for the
-  choice rule]. Condition 23 (sets 23 / 20, extra 15) belongs to later tasks (1826, 2141 …), and 20 to 1811 and
+  Table B gives condition 12 to every m1_follow task (2237 to 2266). 12 counts as none, so the world loads the
+  first set, **set 22**, and the wheel loads ([conditions.md](conditions.md) 3.1) [X]. Condition 23 (sets 23 / 20, extra 15) belongs to later tasks (1826, 2141 …), and 20 to 1811 and
   table A's 2409.
 
   An engine that does not add a set's 1029 conditions to the match, or that picks set 20 or 23, misses the wheel.
@@ -566,6 +565,78 @@ map; partial]:
   reference's option map) is an enum on the playable characters. **Whether 2 means "down", and how guards' strikes
   damage the crew in Sly 3, are open questions.** Sly 2's health rules (Sly 2 characters.md 2) are the reference
   until traced.
+
+**Option-set choice at a world load** ([conditions.md](conditions.md) 3.1) [X]. The choice is made in this
+order: the current job's table-A entry, then the checkpoint task's table-B entry, then the **last table-B entry
+whose task has a saved state above 0** (available counts). 12 means none, and with no match the first set loads.
+For m1_turf_war: 1826 `t1_chalktalk2` is current (state 1) when v_ext loads, so condition 23 is chosen and set
+23 loads.
+
+**Turf-war battles (m1_turf_war, job 2139, battles 2151 / 2155 / 2159 / 2163): Carmelita against waves**
+[D: job 2139's module, v_macro module 28 in v_ext; I where marked]:
+
+- **Set-up.** Each battle task's script (2152 …) removes Sly (`0x39` 24) and gives player 0 control (`0x13`) of
+  a **Carmelita** copy taken from pool placement 139252 (class 60, a guard-family playable character). Then it
+  loops, sending the hook 139266, until **alarm 139255** is set. Each battle module's hook 139345 calls the job's
+  custom method **2653 with the battle number** (1 to 4). Hook 139266 calls **2658**, the wave tick, every loop.
+- **Methods the job registers** (built-in 114, on its event 0):
+
+  | Method | What it does |
+  |---|---|
+  | **2653** (n) | **start battle n**: take Carmelita from pool 139252 (1207 / 1209) and the boss from 139253, set up the battle's row of the wave table, add 93224 when the row asks, and run the job's 286 |
+  | **2654** | end the battle: release every enemy, return the boss and Carmelita, remove 93224, run 287 |
+  | **2658** | **the wave tick** (below) |
+  | **2659** (enemy, hit) | an enemy's damage handler (below) |
+  | 2655 to 2657, 2660, 2661 | follow-target set-ups, the list of living enemies, and a voice line |
+
+- **The wave table** (s6068), one row per battle: (boss flag, list of wave sizes, list of spawn choices, the
+  most enemies alive at once, (two anchor objects)). For example, battle 1 is
+  `(0 (1) ((139222 139223 139224 139225)) 1 (139226 139227))`. Each spawn choice is (pool, spawn point, path
+  in, path out).
+- **The wave tick, 2658:**
+  1. each living enemy's state machine runs (s6101), and enemies that have left are dropped;
+  2. while fewer enemies have spawned than the row has entries, and fewer are alive than the row's limit, it
+     picks a spawn choice that no living enemy uses and spawns an enemy (s6117). The enemy is taken from the
+     pool and given the custom properties 2665 to 2675 and 2406 (its spawn point, added). It is placed at the
+     spawn point's anchor (139257 / 139258), given velocity 0 and the command list 2146;
+  3. **when no enemy is left and Carmelita's health (940) is above 0, it sets alarm 139255 on the current
+     task's script** (`(op117 (op117 (op105) 1308) 735) 139255`). That ends the battle, and the task's script
+     completes it.
+- **Enemy states** (custom property **2665**, the previous state in 2666, a timer in 2667):
+  - −1 spawning;
+  - **0** entering along the "in" path (2669), then 1 or 2;
+  - **1** holding;
+  - **2** attacking, after a random 3 to 5 s, using attack 139259 or 139260 by the spawn row's kind (2668), at
+    random (35 %) for kind 3;
+  - **3** defeated: given command list 2147 and leaving along the "out" path.
+
+  2664 is the enemy's **current hit-reaction effect** (a playback, stopped and cleared when it ends, method 249).
+- **Enemy damage, 2659:** only while the enemy is not in state 3 and its target is alive.
+  - Hits from the boss's projectiles do no damage to enemies.
+  - A class-89 projectile **from Carmelita** subtracts the hit's amount (124) from the enemy's 940. At 0 or
+    below the enemy goes to state 3.
+  - Otherwise it plays reaction 139261 and sets its look by remaining health (state machine 139264: above 66 %
+    13788, above 33 % 139262, else 139263).
+  - Voice lines (1690 to 1709, 1665 to 1671) are chosen at random, by whether battles 2151 or 2159 are
+    available.
+- **How a hit reaches 2659** [D]. The enemies come from pools whose placements bind override modules 0 and 2
+  of `v_ext_turf_war`. Each handles **script event 12** (a hit) as
+  `(begin ((op141 (quote s12)) self hit) (if (op12 self (op117 hit 556)) ((op117 (op118 2139 obj0) 2659) self hit)))`:
+  it runs the enemy's own hit handler first, then, when the hit's target (556) is this enemy, it calls **job
+  2139's method 2659** with (enemy, hit). Command list 2146 is a single 743 (play clip 139264, flags 1), the
+  enemy's idle.
+- **Carmelita's shots** [D] [X]. Her playable projectile templates are the groups `carmelita_missile_playable`
+  (8464, **class 91**) and `carmelita_missile_playable_charged` (8446, **class 92**); `carmelita_missile_fast` /
+  `_slow` (8438 / 8400, class 91) are the AI Carmelita's.
+  - Her mode-2 spawn points 8398, 8436, 8444 and 6676 place these. 6676, named by her option 1545, is the
+    playable shot [I: which point places which template was not read].
+  - **Classes 89 to 92 form one family**: the class table (`0x003409E0`, records of 20 bytes, tested by
+    `0x0013BEC8`) gives class 89 the range 89 to 92. So her class-91 and class-92 shots pass 2659's "derives
+    from 89" test. The class-89 groups `rock_throw_ammo`, `knife_ammo` and `ground_flower_throw_ammo` are other
+    throwables, not her pistol.
+  - The fire button, rate, speed, damage per shot (the hit's 124) and any auto-aim were **not traced**.
+- **Carmelita herself** [I]: her copy is a class-60 character with option 937 = 600 (its maximum health,
+  guards.md). Her controls, her movement and what happens when her health reaches 0 were **not traced**.
 
 **Clearing the job and task keys** [X]:
 

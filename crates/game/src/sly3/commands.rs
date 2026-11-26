@@ -236,6 +236,14 @@ impl Scripts {
         self.running.iter().any(|s| s.oid == oid)
     }
 
+    /// Each running script's runners, for reports: (script, runner name, the command it is at, what it waits for).
+    pub fn runner_states(&self) -> Vec<(i32, i32, Option<usize>, alloc::string::String)> {
+        self.running
+            .iter()
+            .flat_map(|s| s.runners.iter().map(move |r| (s.oid, r.name, r.pc, alloc::format!("{:?}", r.wait))))
+            .collect()
+    }
+
     /// Starts script `oid` (a command script of `world`) with `object` as its object. A running script is not
     /// started twice. False when there is no such script.
     pub fn start(&mut self, world: &World, oid: i32, object: i32) -> bool {

@@ -77,6 +77,12 @@ impl Boats {
     }
 }
 
+/// How far a velocity `v` in a frame with axes `cols` (x, y, z columns) carries an object in `dt` seconds, in the
+/// world.
+pub fn displacement(cols: &[[f32; 3]; 3], v: [f32; 3], dt: f32) -> [f32; 3] {
+    core::array::from_fn(|i| (cols[0][i] * v[0] + cols[1][i] * v[1] + cols[2][i] * v[2]) * dt)
+}
+
 fn vel(world: &World, h: Handle) -> Option<[f32; 3]> {
     world.options(h)?.vec3(VELOCITY)
 }
@@ -102,12 +108,7 @@ impl Boats {
                 continue;
             }
             // Its own frame (x forward, y sideways, z up), which turns with its owner.
-            let r = m.cols;
-            let d = [
-                (r[0][0] * v[0] + r[1][0] * v[1] + r[2][0] * v[2]) * dt,
-                (r[0][1] * v[0] + r[1][1] * v[1] + r[2][1] * v[2]) * dt,
-                (r[0][2] * v[0] + r[1][2] * v[1] + r[2][2] * v[2]) * dt,
-            ];
+            let d = displacement(&m.cols, v, dt);
             let mut to = m;
             to.t = [m.t[0] + d[0], m.t[1] + d[1], m.t[2] + d[2]];
             world.set_world_transform(h, to);
@@ -137,5 +138,19 @@ impl Boats {
             }
         }
         self.jumps.retain(|j| j.1 < JUMP_TIME);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn velocity_moves_in_the_boats_own_frame() {
+        // A boat turned a quarter (its x along the world's −y): sideways (its y) is the world's +x.
+        let cols = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let d = displacement(&cols, [0.0, 600.0, -60.0], 0.5);
+        assert_eq!(d, [300.0, 0.0, -30.0]);
+        assert_eq!(displacement(&cols, [0.0; 3], 1.0), [0.0; 3]);
     }
 }

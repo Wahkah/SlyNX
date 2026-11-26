@@ -25,8 +25,14 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9 (GPL-3.0; facts only), the symbol map for the class loaders
     used_for: which classes share a loader layout (cross-check only)
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/interact.cpp, jt.cpp (the Circle-button choice, interaction kind 8) (2026-11-26)
+    used_for: class 27 as the crawl space (section 9) [R]
+  - kind: disc
+    what: SCUS-97316 row 4 (`1_nightclub/03_0x03e`) walked 2026-11-26 (2,965 bodies, 0 failures); crawl space 124027, volume 133043 and their modules in `f_nightclub_disco_rig`
+    used_for: section 9's class-27 example [D]
 reviewed_by: pending
-date: 2026-11-14
+date: 2026-11-26
 ---
 
 # Sly 2 interactables
@@ -352,7 +358,17 @@ the jump would take at most 1.25 s, otherwise by moving it there at once with a 
 ## 9. Other classes
 
 - **Class 27** (38 records, one per level rig on average): a volume whose only data is option 1182, an object ID (all
-  38), and option 1189 on 3 [D]. Its role is not established.
+  38), and option 1189 on 3 [D]. **It is a crawl space** (added 2026-11-26) [R unless marked]:
+  - **Entering.** When the player presses Circle, the Circle-button choice goes through the tracked targets within
+    250 units. A class-27 volume (or a derived class) starts **interaction kind 8, the crawl**.
+  - **Event 5.** The crawl starts in state 7 (crouching in). Entering that state stops the character, plays the
+    crouch-in clip and raises **script event 5** on the volume. That also broadcasts task event 26 with the volume.
+  - **Crawling.** In the crawl the stick moves the character forward, back and sideways at the crawl clips' speeds.
+  - **Event 6.** The crawl ends when the character is no longer covered and has room to stand: state 8, standing up.
+    That state raises **script event 6** on the volume (task event 27).
+  - So events 5 and 6 come from the player's own crawl, not from entering the shape or a timer.
+  - Example (row 4, `f_nightclub_disco_rig`) [D]: crawl space 124027's module 9 adds volume 133043 on event 5 and
+    removes it on event 6. The volume therefore exists only while Sly is crawling there (missions.md 4.3).
 - **Class 22** (13 records): plain volumes with no options [D]; read by scripts as shapes (a script asks whether a point
   is inside) [R].
 - **Class 9** (8 records in 3 worlds): climbing surfaces Sly climbs on (a dedicated state, [characters.md](characters.md))

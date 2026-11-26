@@ -557,9 +557,14 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let (build, lighting, glyphs, strings, set, context, grid_files) = {
             let fw = formats_sly3::World::parse_with(&bytes, &disc.options, disc.tangent_multipliers)
                 .map_err(|e| format!("{label}: {e}"))?;
-            // The option set from the task progress (conditions.md 3), the first one on a fresh load.
+            // The option set (conditions.md 3.1): from the job and checkpoint-task keys carried from the previous
+            // world (the checkpoint task is forgotten when its job ends, `Jobs::end_job`), else from the task
+            // progress; the first one on a fresh load.
             let progress = self.jobs.as_ref().map(|j| &j.progress).or(self.progress.as_ref());
-            let set = flow::choose_option_set(&fw.option_sets, progress);
+            let carry = self.jobs.as_ref().map(|j| j.carry());
+            let job = carry.map(|c| c.job).filter(|&id| id != 0);
+            let checkpoint = carry.map(|c| c.checkpoint).filter(|&id| id != 0);
+            let set = flow::choose_option_set(&fw.option_sets, progress, job, checkpoint);
             let context = fw.context_for_set(Some(slot as i16), set);
             // Sly 3 hook (2D layer): the fonts (read once) and the world's strings.
             let glyphs = if self.ui.font.is_none() { layer::font_glyphs(&fw) } else { None };

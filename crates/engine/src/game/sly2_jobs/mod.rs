@@ -876,6 +876,10 @@ impl Jobs {
         self.progress.set_named(&["suck_history", "mission_1"], None, SaveValue::Float(h[0]));
         self.progress.set_named(&["suck_history", "mission_0"], None, SaveValue::Float(self.help));
         self.job = None;
+        // Sly 3 (sly3/conditions.md 3.1): the remembered checkpoint task is forgotten when its job ends.
+        if self.sly3_rules && self.checkpoint.is_some_and(|t| self.graph.tasks[t].job == Some(j)) {
+            self.checkpoint = None;
+        }
         self.timer = 0.0;
         self.help = self.history_mean();
         self.effects.push(Effect::Script { slot: def.slot, event: script_event::END, task_event: None });

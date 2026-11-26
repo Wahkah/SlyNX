@@ -71,14 +71,49 @@ Before the sets, every world holds two tables, the same in every world of an epi
   15 ×29); the training world 20 (all 12).
   - Example (Kaine Island): tasks 1798 to 1803 (the prologue) → 12; tasks 1841 … → 14; tasks 1844 … → 15.
 
-*Interpretation* [I]: when a world loads with progress, the game looks up the tasks of table B whose saved state
+*Interpretation* (superseded by 3.1) [I]: when a world loads with progress, the game looks up the tasks of table B whose saved state
 (the path) says they are reached, and takes the condition of the latest one. If the world has a set with that ID it
 loads that set; otherwise it loads its first set. Table A gives the condition for an object (a job or a task)
 outside the task chain. A fresh load with no job or task uses the first set [R]. The exact choice (which entry wins,
 and how "reached" is tested) needs the loader's code; open question 1.
 
+### 3.1 The selection rule [X: the option-set loader `0x001500F0`, from `0x001501DC`]
+
+The loader reads both tables, then chooses a condition c in this order:
+
+1. **The current job.** If the game's job key (+0x1498, the OID of the current job carried across world loads;
+   saving.md 3) is not −1, table A is searched in order for that OID. The first match gives c.
+2. **The checkpoint task.** If there is no match and the checkpoint-task key (+0x14A0, not the active-task key +0x149C) is not −1, table B is
+   searched in order for an entry whose task OID is that task. The first match gives c.
+3. **Saved progress.** Otherwise every table-B entry is read in order, using its save path `t…/state`
+   (`0x002BC010`). Each entry whose saved value is **above 0** sets c to its condition, so **the last such entry
+   in table order wins**. A saved state above 0 is available (1), done (2) or closed (3). Locked tasks (0), and
+   tasks never written to the save, do not count.
+4. A result of **12 is treated as none (−1)**.
+
+The world then loads the option set whose ID is c. When no set has that ID (none included), it loads the **first
+set**. The chosen ID becomes the world's condition (`0x0036BC20`), and the set's options are applied. Option
+1029 adds the extra conditions.
+
+**The checkpoint-task key +0x14A0** [X] is written by `0x0018AAE0`:
+- when a task becomes current and remembers its checkpoint (`0x00188658`), the key becomes that task;
+- by the queued-task start (`0x00189E70`, which also clears the job and task keys);
+- and it is **cleared when the job that owns the checkpoint task ends** (`0x00186610`, at `0x0018665C`).
+
+So after m1_canal_chase completes, its checkpoint task (2350) is cleared with the job. +0x14A0 is −1, and step
+3 decides. Carrying 2350 into the next load instead gives condition 12 and set 22, which is wrong.
+
+The choice is made once, at world load, from the carried keys and the saved states. On a new game no table-B
+task has a saved state above 0, so v_ext takes set 22.
+
+**Example** (v_ext, table B in disc order): the m1 tasks map to 12, 1811 to 20, and **1826 `t1_chalktalk2`**,
+2141 `t1_turf_war_intro` and later tasks to 23. When v_ext loads while 1826 is current, its saved state is 1,
+which counts. If no later table-B task has a non-zero state, 1826's entry is the last that counts, so c = 23 and
+set 23 loads (extra conditions 15 and 17), so guard 139253 (condition 15) is there. Requiring a state of 2 or 3
+picks set 22 instead and misses it.
+
 ## 4. Open questions
 
-1. The exact selection rule (section 3) and what reads table A.
+1. (Settled: section 3.1.)
 2. Options 1021 and 1029.
 3. What the condition IDs mean in play.

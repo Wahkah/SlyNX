@@ -435,8 +435,17 @@ fn the_take_out_script_runs() {
     // In the safe house, Cross on the first state (Bentley): script 44602, which starts 2061 with Bentley.
     assert!(s.enter_safe_house());
     let press = |b: platform_api::Buttons| FrameInput { pressed: b.0, buttons: b.0, ..Default::default() };
+    // Whether 2083 was ever the current task, checked after every frame from the press on.
+    let current_2083 = |s: &Session| {
+        let j = s.jobs.as_ref().unwrap();
+        j.current.map(|t| j.graph.tasks[t].id) == Some(2083)
+    };
     s.update(&press(platform_api::Buttons::B), 1.0 / 60.0);
-    frames(&mut s, 2);
+    let mut was_current = current_2083(&s);
+    for _ in 0..2 {
+        frames(&mut s, 1);
+        was_current |= current_2083(&s);
+    }
     assert!(s.scripts.is_running(2061), "the take-out script started");
     // safehouse-and-shop.md 1: it sets four tasks' states, then (after a 0.5 s wait) removes the door's use point...
     for _ in 0..120 {
@@ -444,7 +453,9 @@ fn the_take_out_script_runs() {
             break;
         }
         frames(&mut s, 1);
+        was_current |= current_2083(&s);
     }
+    assert!(was_current, "task 2083 was made current during the take-out");
     assert_eq!(use_point(&s), Some(false), "the use point is removed while the character walks out");
     let j = s.jobs.as_ref().unwrap();
     let state = |id: i32| j.graph.task_ids.get(&id).map(|&t| j.states[t]);
@@ -712,4 +723,58 @@ fn machines_come_in_through_their_scripts() {
         eprintln!("slot {slot}: machine class {class} driven {}", driven.is_some());
         assert!(driven.is_some(), "slot {slot}: script {script} hands over the machine");
     }
+}
+
+/// The canal chase's boat (missions.md 4.1a) under its own script (module 330 on rig 139806): steering clamps at
+/// ±1000 and decays by 0.89 a frame once the stick is let go; firing heats the gun by 3 a shot up to 100, where it
+/// overheats, and the heat cools by 0.75 a frame once fire is let go, the overheat clearing below 80.
+#[test]
+fn the_canal_boat_steers_and_heats() {
+    let Some(path) = require_disc(Game::Sly3, "the_canal_boat_steers_and_heats") else { return };
+    let mut s = session(&path);
+    s.start_episode(3, &EpisodeProgress::default()).unwrap();
+    s.load_slot(s.find_world("v_canal").unwrap()).unwrap();
+    frames(&mut s, 3);
+    assert!(s.start_task("t1_canal_chase_minigame_intro"));
+    for _ in 0..600 {
+        if s.game.as_ref().unwrap().world.shared.driving.is_some() && !s.script_paused {
+            break;
+        }
+        frames(&mut s, 1);
+    }
+    assert!(s.game.as_ref().unwrap().world.shared.driving.is_some(), "control handed to the boat");
+    let var = |s: &Session, sym: u32| {
+        let g = s.game.as_ref().unwrap();
+        let w = &g.world;
+        let boat = w.find_sly3_id(139806, None).and_then(|p| w.children(p).find(|&c| w.module(c) >= 0)).unwrap();
+        g.scripts().and_then(|i| i.lookup_for(boat.to_script(), sym))
+    };
+    let num = |v: Option<script::Value>| v.and_then(|v| v.as_f32()).unwrap_or(f32::NAN);
+    let (sideways, heat, hot) = (6487, 6499, 4450);
+    // Steering: the stick full right for a second reaches the clamp.
+    let right = FrameInput { left: [1.0, 0.0], ..Default::default() };
+    for _ in 0..60 {
+        s.update(&right, 1.0 / 60.0);
+    }
+    assert_eq!(num(var(&s, sideways)), -1000.0, "sideways clamped");
+    let before = num(var(&s, sideways));
+    frames(&mut s, 1);
+    assert!((num(var(&s, sideways)) - before * 0.89).abs() < 0.5, "decays by 0.89 a frame");
+    // Firing (Square held): the heat rises to 100 and overheats.
+    let fire = FrameInput { buttons: platform_api::Buttons::Y.0, ..Default::default() };
+    for _ in 0..600 {
+        s.update(&fire, 1.0 / 60.0);
+        if var(&s, hot).is_some_and(|v| matches!(v, script::Value::Bool(true))) {
+            break;
+        }
+    }
+    assert_eq!(num(var(&s, heat)), 100.0, "the heat caps at 100");
+    assert!(matches!(var(&s, hot), Some(script::Value::Bool(true))), "overheated");
+    // Let go: it cools by 0.75 a frame, and the overheat clears once below 80.
+    frames(&mut s, 1);
+    assert!((num(var(&s, heat)) - 99.25).abs() < 0.01, "cools by 0.75 a frame");
+    // 99.25 − 0.75 × 26 = 79.75.
+    frames(&mut s, 26);
+    assert!(num(var(&s, heat)) < 80.0);
+    assert!(matches!(var(&s, hot), Some(script::Value::Bool(false))), "the overheat clears below 80");
 }

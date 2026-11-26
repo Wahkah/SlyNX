@@ -148,19 +148,32 @@ pub fn episode_start(first: &[i32; 9], episode: usize, p: &EpisodeProgress) -> O
 
 // ---- Option sets (conditions.md) --------------------------------------------------------------------------------
 
-/// The option set a world loads with (conditions.md 3, interpretation): the condition of the last table-B entry
-/// whose task is reached, when the world has a set with that ID; else the first set (also with no progress: a fresh
-/// load). "Reached" is read as done (saved `state` 2 or 3): a new game makes many tasks available (state 1) and
-/// still loads every world's first set. Table A is not read (open question 1).
-pub fn choose_option_set(sets: &formats_sly3::world::OptionSets, progress: Option<&save::sly2::Progress>) -> usize {
-    let Some(p) = progress else { return 0 };
-    let reached = |path: &[u16]| p.get(path, None).is_some_and(|v| v.as_i32() >= 2);
-    sets.table_b
-        .iter()
-        .rev()
-        .find(|(path, _, _)| reached(path))
-        .and_then(|&(_, _, condition)| sets.ids.iter().position(|&id| id == condition as i32))
-        .unwrap_or(0)
+/// The condition that means none (conditions.md 3.1).
+pub const NO_CONDITION: u32 = 12;
+
+/// The option set a world loads with (conditions.md 3.1): the condition is the job key's first table-A entry when
+/// a job is set; else the checkpoint task's first table-B entry when one is set; else the last table-B entry whose
+/// task's saved state is above 0 (available, done or closed). Condition 12 means none. The set with that ID loads,
+/// else the first set (also with no progress: a fresh load).
+pub fn choose_option_set(
+    sets: &formats_sly3::world::OptionSets,
+    progress: Option<&save::sly2::Progress>,
+    job: Option<i32>,
+    checkpoint: Option<i32>,
+) -> usize {
+    let by_job = job.and_then(|j| sets.table_a.iter().find(|&&(o, _)| o as i32 == j)).map(|&(_, c)| c);
+    let by_checkpoint =
+        || checkpoint.and_then(|t| sets.table_b.iter().find(|(_, task, _)| *task as i32 == t)).map(|&(_, _, c)| c);
+    let by_states = || {
+        let p = progress?;
+        sets.table_b
+            .iter()
+            .rev()
+            .find(|(path, _, _)| p.get(path, None).is_some_and(|v| v.as_i32() > 0))
+            .map(|&(_, _, c)| c)
+    };
+    let c = by_job.or_else(by_checkpoint).or_else(by_states).filter(|&c| c != NO_CONDITION);
+    c.and_then(|c| sets.ids.iter().position(|&id| id == c as i32)).unwrap_or(0)
 }
 
 // ---- Typed-argument helpers -------------------------------------------------------------------------------------
