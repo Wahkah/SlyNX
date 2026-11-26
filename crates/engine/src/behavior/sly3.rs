@@ -257,7 +257,9 @@ pub fn for_class(world: &World, h: Handle) -> Behavior {
         Some(c @ class::COIN..=class::LOOT) => sly2_pickups::Sly2Pickup::new(world, h, c - 12)
             .map_or(Behavior::None, |p| Behavior::Sly2Pickup(Box::new(p))),
         Some(class::BARRIER) => Behavior::Custom(Box::new(interactables::Barrier::new(world, h))),
-        Some(projectile::CLASS) => Behavior::Custom(Box::new(projectile::Projectile::default())),
+        Some(projectile::CLASS..=projectile::LAST_CLASS) => {
+            Behavior::Custom(Box::new(projectile::Projectile::default()))
+        }
         Some(class::WATER) => Behavior::Sly2Water(Box::default()),
         Some(class::EMITTER) => Behavior::Sly2Emitter(Box::default()),
         Some(class::GROUPER | class::EXPLOSION_PART | class::EXPLOSION) => Behavior::Sly2Explosion(Box::default()),

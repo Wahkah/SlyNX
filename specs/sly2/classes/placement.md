@@ -25,7 +25,7 @@ sources:
   - kind: reference-project
     what: sly2-decomp @ 33e2bab9, nonmatching and src/new_1c90d0 (lease routines)
     used_for: what the lease routines do (section 2.1) [R]
-date: 2026-11-21
+date: 2026-11-26
 ---
 
 # Prefab placement layout (Sly 2)
@@ -117,6 +117,8 @@ it and 1024 unlocks it.
 2. For each object of the copy:
    - sets its parent and matrix to the placement's;
    - **adds it to the world**, through the same virtual slot (`0x40`) that script ID 39 uses (call at `0x001CB178`);
+   - gives it the placement's activation radius (option 13, `0x001A6C48`) and the placement's zone mask
+     (`0x001CB4E0`, unless the object has option 32) [D];
    - raises script event 14 on the placement and on the object.
 
 So a script that calls 1021 gets a copy that is already in the world at the placement's position, whatever the

@@ -96,6 +96,22 @@ impl Sly2Pickup {
     }
 }
 
+/// A collected task item asks its task for its state (pickpocket-and-pickups.md 5): option 906 names the task and
+/// 898 the state (2, done), on the item or on the placement whose copy it is.
+pub fn task_item_request(world: &mut World, h: Handle) {
+    let read = |o: Option<&crate::object::OptionStore>| {
+        o.and_then(|o| Some((o.i32(TASK_ITEM_TASK)?, o.i32(TASK_ITEM_STATE).unwrap_or(2))))
+    };
+    let request = read(world.options(h)).or_else(|| read(world.parent(h).and_then(|p| world.options(p))));
+    if let Some(r) = request {
+        world.shared.task_requests.push(r);
+    }
+}
+
+/// See [`task_item_request`].
+const TASK_ITEM_TASK: u16 = 906;
+const TASK_ITEM_STATE: u16 = 898;
+
 impl ClassBehavior for Sly2Pickup {
     fn ticks(&self) -> bool {
         !self.collected
@@ -146,7 +162,10 @@ impl ClassBehavior for Sly2Pickup {
             }
             Kind::Coin => cx.world.shared.picked.push(Entry::Coins(1)),
             Kind::Loot(k) => cx.world.shared.picked.push(Entry::Prize(k)),
-            Kind::TaskItem => cx.world.shared.task_items.push(cx.me),
+            Kind::TaskItem => {
+                cx.world.shared.task_items.push(cx.me);
+                task_item_request(cx.world, cx.me);
+            }
             Kind::Clue(n) => {
                 if n < 64 {
                     cx.progress.level(cx.world.info.id).bottles |= 1 << n;

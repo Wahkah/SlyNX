@@ -22,6 +22,10 @@
 //!   knocked out are the crew's targets, and the crew's attacks reach them as Sly 2's gang's do
 //!   (`crate::sly2::gang`): a punch or crossbow swing on its target, an air attack, a flop landing or a dart around
 //!   the point. The guards' strikes on the crew are not taken yet.
+//! - **Carmelita** (missions.md 4.1a, the turf-war battles: player 0 is handed a class-60 Carmelita copy). Stand-in
+//!   [I] (her controls and movement are not traced): while she is driven, the played member takes the real pad and
+//!   moves as usual; it starts where she stands, and every frame its position and heading are written into her
+//!   object, which is then `World::player` (the camera follows her). Her own clips are not played.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -48,6 +52,8 @@ fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
 pub const DEFAULT_ARRIVAL: i32 = 424;
 /// The checkpoint class.
 pub const CHECKPOINT_CLASS: i16 = 40;
+/// Carmelita's class (a guard-family playable character, missions.md 4.1a).
+pub const CARMELITA_CLASS: i16 = 60;
 /// Where the other core members stand beside the player (offsets along the checkpoint's left axis), and how high
 /// above it everyone drops from.
 const SIDE_OFFSET: f32 = 120.0;
@@ -133,6 +139,8 @@ pub struct CrewPlayer {
     /// Sly 3 hook (gadget grids): the item table in the gang's form (`Sly3ItemTable::to_item_table`), when the
     /// executable gave one; the crew's slots and ownership read it.
     pub items: Option<engine::gang::ItemTable>,
+    /// The Carmelita copy being driven (module notes), once the played member stands in for her.
+    pub carmelita: Option<Handle>,
 }
 
 impl CrewPlayer {
@@ -147,6 +155,7 @@ impl CrewPlayer {
             handles: [None; 3],
             clips: Default::default(), // Sly 3 pose hook
             items: None,
+            carmelita: None,
         }
     }
 
@@ -265,10 +274,23 @@ impl PlayerSystem for CrewPlayer {
     }
 
     fn decide(&mut self, world: &mut World, input: &FrameInput, step: &StepInfo, _collision: &dyn CollisionQueries) {
-        // Vehicles hook: while the player drives a machine the crew gets an idle pad.
+        // Vehicles hook: while the player drives a machine the crew gets an idle pad; Carmelita is played by the
+        // current member (module notes).
         let idle = FrameInput::default();
-        let input = if world.shared.driving.is_some() { &idle } else { input };
+        let carmelita = world.shared.driving.filter(|&d| world.class(d) == Some(CARMELITA_CLASS));
+        let input = if world.shared.driving.is_some() && carmelita.is_none() { &idle } else { input };
         let (Some(crew), Some(cw)) = (self.crew.as_mut(), self.collision.as_ref()) else { return };
+        if carmelita != self.carmelita {
+            self.carmelita = carmelita;
+            let who = crew.gang.player;
+            if let (Some(h), Some(c)) = (carmelita, crew.gang.get_mut(who))
+                && let Some(t) = world.world_transform(h)
+            {
+                c.position = t.t;
+                c.yaw = yaw_of(&t);
+                c.leave_ground();
+            }
+        }
         // Bouncers' launches (alarms-sensors.md 5): the launched member leaves the ground at the launch velocity.
         for l in core::mem::take(&mut world.shared.launches) {
             let Some(k) = self.handles.iter().position(|&h| h == Some(l.who)) else { continue };
@@ -367,6 +389,13 @@ impl PlayerSystem for CrewPlayer {
             self.clips.drive(world, &crew.gang.members, &self.handles, &events, step.game_dt);
         }
         self.write_back(world);
+        // Carmelita stands where the played member is.
+        if let (Some(h), Some(c)) = (self.carmelita, self.crew.as_ref().and_then(|crew| crew.gang.current())) {
+            let (s, co) = (engine::math::sin(c.yaw), engine::math::cos(c.yaw));
+            world
+                .set_world_transform(h, Affine { cols: [[co, s, 0.0], [-s, co, 0.0], [0.0, 0.0, 1.0]], t: c.position });
+            world.player = Some(h);
+        }
         // Gang hook: R3's binocucom on the played member (camera.md 6).
         if let Some(me) = player
             && events.iter().any(|(_, e)| matches!(e, engine::gang::GangEvent::Binocucom))

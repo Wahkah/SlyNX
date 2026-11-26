@@ -40,6 +40,7 @@ use render::{Backend, Camera, FrameStats, RenderError, Renderer};
 use crate::sly2::level::{StaticLevel, upload_stage};
 
 pub mod boat; // Sly 3 hook: the canal chase's boat (movement by option 194, jumps).
+pub mod carmelita; // Sly 3 hook: Carmelita played in the turf-war battles (health, the shot stand-in).
 pub mod clips; // Sly 3 hook: clips' add and remove events (knock-out clips).
 pub mod commands;
 pub mod crew;
@@ -157,12 +158,17 @@ fn bomb_press(bomb: &mut Option<engine::object::Handle>, world: &mut World) {
 
 /// Player 0's control handed to object `h` (command 0x13, the world object's method 983; characters.md 6): a crew
 /// member is switched to, the safe house (class 69) is entered, anything else is driven (and brought into the world
-/// with what holds it).
+/// with what holds it). Control handed to a crew member or the safe house ends any driving (player 0 controls one
+/// object), as after Carmelita's turf-war battles.
 fn control_to(world: &mut World, h: engine::object::Handle) -> Option<SessionAction> {
     match world.class(h) {
-        Some(safehouse::SAFEHOUSE_CLASS) => return Some(SessionAction::SafeHouse),
+        Some(safehouse::SAFEHOUSE_CLASS) => {
+            world.shared.driving = None;
+            return Some(SessionAction::SafeHouse);
+        }
         c => {
             if let Some(m) = c.and_then(engine::gang::sly3::Member::from_class).filter(|m| m.core().is_some()) {
+                world.shared.driving = None;
                 return Some(SessionAction::TakeOut(m));
             }
         }
@@ -398,6 +404,14 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     pub last_line: Option<i32>,
     /// Sly 3 hook (gadgets.md 3, 7): Bentley's planted bomb (class 114, `bentley_mine`), while one is planted.
     pub bomb: Option<engine::object::Handle>,
+    /// Sly 3 hook (missions.md 4.1a): seconds until Carmelita's shot stand-in can fire again (`carmelita`).
+    pub shot_cooldown: f32,
+    /// Sly 3 hook (`carmelita`): a turf-war battle's start hook was sent this frame.
+    battle_starting: bool,
+    /// Sly 3 hook (`carmelita`): a turf-war battle runs (from its start hook to its battle-over alarm).
+    battle_on: bool,
+    /// Sly 3 hook (`carmelita`): while Carmelita is driven, the pausing scripts whose holds do not hold her pad.
+    pad_free: Option<alloc::collections::BTreeSet<i32>>,
     paused_by: alloc::collections::BTreeSet<i32>,
     /// The world's mission waypoints (class 120) and, by base class, the classes deriving from it.
     pub waypoints: Vec<waypoints::Waypoint>,
@@ -486,6 +500,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             hint: None,
             last_line: None,
             bomb: None,
+            shot_cooldown: 0.0,
+            battle_starting: false,
+            battle_on: false,
+            pad_free: None,
             paused_by: alloc::collections::BTreeSet::new(),
             waypoints: Vec::new(),
             derived: alloc::collections::BTreeMap::new(),
@@ -956,6 +974,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             let idle = FrameInput::default();
             let input = if self.photo.is_some() { &idle } else { input };
             g.frame(input, measured);
+            let battle_started = core::mem::take(&mut self.battle_starting);
+            if battle_started {
+                carmelita::fill_health(&mut g.world);
+            }
             // World-start step 3 (missions.md 4.1a), once the frame has run the restore's events: the queued requests
             // run in mode 1, and the events they raise run while the mode still reads 1, until nothing more is
             // queued (at most 16 rounds); then the "current when available" pass.
@@ -984,6 +1006,8 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             {
                 bomb_press(&mut self.bomb, &mut g.world);
             }
+            // Stand-in (missions.md 4.1a: her fire button, rate, speed and damage are not traced): Carmelita's shot.
+            carmelita::update(&mut g.world, input.pressed, measured, &mut self.shot_cooldown);
             // Sly 3 hook (use points): the use button (Circle) uses the nearest active point within reach. Working
             // choice (the candidate search is not traced): nearest horizontally, reach as `UsePoint::user_of` has it.
             if input.pressed & platform_api::Buttons::A.0 != 0
@@ -1083,11 +1107,20 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 g.world.shared.sly3_unhittable.push(h);
                 g.world.raise(h, boat::DEFEAT_EVENT, Vec::new());
             }
-            // Sly 3 hook (guards.md 4a): the guards' command lists; their alarms are the command scripts'.
+            // Sly 3 hook (guards.md 4a): the guards' command lists; their alarms are the command scripts'. Lists given
+            // and stopped by scripts (461, 462 on a guard) first.
+            for (guard, list) in core::mem::take(&mut g.world.shared.sly3_guard_commands) {
+                self.guards.retain(|r| r.guard != guard);
+                if let Some(run) = list.and_then(|l| guards::GuardRun::with(&g.world, guard, l)) {
+                    self.guards.push(run);
+                }
+            }
             for r in &mut self.guards {
                 r.update(measured, &mut g.world, &mut self.scripts.alarms);
             }
             self.guards.retain(|r| !r.done());
+            let runs = self.guards.iter().filter_map(|r| Some((g.world.slot(r.guard)?, r.list))).collect();
+            g.world.shared.sly3_guard_runs = runs;
             if let Some(j) = self.jobs.as_mut() {
                 jobs::step(j, &mut g.world, measured, touched);
                 // Vehicles hook: a job's machine is handed to the player while the job runs.
@@ -1108,9 +1141,19 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 self.scripts.stop(script);
             }
             // Alarms scripts set on command scripts (method 735) and runner contexts modules wrote (script ID 741).
-            for (_, alarm) in core::mem::take(&mut g.world.shared.sly3_alarms) {
-                self.scripts.alarms.insert(alarm);
+            for (script, alarm) in core::mem::take(&mut g.world.shared.sly3_alarms) {
+                // Stand-in (`carmelita`): the battle-over alarm counts only while a battle runs.
+                if alarm == carmelita::END_ALARM {
+                    if !self.battle_on {
+                        continue;
+                    }
+                    self.battle_on = false;
+                }
+                self.scripts.set_alarm_of(script, alarm);
             }
+            // The battle runs from the frame after its start hook's event (alarms set during that event's frame, the
+            // intro's wave tick before the start among them, are the gap's).
+            self.battle_on |= battle_started;
             for (script, with) in core::mem::take(&mut g.world.shared.sly3_context_writes) {
                 if let Some(r) = self.scripts.running.iter_mut().find(|r| r.oid == script) {
                     r.context = with;
@@ -1166,6 +1209,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     }
                     commands::Request::ClearSubtitle => lines.push(None),
                     commands::Request::Screen { screen, on } => screens.push((*screen, *on)),
+                    // Stand-in (`carmelita`): a turf-war battle's start fills Carmelita's health once its hook has
+                    // run (next frame, after the events queued before it).
+                    commands::Request::Module { value, .. } if *value == carmelita::START_HOOK => {
+                        self.battle_starting = true;
+                    }
                     _ => {}
                 }
                 match apply_request(
@@ -1225,7 +1273,16 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             // A script's pause lasts while it runs.
             let scripts = &self.scripts;
             self.paused_by.retain(|o| scripts.is_running(*o));
-            self.script_paused = !self.paused_by.is_empty();
+            // Stand-in [I] (`carmelita`; open: what 2142's hold `0x1F` (1, 3) holds, which is never released while
+            // the turf-war battles are played): the holds taken before Carmelita was handed control do not hold her
+            // pad.
+            self.pad_free = match (carmelita::driven(&g.world), self.pad_free.take()) {
+                (Some(_), Some(free)) => Some(free),
+                (Some(_), None) => Some(self.paused_by.clone()),
+                (None, _) => None,
+            };
+            let free = self.pad_free.as_ref();
+            self.script_paused = self.paused_by.iter().any(|o| !free.is_some_and(|f| f.contains(o)));
             // The current task's script (option 1408) starts when the task becomes current.
             if let Some(j) = self.jobs.as_mut() {
                 if j.current != self.last_task

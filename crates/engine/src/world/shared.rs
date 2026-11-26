@@ -241,6 +241,22 @@ pub struct Shared {
     /// Sly 3 hook (job system): each task's state by object ID, mirrored by the session for scripts (task option
     /// 1415, missions.md 4.1a).
     pub sly3_task_states: BTreeMap<i32, i8>,
+    /// Sly 3 hook (job system): the slots of the current job and the current task, mirrored by the session for
+    /// game operations 104 and 105 (Sly 2's 100 and 101, scripts.md 4).
+    pub sly3_current: [Option<u32>; 2],
+    /// Sly 3 hook (placement instances, missions.md 4.1a): instances by slot (instance → placement) whose
+    /// placement no longer holds them as its copy root: taken from a pool (1207) or re-parented away (script ID 35),
+    /// so the placement's take still finds its instance and the instance's 33 its placement.
+    pub sly3_instance_of: BTreeMap<u32, u32>,
+    /// Sly 3 hook: instances given back to their placement (1210 / 1211) and not taken again, by slot: their 33 (the
+    /// placement) is none.
+    pub sly3_given_back: alloc::collections::BTreeSet<u32>,
+    /// Sly 3 hook (guard command lists from scripts, script IDs 461 and 462 on a guard): (guard, list) given, or
+    /// (guard, None) to stop its list, for the session's list runner (`game::sly3::guards`).
+    pub sly3_guard_commands: Vec<(Handle, Option<Handle>)>,
+    /// Sly 3 hook: the guard command lists running, by (guard slot, list ID), mirrored by the session for script ID
+    /// 463 on a guard.
+    pub sly3_guard_runs: alloc::collections::BTreeSet<(u32, i32)>,
     /// Sly 3 hook (missions.md 4.1a): whether the tasks are in mode 1 (the restore and world-start step 2, until step
     /// 3 runs); scripts read a task's mode as script ID 1280 (stream 1411): 1 then, else 0 (live play).
     pub sly3_restore_mode: bool,
@@ -399,6 +415,11 @@ impl Default for Shared {
             task_calls: Vec::new(),
             sly3_holds: 0,
             sly3_task_states: BTreeMap::new(),
+            sly3_current: [None; 2],
+            sly3_instance_of: BTreeMap::new(),
+            sly3_given_back: alloc::collections::BTreeSet::new(),
+            sly3_guard_commands: Vec::new(),
+            sly3_guard_runs: alloc::collections::BTreeSet::new(),
             sly3_restore_mode: false,
             sly3_script_starts: Vec::new(),
             sly3_script_stops: Vec::new(),

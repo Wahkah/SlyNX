@@ -1987,6 +1987,33 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
     133043, which asks for 1813);
   - the route uses an interaction spot of a derived class whose task requests (1076) name the task (m1_bug's
     17366 asks for 1815), so 1814 is done by play;
+  - the rest of episode 1 (`SLYNX_SLY2_JOBS=11`, through `m1_heist`): `m1_brawl`, `m1_moulin_power` and `m1_disco`
+    play through. Script ID 28 (option 15) is the object's own ID, and 29 (option 16) the ID of the placement whose
+    copy's root it is, else −1 (scripts.md 5; the moulin's fan sequences find the sequence they signal by it). A
+    sequence's signal to sequence −1 goes to itself [I]. A placement's copy root is recognised by the root it was
+    loaded with (`Sly2Level::placed`) even when their IDs differ: for leases, the lease methods' fallback class,
+    and command lists (`sly2_commands::placed_root`; m1_neela's 8436 has Neyla, 8438). Lease grades refined: a
+    non-fixed placement holds its copy from load only while it is in the world, and grade 2 is a copy flagged in the
+    world but not active;
+  - task items (pickpocket-and-pickups.md 5): a collected one now asks its task for its state (option 906 the task,
+    898 the state, 2 by default; on the item or on its placement), which nothing did before; a guard whose option
+    309 names a task item holds it as its pocket's last entry (`Sly2Guard::pocket_item`, entry kind −1), and a
+    pickpocket collects it;
+  - an escort job (guards.md 4.4; script ID 970, stream 1117, `sly2_commands::start_escort`): with the player inside
+    the escort's view volume it runs its list, outside it stops and faces the player, and out of it for longer than
+    option 1121 it gives up with task event 51. Stand-ins: the view volume serves as the second volume, and the
+    escort walks at the path speed (options 316, 1119 and 1120 are not read yet). An escort does not react to the
+    player;
+  - route plays added: leaving by an exit to the current task's row when it is not this world's; the walk to the
+    marker of a task the route came to the world for; the escort follow (in the escort's view volume, on its level,
+    at least 250 from it); a pickpocket of the guard holding the task's item (behind it, R1 held, Circle); volumes
+    whose script starts (first) or signals a sequence that sets the task; fights for a task whose script counts
+    knock-outs (task events 23 and 24). The route's script search ignores a number in a property position (the
+    second argument of operations 108, 109 and 111);
+  - still forced in `m1_neela` and `m1_heist` (handed over): Neyla's chase 1857 (the lease does not yet apply the
+    placement's zone mask to the copy, so she stays inactive), the rendezvous 1902 (volume 124131 does not see Sly),
+    the siege 1911 (fewer kills than counted), 1895 (Murray throwing Bentley at prop 123934), 1896 (the pipe-room
+    valves) and 1904 (Bentley entering 124142);
   - the route's toss: Murray waits on a floor 1,000 from the volume toward where the creature was loaded, for the
     rats that pursue him, or is put beside a free one on a floor within 2,000 of the volume; the nearest free one in
     reach he turns to and lifts, then he steers the aim onto the volume and throws; a toss lasts up to 20 s and holds
@@ -3002,7 +3029,44 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
             its hit handling. A module whose outer module answers event 1 raises it too.
           - A defeated enemy stops taking hits (stand-in [I]; whether it leaves the world is open). In the route the
             three go down between 935.0 and 976.8 s; 2347 and 2350 follow (979.3 s), which loads v_ext; chalk talk
-            2 (1826) plays and m1_turf_war begins at 2141 (1015.8 s; a 1,150 s run).
+            2 (1826) plays and m1_turf_war begins at 2141 (986.5 s with the game operations 104 / 105 below).
+      34. m1_turf_war's four battles (missions.md 4.1a; 2151 / 2155 / 2159 / 2163, scripts 2152 / 2156 / 2160 /
+          2164): each script gives player 0 Carmelita (the copy of pool placement 139252, class 60), sends hook 139345
+          (job 2139's 2653, start battle n) and loops on hook 139266 (2658, the wave tick) until alarm 139255.
+          - Game operations 104 and 105 are the current job and the current task (Sly 2's 100 and 101; they were Sly and
+            Bentley, a stand-in). The hooks call 2653 / 2658 on 104's object; 2658 sets the alarm on 105's script
+            (1308). The session mirrors the current job's and task's slots (`World::shared.sly3_current`).
+          - Placement methods [I where marked]: a search for a placement's ID finds its copy's root, which takes the
+            placement's options (Sly 3 fallback class 8, as Sly 2's lease methods). 1207 (stream 1283) takes the
+            instance: a free pooled copy, else the placement's own copy, also after it was re-parented away
+            (`World::shared.sly3_instance_of`). 1209 (1285) places it (into the world). 1210 / 1211 (1286 / 1287)
+            give it back [I]: out of the world, and its 33 is none. Script ID 33 (stream 19, value type 0x2008) is
+            an instance's placement [I]: 2658 keeps each enemy's custom properties (2665 to 2675) there and keeps
+            the enemies whose 33 is not none.
+          - Guard command-list methods [I] (not in the specs): 461 (stream 334) gives a guard a list (as `0x62`;
+            2146 at the spawn, 2147 at the defeat), 462 (335) stops it, 463 (336) is true once the list is done
+            (`World::shared.sly3_guard_commands` / `sly3_guard_runs`, run by `game::sly3::guards`).
+          - Alarms set on a named script (method 735) are that script's: only its waits see them, and they clear
+            when it ends (`commands::Scripts::set_alarm_of`); the four battle scripts all wait on 139255.
+          - Carmelita (`game::sly3::carmelita`, stand-ins [I]): the crew controller plays her (the current member
+            takes the pad, its position and heading are written into her, she is `World::player`); her health (940,
+            stream 938) is filled to her 939 (600) once a battle's start hook has run; Square fires her playable
+            shot (a pooled instance of her spawn point 6676, group 8464 class 91, now pooled: classes 89 to 92) every
+            0.25 s at 4,000 units/s with damage 20 and an aim assist (0.35 rad). The projectile behaviour now covers
+            classes 89 to 92; Carmelita's shots also hit guards, giving them script event 12 with a hit record whose
+            amount (124, stream 1648) is the shot's damage. The holds taken before she was handed control (the
+            intro script 2142's `0x1F` (1, 3), never released) do not hold her pad. The battle-over alarm counts
+            only from the frame after a battle's start hook to the alarm (2142 keeps sending the wave tick between
+            battles).
+          - Route: while Carmelita is driven it heads for no waypoint, turns her to the nearest enemy that is up
+            (state 0 to 2) and fires within 7,500 units. Battles 1 to 4 end at 1058.7, 1061.8, 1067.8 and 1071.5 s;
+            `t1_turf_war_complete` (2166) runs and m1_turf_war ends (1077.8 s). The route then stops: walking to the
+            next job's waypoint (`t1_ball_intro`, 140670) falls out of v_ext.
+          - Open (missions.md 4.1a): 2659 sets the hit's amount itself from the hitter's script ID 552 (its 44), which
+            is 0 on the shot, so a hit does no damage, and the enemies' 940 is 0 when they spawn (their 939 is 100),
+            so one hit defeats one. What holds 552 / 44 on Carmelita's shots, and what fills an enemy's health, are
+            not traced. Also open: her movement and clips, what 2142's hold holds, and why the game's wave tick does
+            not end the next battle at once.
       - Module frames (scripts.md 7.4): each object attaches with its copy's ordinal within its group
         (`World::sly3_copy_ordinals`, through `world::sly2::copy_ordinals` and `script::Interpreter::attach_copy`):
         a group's first copy keeps the module frame of the load, every further copy gets a clone (bindings copied,

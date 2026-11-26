@@ -25,7 +25,7 @@ sources:
     what: SafeHouse @ c70803ce, Sly2-Release/activate.cpp, loaders.cpp, alo.cpp, brx.cpp, lo.h, trigger.cpp, game.cpp
     used_for: where an object's zone mask is loaded and how it goes down a tree; the trigger volume's update (section 3.1) [R]
 reviewed_by: pending
-date: 2026-11-20
+date: 2026-11-26
 ---
 
 # Sly 2 clocks, rate factors, activation and frame loop
@@ -109,6 +109,37 @@ New in Sly 2: whole object subtrees are switched on and off by distance [R].
     trigger's own mask. Where the watched object stands does not matter.
 - **Row 0 example.** [camera.md](camera.md) section 7.2.1 has row 0's trigger volumes 150620 (mask 0x7) and 150658
   (mask 0x1), which are dormant while the cutscene eye sits in a 0x20 volume.
+
+### 3.2 What keeps an object active outside the camera's zones (added 2026-11-26)
+
+Running a command list does **not** by itself keep a character active. Solids (classes 48 to 108, apart from the
+exceptions below) start with kind 0, so a guard or escort whose zone mask shares no bit with the camera's is out of the update list like anything
+else [R]. Activation kind 1 (always active, neither the mask nor the radius tested) comes only from these [D for the
+setter `0x001A6CA8` and its callers; R for each meaning]:
+
+- **The class at init.** Classes 4, 15, 16, 28, 87, 104, 115, 116, 121 and 125 start at kind 1. Classes 11–13, 18,
+  19, 27, 34–39 and 88 start at kind 3 (the player's radius). The others start at kind 0 or 2 [R, from the
+  reference's table].
+- **The player character.** Sly's post-load sets kind 1 (`0x00188924`).
+- **A running sequence.** Starting a sequence sets the sequence object to kind 1 and stopping it to kind 2
+  (`0x001DFE34` / `0x001DFF58`). This covers the sequence only, not the characters it commands.
+- **Guard locks.** A guard is kind 1 while any of its AI jobs holds a lock, otherwise kind 0 (`0x0020B438` /
+  `0x0020B478`). Locks come from:
+  - the command-list section between commands 607 and 608 (options-by-class.md 2.2);
+  - certain moves (an animation event 0x27);
+  - crossing a link between regions;
+  - hit reactions and pursuit.
+- **Scripts.** Option 14 (the activation kind: getter `0x001A6C90`, setter `0x001A6CA8`) is script-settable.
+- **Leased copies get the placement's mask.** When a placement leases a copy, each object of the copy is given the
+  placement's zone mask (`0x001CB4E0`: the placement's +0x2D, through the mask setter `0x001A6D28`), unless the object
+  keeps its own mask (option 32). It also gets the placement's activation radius (`0x001A6C48`: +0x38, option 13)
+  [D]. The record's own mask in the package is therefore not what counts for a leased character.
+  - **Example (row 2):** Neyla's placement 8436 (`npc_boss_neela`, fresh, top-level at (4112.8, −7827.9, 2799.6)) has
+    mask **0x2**, while her package root 8438 has 0x1 [D].
+  - Intro sequence 1855's shot puts the eye at (5276.6, −6899.9, 1324.7), inside visibility volume 28595 (mask 0x2).
+    Neyla stands in the same volume [D].
+  - So with the placement's mask she is active, and she runs list 124079 up to its command 612, which sends signal
+    124080 to 1855. With the root's 0x1 she would never update and 1855 would wait for ever [I for the stall].
 
 ## 4. Update list
 

@@ -140,6 +140,8 @@ pub fn mirror(j: &Jobs, world: &mut World) {
     let m = &mut world.shared.sly3_task_states;
     m.clear();
     m.extend(j.graph.tasks.iter().zip(&j.states).map(|(t, &s)| (t.id, s)));
+    // The current job and task, for game operations 104 and 105.
+    world.shared.sly3_current = [j.job.map(|k| j.graph.jobs[k].slot), j.current.map(|t| j.graph.tasks[t].slot)];
 }
 
 /// The world start's "current when available" pass (missions.md 4.1a step 3): the last available task with 1399

@@ -78,7 +78,7 @@ sources:
     what: SafeHouse @ c70803ce, Sly2-Release/binoc.cpp, photo.cpp (window and prompt states)
     used_for: section 4.3, which state change raises which event [R]
 reviewed_by: pending
-date: 2026-11-21
+date: 2026-11-26
 ---
 
 # Sly 2 jobs and tasks
@@ -745,6 +745,58 @@ Its module 0 reads these custom properties, which placement 17346's root patch s
 
 So the player's actions are: hit the vent, crawl into the space it opened, and crawl to the end, which is volume
 133043. 1813 needs no other condition.
+
+**Job `m1_heist` (1889), row 2: three of its tasks** (added 2026-11-26) [D unless marked]:
+
+- **`t1_heist_open_piperoom` (1895).** On a state change, module 118 sets prop **123934**'s contact bytes (script ID
+  125 = stream option 53: for each hit-kind bit in the first argument, its response byte becomes the second).
+  - In state 1 it sets kind **0x100** (thrown or fired objects) to response **8**. The 8 is the response byte, not a
+    hit kind. 8 means the contact counts as a hit (interactables.md 3.2). In states 0, 2 and 3 every kind gets
+    response 4, which does not count [R for the response meanings].
+  - So only a thrown object breaks the prop. Also in state 1 the module calls Murray's script ID 939 (stream option
+    1051): Murray enters state 15, **holding Bentley ready to throw** (the Bentley toss) [R]. A hint shows until the
+    current character is Murray.
+  - The prop has one event: remove itself and request **1895 → 2** (option 1045).
+  - So the player, as Murray, **throws Bentley at 123934**. Murray's punches (kinds 0x2 and 0x200000) and the Thunder
+    Flop (0x4) do not count; see characters.md 2.3.
+- **`t1_heist_piperoom` (1896).** Sequence 141858 (started by Bentley-only volume 124120, option 441) ends with
+  `642 1896 −1`. Its event 19 in state 1 starts 1897 (Bentley's lines), and its event 21 puts Murray back in the toss
+  state while 1082 is 0.
+  - What finishes it is the **pipe-room puzzle**, module 1 of `f_nightclub_piperoom`. It holds:
+    - a list of pipes with water levels (88417 is the source at 1);
+    - a list of links of the form (from pipe, valve, direction, to pipe, sign) through the valves 88375, 88373,
+      88358, 142162 and 142136;
+    - two outlet links.
+  - Its recompute procedure spreads the water through the links by each valve's setting (property 1737) into the
+    pipes' levels (1738), and shows or hides the outlets. When pipe **142105**'s level is above 0.5, it removes
+    142193 and asks **1896 for state 2**.
+  - So the player turns the valves until the water reaches 142105 [I for "turns": the valves' own control was not
+    traced]. Its successor 1898 (`t1_heist_piperoom_complete`, "Shut off water to the fountain", option 1272)
+    follows.
+- **`t1_heist_4_hijack_truck` (1904, "Hijack the repair truck", option 1272).** On becoming current, module 125
+  leases **123948**, a placement of `npc_boar_guard` (shared) at (5847, 1183, −156), so a boar guard appears. Its
+  state-1 switches bring in waypoint 124141 and trigger volume **124142** at (6395, 5939, −112): Bentley only (432 =
+  8), option 438 (stays in state 1), option 441 = **1905**.
+  - Bentley entering 124142 starts sequence 1905. It sets 1904 to state 2 at once, plays Murray's and Bentley's
+    moves and a shot, and ends by asking task 1906 (`t1_heist_5_peacock_climb`) for state 4.
+  - There is no driven vehicle: the hijack is the sequence once Bentley reaches the truck [D for the data, I for
+    "no driving"].
+
+**`t1_neela_chase` (1857), job 1851 (row 2)** (added 2026-11-26) [D unless marked]. Neyla leads Sly along command
+list 123907, and Sly must keep up.
+
+- The job's property 1761 sets Neyla's option 1121 to 5 + 15 × the difficulty help (op103; 5 s with no help, up to
+  20 s with full help; corrected 2026-11-26, it is not random). It then calls her script ID 970 with list 123907,
+  which starts the escort (guards.md 4.4).
+- **Success.** List 123907's module 23 answers event 4 (its 599 command) by asking **1857 for state 2**. So the chase
+  ends when she reaches that point in her list.
+- **Failure** (job 1851's event-17 handler):
+  - task event **51** (0x33, the escort giving up after option 1121's wait) fails the job with string 832, "Neyla got
+    bored waiting for you! Try staying closer to her next time.";
+  - task event **21** concerning Neyla (a hit reaction) fails it with string 834, "Neyla doesn't like getting hit any
+    more than you do! Try following her instead."
+- So the player must stay inside her detector's volumes (close behind her), never stay out of range longer than the
+  wait, and never hit her.
 
 ## 5. Jobs
 

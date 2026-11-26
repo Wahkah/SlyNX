@@ -62,7 +62,14 @@ impl GuardRun {
     /// Guard `guard` (an object ID) given list `list` (an object ID): None when either is missing.
     pub fn new(world: &World, guard: i32, list: i32) -> Option<GuardRun> {
         let g = world.find_sly3_id(guard, None)?;
-        let l = world.find_sly3_id(list, None).filter(|&h| world.class(h) == Some(LIST_CLASS))?;
+        let l = world.find_sly3_id(list, None)?;
+        GuardRun::with(world, g, l)
+    }
+
+    /// Guard object `g` given list object `l` (a script's 461, `World::shared.sly3_guard_commands`): None when `l` is
+    /// not a command list.
+    pub fn with(world: &World, g: Handle, l: Handle) -> Option<GuardRun> {
+        let list = world.sly3_id(l).filter(|_| world.class(l) == Some(LIST_CLASS))?;
         let slot = world.slot(l)?;
         let level = world.sly3.as_deref()?;
         let commands = level.actions.iter().filter(|a| a.0 == slot).map(|a| (a.1, a.2.to_vec())).collect();

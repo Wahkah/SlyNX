@@ -288,6 +288,18 @@ pub struct Shared {
     pub items: ItemTable,
     /// Items owned.
     pub owned: Owned,
+    /// Which game's rules apply where the two differ.
+    pub game: GangGame,
+}
+
+/// The game a gang plays by, where Sly 2's and Sly 3's rules differ.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GangGame {
+    /// Sly 2: its controller follows physics.md 5.1 (slides, the stuck test and recovery).
+    #[default]
+    Sly2,
+    /// Sly 3.
+    Sly3,
 }
 
 impl Shared {
@@ -773,7 +785,7 @@ impl Character {
             Who::Bentley => self.bentley(dt, input, world, s, out),
         }
         // Sly 2 hook (physics.md 5.1): a character hanging stuck in a jump, fall or hit reaction is recovered.
-        if !s.items.is_sly3() {
+        if s.game == GangGame::Sly2 {
             self.stuck_recovery(s, out);
         }
         for d in &mut self.darts {
@@ -863,7 +875,7 @@ impl Character {
         // longer growing.
         self.contacts.clear();
         self.contacts.extend(r.hits.iter().map(|h| h.normal));
-        if !s.items.is_sly3() {
+        if s.game == GangGame::Sly2 {
             for _ in 0..2 {
                 for n in self.contacts.iter().filter(|n| n[2] <= crate::collision::mesh::GROUND_Z) {
                     let into = dot(self.velocity, *n);

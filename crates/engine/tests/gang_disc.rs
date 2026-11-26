@@ -381,6 +381,7 @@ fn shared() -> Shared {
         tun: GangTunables::default(),
         items: ItemTable::from_executable(exe).unwrap(),
         owned: Owned::default(),
+        game: engine::gang::GangGame::Sly2,
     }
 }
 

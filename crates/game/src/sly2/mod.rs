@@ -88,7 +88,9 @@ fn apply_world_cue(
         }
         // Command 630: a signal to another sequence (dialogue-and-voice.md 2.1).
         talk::SeqCommand::SendSignal { value, sequence } => {
-            if let Some(s) = world.find_sly2_id(sequence, Some(seq)).and_then(|h| world.slot(h)) {
+            // −1: the sequence itself (m1_heist's 1903 signals its own other thread with 123946) [I].
+            let to = if sequence < 0 { Some(seq) } else { world.find_sly2_id(sequence, Some(seq)) };
+            if let Some(s) = to.and_then(|h| world.slot(h)) {
                 world.shared.send_signal(s, value);
             }
             None
@@ -563,7 +565,8 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
         systems.camera = alloc::boxed::Box::new(FreeCamera::default());
         let shared = match (self.gang_constants, self.items.clone()) {
             (Some(consts), Some(items)) => {
-                Some(Shared { consts, tun: GangTunables::default(), items, owned: Owned::default() })
+                let game = engine::gang::GangGame::Sly2;
+                Some(Shared { consts, tun: GangTunables::default(), items, owned: Owned::default(), game })
             }
             _ => None,
         };

@@ -60,6 +60,8 @@ pub mod opt {
     pub const VIEW: u16 = 315;
     /// Patrol route: a command list (class 113).
     pub const ROUTE: u16 = 273;
+    /// A task item in the guard's pocket (pickpocket-and-pickups.md 5).
+    pub const POCKET_ITEM: u16 = 309;
     /// Lowest noise kind it takes.
     pub const MIN_NOISE: u16 = 323;
     /// Home object.
@@ -188,6 +190,22 @@ fn floor_ray(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
     }
     None
 }
+
+/// The pocket entry standing for a task item (option 309): not a loot kind (those are 1114 to 1143).
+pub const POCKET_TASK_ITEM: i32 = -1;
+
+/// An escort job's state (guards.md 4.4): 0 walking (the player in view), 1 waiting, and how long the player has
+/// been out of view.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Escort {
+    pub state: u8,
+    pub out_for: f32,
+}
+
+/// The escort's give-up wait in seconds (option 1121, script ID 974), and its default when unset. *Placeholder*
+/// default: m1_neela's job sets it to 5 + 15 × a random number.
+pub const ESCORT_GIVE_UP: u16 = 1121;
+pub const ESCORT_WAIT: f32 = 10.0;
 
 /// How long a thrown creature passes through what it starts inside (characters.md 4.6: a dropped load does not
 /// collide with Murray until 0.1 s after they part).
@@ -464,6 +482,10 @@ pub struct Sly2Guard {
     pub floored: bool,
     /// The step being walked follows a curve (a path command), where the step physics applies (guards.md 5).
     pub on_curve: bool,
+    /// An escort job (guards.md 4.4: script ID 970, m1_neela's chase), while it runs.
+    pub escort: Option<Escort>,
+    /// The task item in its pocket (option 309), until it is taken.
+    pub pocket_item: Option<Handle>,
 }
 
 impl Sly2Guard {
@@ -501,6 +523,8 @@ impl Sly2Guard {
             fall: 0.0,
             floored: false,
             on_curve: false,
+            escort: None,
+            pocket_item: None,
             acting: None,
             parts: damage_parts(world, h),
             job: Job::Patrol,
@@ -777,8 +801,18 @@ impl Sly2Guard {
                     }
                 }
                 Notice::Pickpocket(_) => {
-                    if let Some(e) = self.pocket.take() {
-                        cx.world.shared.picked.push(e);
+                    match self.pocket.take() {
+                        // The task item: collected as if picked up (pickpocket-and-pickups.md 5).
+                        Some(crate::gang::pocket::Entry::Prize(POCKET_TASK_ITEM)) => {
+                            if let Some(h) = self.pocket_item.take() {
+                                cx.world.shared.task_items.push(h);
+                                super::sly2_pickups::task_item_request(cx.world, h);
+                                cx.world.raise(h, 5, Vec::new());
+                                cx.world.set_in_world(h, false);
+                            }
+                        }
+                        Some(e) => cx.world.shared.picked.push(e),
+                        None => {}
                     }
                 }
                 _ => {}
@@ -819,6 +853,8 @@ pub mod task_events {
     pub const HIT_REACTION: u32 = 21;
     /// It entered investigate (state 12).
     pub const INVESTIGATING: u32 = 22;
+    /// An escort gave up waiting for the player (guards.md 4.4).
+    pub const ESCORT_GAVE_UP: u32 = 51;
 }
 
 /// Task event 24: a swarming creature killed, or a guard knocked out by the current player character (missions.md
@@ -983,6 +1019,34 @@ impl ClassBehavior for Sly2Guard {
         {
             self.pocket.fill(&row, cx.rng, |_| false);
         }
+        // A task item in its pocket (option 309 names its placement; pickpocket-and-pickups.md 5: a task item can be
+        // a pocket prize): the last entry, taken by a pickpocket (m1_heist's guard 11539 holds 123938, for 1900).
+        let slot = cx.world.slot(cx.me);
+        let named: Vec<i32> = cx
+            .world
+            .sly2
+            .as_deref()
+            .map(|l| {
+                l.actions
+                    .iter()
+                    .filter(|(s, id, _)| Some(*s) == slot && *id == opt::POCKET_ITEM)
+                    .flat_map(|(_, _, args)| {
+                        args.iter().filter_map(|a| if let crate::object::Arg::Int(n) = *a { Some(n) } else { None })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in named {
+            let item = cx
+                .world
+                .find_sly2_id(id, Some(cx.me))
+                .map(|h| super::sly2_commands::placed_root(cx.world, h).unwrap_or(h))
+                .filter(|&h| cx.world.class(h) == Some(super::sly2_pickups::class::TASK_ITEM));
+            if let Some(h) = item {
+                self.pocket_item = Some(h);
+                self.pocket.entries.push(crate::gang::pocket::Entry::Prize(POCKET_TASK_ITEM));
+            }
+        }
     }
 
     fn update(&mut self, cx: &mut Cx<'_>) {
@@ -1002,6 +1066,40 @@ impl ClassBehavior for Sly2Guard {
         let Some(me) = cx.world.position(cx.me) else { return };
         let player = cx.world.player_target();
         let target = player.and_then(|p| cx.world.position(p));
+        // An escort job (guards.md 4.4): with the player inside its view volume it runs its list from where it
+        // stopped (state 0); outside it, it stops and faces the player (1); out of it for longer than the give-up wait
+        // (option 1121), it gives up (2): task event 51 with itself, and the escort ends.
+        if let Some(mut e) = self.escort {
+            let inside = target.is_some_and(|p| {
+                self.view.and_then(|v| super::sly2_props::volume_box(cx.world, v)).is_some_and(|b| {
+                    super::sly2_props::in_volume(&b, [p[0], p[1], p[2] + super::sly2_sensors::CHARACTER_CENTRE])
+                })
+            });
+            // The spec's state 1 starts when the player leaves a second, larger volume; this one volume (the view
+            // volume) stands in for both [stand-in: the second volume is not read].
+            if inside {
+                e.state = 0;
+                e.out_for = 0.0;
+            } else {
+                e.state = 1;
+                e.out_for += cx.dt;
+                if let Some(p) = target {
+                    self.face(p, me, cx.dt);
+                    self.place(cx.world, cx.me, me);
+                }
+                let give_up = cx.world.options(cx.me).and_then(|o| o.f32(ESCORT_GIVE_UP)).unwrap_or(ESCORT_WAIT);
+                if e.out_for > give_up {
+                    self.escort = None;
+                    self.commands = None;
+                    super::sly2_props::send_task_event_from(cx.world, task_events::ESCORT_GAVE_UP, Some(cx.me));
+                    return;
+                }
+            }
+            self.escort = Some(e);
+            if e.state != 0 {
+                return;
+            }
+        }
         // On patrol with no list running, it starts its route again.
         if self.commands.is_none()
             && self.job == Job::Patrol
@@ -1049,7 +1147,14 @@ impl ClassBehavior for Sly2Guard {
             }
             if more {
                 self.commands = Some(run);
+            } else if self.escort.is_some() {
+                // The list's end ends the escort.
+                self.escort = None;
             }
+        }
+        // An escorted character does not react to the player it walks with.
+        if self.escort.is_some() {
+            return;
         }
         // Sight (3).
         if let Some(p) = target {

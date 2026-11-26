@@ -21,6 +21,10 @@ fn the_first_venice_job_as_far_as_it_goes() {
     assert_eq!(a.stage.world, Some(3), "Venice starts in v_ext");
     // missions.md 4.2: walking into the recon waypoint begins m1_recon at t1_recon_intro (2086).
     assert!(a.current.iter().any(|t| t.contains("(2086)")), "the job began: {:?}", a.current);
+    // missions.md 4.1a: with time enough, Carmelita wins the four turf-war battles and m1_turf_war closes (2166).
+    if seconds >= 1100.0 {
+        assert!(a.current.iter().any(|t| t.contains("(2166)")), "the turf war ended: {:?}", a.current);
+    }
     // Deterministic: the same journal and hashes twice.
     let b = run_sly3_job(&cfg);
     assert_eq!(a.journal, b.journal);

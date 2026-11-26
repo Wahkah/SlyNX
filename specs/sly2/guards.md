@@ -42,8 +42,14 @@ sources:
   - kind: reference-project
     what: SafeHouse @ c70803ce, Sly2-Release/ainoise.cpp (own-noise test), projectile.cpp (update, contacts, end)
     used_for: section 4.2, which noise is "its own" and when a projectile makes noise [R]
+  - kind: executable
+    what: SCUS_973.16 (SHA-256 a511a94b…6a73), class 60's script map (970-974 → stream options 1117-1121), the method 0x0010DA68 → 0x001BA980, the escort job's update 0x001BA608 and state change 0x001BA828 (2026-11-26)
+    used_for: section 4.4 [D]
+  - kind: reference-project
+    what: SafeHouse @ c70803ce, Sly2-Release/aijobs.cpp (the proximity job), launcher.cpp (method 970)
+    used_for: section 4.4 [R]
 reviewed_by: pending
-date: 2026-11-21
+date: 2026-11-26
 ---
 
 # Sly 2 guards and swarming creatures
@@ -232,6 +238,38 @@ Investigating [R]:
 While pursuing a target, a guard raises an **alarm noise** about it at its own position (kind 4, template 710 unless
 the guard names another) at most once per second (`0x2C3DB8` = 1.0 [D]); a smoke bomb can hold all alarms back until
 a deadline [R]. Other guards whose detectors watch the same target take the alarm and come (4.2).
+
+### 4.4 The escort: a character who leads the player (class 60, script ID 970) (added 2026-11-26)
+
+Class 60 characters (Neyla in episode 1) can be told to walk a command list **only while the player keeps up**.
+
+- **Starting it.** Script ID 970 (stream option 1117, handler `0x0010DA68` → `0x001BA980`) takes a command list. It
+  stores the list (+0x108C), clears the saved place in it (+0x1090), and sends the character's reaction job (`0x9C`)
+  message 15, which starts the escort job [D for the calls, R for the job].
+- **The escort job** (`0x001BA608` / `0x001BA828`) has three states [D for the addresses and the 0x33 broadcast; R for
+  the rule]. The character's detector has two volumes (section 3): the view volume and a second one.
+
+| State | Entered when | What the character does |
+|---:|---|---|
+| 0 | the player is inside the detector's view volume | runs the command list, resuming where it stopped |
+| 1 | in state 0, the player is no longer inside the second volume | stops, saves its place in the list and turns to face the player |
+| 2 | in state 1, more than option **1121** seconds pass without the player coming back into the view volume | gives up: an alert move, and task event **0x33** with the character |
+
+- **The two volumes** are the detector's option 315 (the view volume) and option 316 (the second volume) (section 3).
+  For Neyla (root 8438) they are objects 8566 and 8570 [D]. She resumes only once the player is back in 8566, and
+  stops as soon as the player is outside 8570.
+- **Speed.** While running the list and in its state 9, the walking speed follows the distance d to the player:
+  a + d(b + d c), from option 1119 (script ID 972, three values), clamped to option 1120 (script ID 973, a low and a
+  high value). The result is the path follower's speed factor [R].
+  - Neyla's values: 1119 = (2.35, −0.000501, 0) and 1120 = (1.75, 2.15) [D].
+  - So the factor is 2.15 when she is close, falling linearly to 1.75 from about 400 units of distance on [I for the
+    unit].
+- **The wait.** Option 1121 (script ID 974, a float at +0x1088) is that wait. Scripts set it at the start.
+  - **Correction (2026-11-26):** episode 1's job does not set a random value. It sets 5 + 15 × the difficulty help:
+    op103 is the current help, 0 to 1 (scripts.md 4.2). So the wait is 5 s with no help and up to 20 s with full help
+    [D for the script].
+- **The end.** The escort itself has no end. The list's own commands finish the task, for example a 599 command whose
+  event 4 the list's module answers.
 
 ## 5. Patrol
 

@@ -25,7 +25,7 @@ pub mod throw;
 #[cfg(test)]
 mod tests;
 
-pub use character::{Character, Combo, GangEvent, Shared, bentley, murray, sly};
+pub use character::{Character, Combo, GangEvent, GangGame, Shared, bentley, murray, sly};
 
 /// Sly's binocucom (Sly 2 and Sly 3; camera.md 6): R3 turns it on with `focus` (the played character), and again
 /// off. The camera reads `World::shared.camera_binocucom`; while it is on the left stick turns the view, so the

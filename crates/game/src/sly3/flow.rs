@@ -580,6 +580,85 @@ mod tests {
         assert_eq!(episode_start(&TABLE, 8, &k), None);
     }
 
+    /// A save tree of three tasks `t0` to `t2`, each with a `state` field (name IDs: `t0` 0, `state` 1, `t1` 2,
+    /// `t2` 3), in the save-variable layout `save::sly2::VarTree::parse` reads.
+    fn tree() -> save::sly2::VarTree {
+        let names = ["t0", "state", "t1", "t2"];
+        // (name, kind, count, offset, child, next): the root, then each task group followed by its one field.
+        let mut recs: Vec<(i16, i8, u8, u16, u16, u16)> = alloc::vec![(-1, -1, 0, 0, 1, 0)];
+        for (k, task) in [0i16, 2, 3].into_iter().enumerate() {
+            let me = recs.len() as u16;
+            let next = if k < 2 { me + 2 } else { 0 };
+            recs.push((task, -1, 0, 0, me + 1, next));
+            recs.push((1, 0, 0, 4 * k as u16, 0, 0));
+        }
+        recs.push((-1, -1, 0, 12, 0, 0));
+        let mut d = Vec::new();
+        d.extend_from_slice(&(names.len() as u16).to_le_bytes());
+        for (i, n) in names.iter().enumerate() {
+            d.extend_from_slice(&(i as u16).to_le_bytes());
+            d.extend_from_slice(&(n.len() as u16).to_le_bytes());
+            d.extend_from_slice(n.as_bytes());
+        }
+        d.extend_from_slice(&(recs.len() as u16).to_le_bytes());
+        for (n, k, c, o, ch, nx) in recs {
+            d.extend_from_slice(&n.to_le_bytes());
+            d.push(k as u8);
+            d.push(c);
+            d.extend_from_slice(&o.to_le_bytes());
+            d.extend_from_slice(&ch.to_le_bytes());
+            d.extend_from_slice(&nx.to_le_bytes());
+        }
+        save::sly2::VarTree::parse(&d).unwrap().0
+    }
+
+    /// conditions.md 3.1: the job key's table-A entry, then the checkpoint task's table-B entry, then the last
+    /// table-B entry whose task's saved state is above 0; condition 12 means none; no match loads the first set.
+    #[test]
+    fn option_set_choice_order() {
+        use save::sly2::{Progress, SaveValue};
+        let state = |task: u16| alloc::vec![task, 1];
+        // Sets 20, 21, 22, 23 (positions 0 to 3). Job 900 → 21, job 901 → 12 (none). Tasks 100 (t0) → 22, 101 (t1)
+        // → 23, 102 (t2) → 12.
+        let sets = formats_sly3::world::OptionSets {
+            table_a: alloc::vec![(900, 21), (901, NO_CONDITION)],
+            table_b: alloc::vec![(state(0), 100, 22), (state(2), 101, 23), (state(3), 102, NO_CONDITION)],
+            ids: alloc::vec![20, 21, 22, 23],
+            sets: Vec::new(),
+        };
+        let tree = alloc::sync::Arc::new(tree());
+        let saved = |states: [i32; 3]| {
+            let mut p = Progress::with_size(tree.clone(), 64);
+            for (task, s) in [0u16, 2, 3].into_iter().zip(states) {
+                assert!(p.set(&state(task), None, SaveValue::Int(s)));
+            }
+            p
+        };
+        let none = saved([0, 0, 0]);
+        let both = saved([1, 2, 0]);
+        let first_only = saved([1, 0, 0]);
+        let last_none = saved([1, 1, 3]);
+        // (progress, job, checkpoint, set position)
+        type Case<'a> = (Option<&'a Progress>, Option<i32>, Option<i32>, usize);
+        let cases: [Case; 12] = [
+            (None, None, None, 0),                  // a fresh load: the first set
+            (Some(&none), None, None, 0),           // no task above 0
+            (Some(&both), Some(900), Some(100), 1), // the job key wins
+            (Some(&both), Some(999), Some(100), 2), // a job with no entry: the checkpoint task
+            (Some(&both), None, Some(101), 3),      // the checkpoint task
+            (Some(&both), None, Some(555), 3),      // no checkpoint entry: saved states, the last above 0 wins
+            (Some(&first_only), None, None, 2),     // only t0 above 0
+            (Some(&both), None, None, 3),           // t0 and t1 above 0: the last, t1
+            (Some(&last_none), None, None, 0),      // the last above 0 (t2) names 12: none, the first set
+            (Some(&both), Some(901), Some(101), 0), // a job naming 12 means none; it does not fall through
+            (Some(&both), None, Some(102), 0),      // a checkpoint naming 12, likewise
+            (None, None, Some(100), 2),             // no progress still takes the checkpoint task
+        ];
+        for (k, (p, job, checkpoint, want)) in cases.into_iter().enumerate() {
+            assert_eq!(choose_option_set(&sets, p, job, checkpoint), want, "case {k}");
+        }
+    }
+
     #[test]
     fn wipe_pairs_cycle_without_repeating_across_shuffles() {
         let mut w = WipeOrder::default();

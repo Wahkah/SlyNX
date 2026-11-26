@@ -311,6 +311,39 @@ defeat and restarts. In order:
 
 A carried loot item is dropped by any hit that would empty the counter, or that hits a fragile item.
 
+### 2.3 The gang's attack kinds (added 2026-11-26) [D]
+
+A gang attack is a collision part that the move's clip switches on (events 15 and 16). Its contact kind is what a
+target's contact bytes (script ID 125) are set against. Parts and the clips that switch them, read from row 2:
+
+| Character | Part tag | Contact kind | Value | Switched on by |
+|---|---:|---|---:|---|
+| Sly | 332 | `0x2` | −10 | the cane combo and stance clips 179–186, 285–294 |
+| Sly | 333 | `0x4` | −10 | 190, the air attack (Square) |
+| Sly | 334 | `0x8` | −10 | 189, the Knockout Dive |
+| Sly | 335 | `0x20` | −10 | 191, the air attack (Triangle) |
+| Sly | 337 | `0x10` | −10 | 297 (charged strike) and 348 (Lightning Spin) |
+| Sly | 338 | `0x200000` | −10 | 194 and 195 (pose modes 22 and 23) |
+| Sly | 4638 | `0x4000` | −100 | 198, the juggle strike with Silent Obliteration |
+| Murray | 499 | `0x2` | −20 | the punches 424 and 425 (Square), and 196 |
+| Murray | 500 | `0x200000` | −20 | the punches 434 and 435 (Triangle) |
+| Murray | 501 | `0x4` | −5 | 417, the Thunder Flop, and 508 |
+| Murray | 498 | `0x40` | −10 | 441 and 442, the Berserker Charge |
+| Bentley | 572 | `0x2` | −5 | his strike clips 560–571 |
+| Murray | 6948, 6961 | `0x1000` | −10 | (not switched by a clip in the hub) |
+| Murray | 6956 | `0x80` | −10 | (not switched by a clip in the hub) |
+| Bentley | 7413 | `0x2` | −10 | (not switched by a clip in the hub) |
+
+- **Kinds not from the gang's parts:**
+  - `0x100`: thrown and fired objects (projectiles and carried objects, option 391's default);
+  - `0x40000`: the sleep dart;
+  - the guards' and creatures' parts (section 2.1).
+- **Contact bytes.** Script ID 125 (stream option 53, routine `0x001F7918`) sets, for each of the 26 kind bits in its
+  first argument, a response byte to its second argument. A contact is accepted with the OR of the bytes of its kind
+  bits [R].
+  - The values the scripts use are 8 (a hit) and 4.
+  - So `(125 256 8)` means "thrown objects count as hits". It does not mean "kinds 0x100 and 8".
+
 ## 3. Sly (class 53): delta from Sly 1
 
 Unchanged in kind from [`../sly1/player-moves.md`](../sly1/player-moves.md) 2 to 5 (run, jump, climb, hang, walls)

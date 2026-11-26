@@ -451,6 +451,19 @@ stream, 233 guard aim target, 479 stop an emitter) and 2.2 (the class-113 guard 
 Starting and stopping a class-114 sequence from a script uses options 613 (script ID 235, with a starter object),
 614 (script ID 638, the current character as starter) and 615 (script ID 530, stop): dialogue-and-voice.md 2.1.
 
+**Script IDs 28 and 29: the object's own OID and its alias** (added 2026-11-26) [D for the entries and the getter;
+R for "alias"].
+
+- **Script ID 28** is stream option 15, a field: the object's own OID (+0x18). Every object has it, so it is never
+  unset.
+- **Script ID 29** is stream option 16, a getter (`0x001A6260`). It walks the object's namespace node list (+0x3C), and
+  for each node whose object is this one takes the node's OID (node +8). It returns the last one found, or −1 if there
+  is none. That is the OID the object also answers to through its copy, for example a copy root answering to its
+  placement's OID (section 5).
+- So "29, else 28" means "the OID this object is known by in its copy, else its own".
+- The neighbouring routine `0x001A6290` answers whether an object answers to a given OID: its own, or one of these
+  aliases.
+
 **The class test** (added 2026-11-21) [D]. Script ID 3 maps to stream option 2 on every class. Its handler
 `0x00100228` passes the class number to the class test `0x00132B10`, which answers **is-a** (the class or any class
 derived from it), not exact match. So `((op111 x 3) 56)` is true for every class 56–67, `52` for 52–55 and `90` for

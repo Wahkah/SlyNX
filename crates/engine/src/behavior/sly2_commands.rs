@@ -75,16 +75,23 @@ fn object(world: &World, me: Handle, a: &Arg) -> Option<Handle> {
     match *a {
         // A placement's ID names its copy (scripts.md 5): the leash 123878 is parented to Dimitri's copy, not to his
         // placement (missions.md 4.3).
-        Arg::Int(id) => world.find_sly2_id(id, Some(me)).map(|h| {
-            if world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 6)) {
-                world.children(h).find(|&c| world.sly2_id(c) == Some(id)).unwrap_or(h)
-            } else {
-                h
-            }
-        }),
+        Arg::Int(id) => world.find_sly2_id(id, Some(me)).map(|h| placed_root(world, h).unwrap_or(h)),
         Arg::Short(6, oid) if oid >= 0 => world.find_nearest(oid, Some(me)),
         _ => None,
     }
+}
+
+/// The copy root a placement stands for (scripts.md 5): its child of the same ID, or the root its copy was loaded
+/// with (m1_neela's placement 8436 has Neela, 8438, as its root). `None` for anything else.
+pub fn placed_root(world: &World, h: Handle) -> Option<Handle> {
+    if !world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 6)) {
+        return None;
+    }
+    let id = world.sly2_id(h);
+    world.children(h).find(|&c| world.sly2_id(c) == id).or_else(|| {
+        let slot = world.slot(h)?;
+        world.sly2.as_deref()?.placed.get(&slot).and_then(|r| world.handle(r.0))
+    })
 }
 
 fn number(a: &Arg) -> Option<f32> {
@@ -436,9 +443,26 @@ impl CommandRun {
 
 /// Tells guard `guard` to run command list `list` from its start.
 pub fn run_commands(world: &mut World, guard: Handle, list: Handle) -> bool {
+    let guard = placed_root(world, guard).unwrap_or(guard);
     match world.behavior_mut(guard) {
         Some(super::Behavior::Sly2Guard(g)) => {
             g.commands = Some(CommandRun::new(list));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Starts an escort job on a guard or character (guards.md 4.4: script ID 970, stream 1117): the list from its
+/// start, walked while the player keeps inside the escort's view volume. Its speed is the path speed [stand-in: the
+/// distance-scaled speed of options 1119 and 1120 is not read].
+pub fn start_escort(world: &mut World, guard: Handle, list: Handle) -> bool {
+    let guard = placed_root(world, guard).unwrap_or(guard);
+    match world.behavior_mut(guard) {
+        Some(super::Behavior::Sly2Guard(g)) => {
+            g.commands = Some(CommandRun::new(list));
+            g.escort = Some(super::sly2::Escort::default());
+            g.job = super::sly2::Job::Patrol;
             true
         }
         _ => false,

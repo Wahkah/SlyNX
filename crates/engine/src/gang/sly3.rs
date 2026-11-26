@@ -113,6 +113,7 @@ pub fn shared() -> Shared {
         tun: GangTunables::default(),
         items: ItemTable { items: Vec::new(), extra: Vec::new() },
         owned: Owned::default(),
+        game: super::GangGame::Sly3, // Sly 2 hook: the explicit game flag
     }
 }
 
@@ -673,6 +674,7 @@ pub fn shared_from_executable(exe: &Executable) -> formats::Result<Shared> {
         tun: GangTunables::default(),
         items: Sly3ItemTable::from_executable(exe)?.to_item_table(),
         owned: Owned::default(),
+        game: super::GangGame::Sly3, // Sly 2 hook: the explicit game flag
     })
 }
 

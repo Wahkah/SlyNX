@@ -54,7 +54,7 @@ sources:
     what: all script modules of the 43 worlds; calls of script IDs 214 and 236 with argument counts and literal values (2026-11-19)
     used_for: call and value counts in section 2.4
 reviewed_by: pending
-date: 2026-11-17
+date: 2026-11-26
 ---
 
 # Sly 2 options by class
@@ -183,7 +183,7 @@ disc [D].
 | 604 | 9 | number | a label |
 | 605 | 10 | number | jump to the label |
 | 606 | 13 | object, reverse flag (1 byte) | **use an object**: the guard gets on and travels the object it names (a ladder, pipe, rail or similar context object; targets include classes 11, 13 and 19), in reverse when the flag is 1 [R]. Waits until the use ends. Disc: 482 uses, flag 1 in all of them [D] |
-| 607, 608 | 11, 12 | none | lock, unlock |
+| 607, 608 | 11, 12 | none | lock, unlock: **keep the guard active** from 607 to 608. Locking puts the guard's activation kind to 1 (always active, whatever the camera's zone mask or distance) and unlocking back to 0; nested locks are counted (`0x0020B438` / `0x0020B478`) [D for the calls, R for the counting]. Episode 1's Neyla list 123907 wraps each run of 606 uses in 607 … 608 (clock-and-loop.md 3.2) [D] |
 | 611 | 14 | clip object, flags | play an animation clip and wait for it to end; flags on the disc 0 (302), 8 (181), 1 (114), 9 (54) [D] |
 | 612 | 15 | sequence object, number | raise the numbered alarm on a class-114 sequence; all 71 uses name a class-114 object [D] |
 

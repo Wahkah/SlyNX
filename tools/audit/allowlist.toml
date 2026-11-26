@@ -74,3 +74,9 @@ check  = "similarity"
 path   = "crates/render/src/frame.rs"
 match  = "*/ps2-gs/src/export.rs"
 reason = "Token-shape match only. The regions are our draw-packet types: derive-plus-`pub field: u32` structs (GpuInstance, DrawCmd, Batch, View, FrameStats, lines 18-343), small flag lists (INSTANCE_*, VIEW_*, lines 68-72 and 188-197), STATE_* bits written as `1 << n` (lines 152-165, against the reference's PRIM-register bits `1 << 8` to `1 << 14` at 116-128), and `mod slot`, the draw order 0 to 15 (lines 355-370, against `mod word` word indices at 30-62). What lines up is consecutive integers and consecutive bit shifts; no code identifier is shared (`Batch` is a struct name in both, with unrelated fields), and the layouts, meanings and comments are this renderer's own (rendering.md). Reviewed 2026-11-18."
+
+[[allow]]
+check  = "similarity"
+path   = "crates/engine/src/world/shared.rs"
+match  = "*/ps2-iop/src/core.rs"
+reason = "Token-shape match only. The shared regions are struct field lists and a `Default` impl that sets each field to `Vec::new()`, `BTreeMap::new()`, `None` or `0`, the standard Rust way to write a hand-made default. Every field name differs (the world's per-frame hook queues such as task_requests and sly3_hits against an emulator's IOP state such as scratchpad and servers), as do the types and the domain; no identifier, comment or value sequence is shared. Reviewed 2026-11-26."

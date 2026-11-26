@@ -60,7 +60,13 @@ fn table() -> ItemTable {
 }
 
 fn shared() -> Shared {
-    Shared { consts: GangConstants::SPEC, tun: GangTunables::default(), items: table(), owned: Owned::default() }
+    Shared {
+        consts: GangConstants::SPEC,
+        tun: GangTunables::default(),
+        items: table(),
+        owned: Owned::default(),
+        game: super::GangGame::Sly2,
+    }
 }
 
 const DT: f32 = 1.0 / 60.0;

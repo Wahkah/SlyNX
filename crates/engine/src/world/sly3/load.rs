@@ -81,9 +81,10 @@ struct Cx<'e> {
     held: bool,
 }
 
-/// The guard and projectile classes (pooled for spawn points).
+/// The guard and projectile classes (pooled for spawn points). The projectile family is class 89 and the classes
+/// derived from it, 89 to 92 (missions.md 4.1a: Carmelita's shots are classes 91 and 92).
 const GUARD_CLASS: i16 = 58;
-const PROJECTILE_CLASS: i16 = 89;
+const PROJECTILE_CLASSES: core::ops::RangeInclusive<i16> = 89..=92;
 
 struct Loader<'b> {
     data: &'b [u8],
@@ -211,14 +212,13 @@ impl World {
         // choice [I] for the pool's size: a group a spawn point names gets the copies its copy count (the world's
         // header) leaves after the placed ones, made now at the top level and out of the world; 825 takes a free one.
         // v_gauntlet: the brawl's guards (144809) have 7, 3 placed, so 4 in the pool. Only groups of guards and of
-        // projectiles (a class-58 or class-89 record at their top level: v_canal's missiles, 150052) are pooled; the
-        // other spawn points' groups are left as they were.
+        // projectiles (a class-58 or class-89 to 92 record at their top level: v_canal's missiles, 150052; Carmelita's
+        // shots, 8464) are pooled; the other spawn points' groups are left as they were.
         for gid in core::mem::take(&mut ld.spawn_groups) {
             let Some(g) = ld.by_id.get(&gid).copied() else { continue };
-            if !bodies
-                .get(g)
-                .is_some_and(|b| b.objects.iter().any(|r| matches!(r.class, GUARD_CLASS | PROJECTILE_CLASS)))
-            {
+            if !bodies.get(g).is_some_and(|b| {
+                b.objects.iter().any(|r| r.class == GUARD_CLASS || PROJECTILE_CLASSES.contains(&r.class))
+            }) {
                 continue;
             }
             let placed = ld.instances.get(&gid).copied().unwrap_or(0);

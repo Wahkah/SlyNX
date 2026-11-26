@@ -1,14 +1,22 @@
-//! Sly 3 projectiles (class 89; missions.md 4.1a, the canal chase's missiles 150052).
+//! Sly 3 projectiles (class 89 and its derived classes 90 to 92; missions.md 4.1a, the canal chase's missiles 150052
+//! and Carmelita's shots 8464 / 8446).
 //!
-//! - A pooled instance taken by script ID 825 is launched by its script: option 64 (stream 30) is its velocity in
-//!   the world, option 549 (stream 439) the damage it carries.
+//! - A pooled instance taken by script ID 825 (or by the session's shot stand-in, `game::sly3`) is launched with
+//!   option 64 (stream 30), its velocity in the world, and option 549 (stream 439), the damage it carries.
 //! - Each frame it moves by that velocity. Stand-in, a working choice [I] (the flight's end and its hit test are not
-//!   traced): it hits the first active reactive object (class 111, the enemy boats) within [`HIT_RADIUS`], or ends
-//!   after [`LIFETIME`]; either way it leaves the world, back to its pool. Objects in
-//!   `World::shared.sly3_unhittable` (a defeated enemy boat, stand-in) are passed through.
-//! - A hit gives the target script event 19, the event the enemy boats' module answers, with the projectile as the
-//!   target's last hitter (script ID 1105, stream 1126; `World::shared.sly3_last_hit`), whose damage the module
-//!   reads as 549 [I].
+//!   traced): it hits the first target within [`HIT_RADIUS`], or ends after [`LIFETIME`]; either way it leaves the
+//!   world, back to its pool. Objects in `World::shared.sly3_unhittable` (a defeated enemy boat, stand-in) are passed
+//!   through.
+//! - Targets: active reactive objects (class 111, the enemy boats) for every projectile; for Carmelita's shots
+//!   (classes 91 and 92) also the guards in the world (class 58, the turf-war enemies). The guards are left out for
+//!   the class-89 missiles, whose reach would otherwise take the enemy boats' crews first [I].
+//! - A hit on a reactive object gives it script event 19, the event the enemy boats' module answers, with the
+//!   projectile as the target's last hitter (script ID 1105, stream 1126; `World::shared.sly3_last_hit`), whose
+//!   damage the module reads as 549 [I].
+//! - A hit on a guard gives it script event 12 with a hit record (`World::sly3_hit_record_with`): the guard hit
+//!   (556), the projectile (276) and the projectile's damage as the hit's amount (124), which the turf-war enemies'
+//!   override modules pass to job 2139's method 2659 (missions.md 4.1a). The record is freed at the projectile's next
+//!   step, once the event has run.
 
 use alloc::vec::Vec;
 
@@ -16,12 +24,21 @@ use crate::behavior::{ClassBehavior, Cx};
 use crate::object::Handle;
 use crate::world::World;
 
-/// The projectile class.
+/// The projectile class, and the last class derived from it (missions.md 4.1a: 89 to 92 form one family).
 pub const CLASS: i16 = 89;
+pub const LAST_CLASS: i16 = 92;
+/// Carmelita's shot classes (`carmelita_missile_playable` 91, `_charged` 92).
+pub const SHOT_CLASSES: [i16; 2] = [91, 92];
 /// The class it can hit (reactive objects: the enemy boats).
 pub const TARGET_CLASS: i16 = 111;
+/// The guard class, which Carmelita's shots hit.
+pub const GUARD_CLASS: i16 = 58;
 /// Velocity (script ID 64).
-const VELOCITY: u16 = 30;
+pub const VELOCITY: u16 = 30;
+/// Damage carried (script ID 549).
+pub const DAMAGE: u16 = 439;
+/// The hit event a guard gets (a hit record as its value).
+pub const GUARD_HIT_EVENT: u32 = 12;
 /// How near a target a hit lands (working value [I]).
 pub const HIT_RADIUS: f32 = 300.0;
 /// How long a flight lasts at most, seconds (working value [I]).
@@ -34,13 +51,16 @@ pub const HIT_EVENT: u32 = 19;
 pub struct Projectile {
     /// Seconds since it came into the world.
     pub age: f32,
+    /// The hit record of its last hit on a guard, freed at the next step.
+    pub record: Option<Handle>,
 }
 
-fn targets(world: &World) -> Vec<(Handle, [f32; 3])> {
-    world
-        .slots_of_class(TARGET_CLASS)
+fn targets(world: &World, guards: bool) -> Vec<(Handle, [f32; 3])> {
+    let classes: &[i16] = if guards { &[TARGET_CLASS, GUARD_CLASS] } else { &[TARGET_CLASS] };
+    classes
         .iter()
-        .filter_map(|&s| world.handle(s))
+        .flat_map(|&c| world.slots_of_class(c).iter().copied())
+        .filter_map(|s| world.handle(s))
         .filter(|&h| world.in_world(h) && world.is_active(h) && !world.shared.sly3_unhittable.contains(&h))
         .filter_map(|h| Some((h, world.position(h)?)))
         .collect()
@@ -49,6 +69,12 @@ fn targets(world: &World) -> Vec<(Handle, [f32; 3])> {
 impl Projectile {
     /// One step of `dt` seconds for projectile `me`: the flight, the hit test and the end.
     pub fn step(&mut self, world: &mut World, me: Handle, dt: f32) {
+        if let Some(r) = self.record.take()
+            && let Some(slot) = world.slot(r)
+            && world.shared.sly3_hits.remove(&slot).is_some()
+        {
+            world.destroy(r);
+        }
         if !world.in_world(me) {
             self.age = 0.0;
             return;
@@ -62,15 +88,24 @@ impl Projectile {
         world.set_position(me, to);
         self.age += dt;
         let r2 = HIT_RADIUS * HIT_RADIUS;
-        let hit = targets(world).into_iter().find(|&(_, q)| {
+        let guards = world.class(me).is_some_and(|c| SHOT_CLASSES.contains(&c));
+        let hit = targets(world, guards).into_iter().find(|&(_, q)| {
             let d = [q[0] - to[0], q[1] - to[1], q[2] - to[2]];
             d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= r2
         });
         if let Some((h, _)) = hit {
-            if let Some(slot) = world.slot(h) {
-                world.shared.sly3_last_hit.insert(slot, me);
+            if world.class(h) == Some(GUARD_CLASS) {
+                let amount = world.options(me).and_then(|o| o.f32(DAMAGE));
+                self.record = world.sly3_hit_record_with(h, me, amount);
+                if let Some(r) = self.record {
+                    world.raise(h, GUARD_HIT_EVENT, alloc::vec![script::Value::Object(Some(r.to_script()))]);
+                }
+            } else {
+                if let Some(slot) = world.slot(h) {
+                    world.shared.sly3_last_hit.insert(slot, me);
+                }
+                world.raise(h, HIT_EVENT, Vec::new());
             }
-            world.raise(h, HIT_EVENT, Vec::new());
         }
         if hit.is_some() || self.age >= LIFETIME {
             self.age = 0.0;
@@ -155,5 +190,49 @@ mod tests {
             w.update_transforms();
         }
         assert!(w.shared.sly3_last_hit.is_empty());
+    }
+
+    /// A shot of class `shot` flying at a guard 1,000 units ahead, with damage 20.
+    fn at_guard(shot: i16) -> (World, Handle, Handle) {
+        let mut f = Fixture::new();
+        f.top(shot, 50, at(0.0, 0.0, 0.0));
+        f.top(GUARD_CLASS, 51, at(1000.0, 0.0, 0.0));
+        let mut w = f.world(WorldInfo::default());
+        let hs: Vec<Handle> = w.handles().collect();
+        let (p, g) = (hs[0], hs[1]);
+        let o = w.options_mut(p).unwrap();
+        o.set(VELOCITY, OptionValue::Vector([6000.0, 0.0, 0.0]));
+        o.set(DAMAGE, OptionValue::Float(20.0));
+        w.update_transforms();
+        (w, p, g)
+    }
+
+    #[test]
+    fn carmelitas_shots_hit_guards_with_a_hit_record() {
+        let (mut w, p, g) = at_guard(SHOT_CLASSES[0]);
+        let mut b = Projectile::default();
+        for _ in 0..20 {
+            if !w.in_world(p) {
+                break;
+            }
+            b.step(&mut w, p, DT);
+            w.update_transforms();
+        }
+        assert!(!w.in_world(p), "the hit ends the flight");
+        let r = b.record.expect("a hit record");
+        let slot = w.slot(r).unwrap();
+        assert_eq!(w.shared.sly3_hits.get(&slot), Some(&(g, p)), "the guard hit and the shot");
+        assert_eq!(w.options(r).and_then(|o| o.f32(1648)), Some(20.0), "the hit's amount is the shot's damage");
+        // The record is freed at the next step.
+        b.step(&mut w, p, DT);
+        assert!(w.shared.sly3_hits.is_empty() && b.record.is_none());
+        // The class-89 missiles pass guards by.
+        let (mut w, p, _) = at_guard(CLASS);
+        let mut b = Projectile::default();
+        for _ in 0..20 {
+            b.step(&mut w, p, DT);
+            w.update_transforms();
+        }
+        assert!(w.in_world(p) && w.shared.sly3_hits.is_empty());
     }
 }

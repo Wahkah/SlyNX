@@ -238,12 +238,22 @@ impl World {
     /// handlers: scripts read the object hit as script ID 556 and the hitter as 276. It has no record and stays out of
     /// the world.
     pub fn sly3_hit_record(&mut self, target: Handle, hitter: Handle) -> Option<Handle> {
+        self.sly3_hit_record_with(target, hitter, None)
+    }
+
+    /// [`World::sly3_hit_record`] carrying the hit's amount: script ID 124 (stream 1648, a float), which damage
+    /// handlers subtract from health (missions.md 4.1a: the boat's hull, the turf-war enemies' 940).
+    pub fn sly3_hit_record_with(&mut self, target: Handle, hitter: Handle, amount: Option<f32>) -> Option<Handle> {
         const HIT_CLASS: i16 = 196;
+        const AMOUNT: u16 = 1648;
         let slot =
             self.create(HIT_CLASS, -1, u32::MAX, -1, formats::geometry::Affine::IDENTITY, crate::world::NONE, 0, 0);
         let h = self.handle(slot)?;
         self.set_in_world(h, false);
         self.shared.sly3_hits.insert(slot, (target, hitter));
+        if let (Some(a), Some(o)) = (amount, self.options_mut(h)) {
+            o.set(AMOUNT, crate::object::OptionValue::Float(a));
+        }
         Some(h)
     }
 

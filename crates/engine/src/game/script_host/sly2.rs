@@ -208,6 +208,25 @@ impl WorldHost<'_> {
                 });
                 return Value::Object(given.map(Handle::to_script));
             }
+            // The object's own ID (script ID 28, option 15; scripts.md 5), and its alias (script ID 29, option 16): the
+            // ID of the placement whose copy's root it is, when that differs, else −1.
+            if option == OBJECT_ALIAS
+                && let Some(h) = self.obj(object)
+            {
+                let alias = self.world.parent(h).filter(|&p| {
+                    self.world.class(p).is_some_and(|c| crate::world::sly2::is_a(c, 6))
+                        && self.world.slot(p).and_then(|ps| self.copy_root(ps)) == Some(h.index())
+                });
+                let id = alias.and_then(|p| self.world.sly2_id(p)).filter(|&id| Some(id) != self.world.sly2_id(h));
+                return Value::Int(id.unwrap_or(-1));
+            }
+            if option == OBJECT_ID
+                && let Some(h) = self.obj(object)
+                && self.world.options(h).and_then(|o| o.get(option)).is_none()
+                && let Some(id) = self.world.sly2_id(h)
+            {
+                return Value::Int(id);
+            }
             // A trigger volume's first counting object found inside (script ID 534, option 447; interactables.md 4).
             if option == VOLUME_FIRST
                 && let Some(h) = self.obj(object)
@@ -475,10 +494,10 @@ impl WorldHost<'_> {
         // so the lease is that copy's root. Taking it puts the copy in the world, which the placement's own option 26
         // does not hold back, and raises script event 14 on the placement and the copy; the placement's blocks and
         // matrix were applied to the copy at load. Leases go by the copy's grade (classes/placement.md 2.1): 0 locked
-        // (1023 / 1024, 1179 / 1180, lock and unlock), 4 held by no placement, 1 held with an object in the world, 3
-        // all removed (2, flagged in the world but not really, is not modelled). 1019 needs at least 2, and a
+        // (1023 / 1024, 1179 / 1180, lock and unlock), 4 held by no placement, 1 held with an object in the world, 2
+        // flagged in the world but not active (its placement is out), 3 all removed. 1019 needs at least 2, and a
         // non-fixed placement already holding its copy re-takes it only at 3 or more; 1021 needs at least 1. A copy
-        // is held from load by a non-fixed placement (its copy is in the world), and by any placement once leased.
+        // is held from load by a non-fixed placement in the world, and by any placement once leased.
         // Simplifications: one copy per placement (the pool is that copy); 1017 (1174, can one be leased) answers
         // whether the placement has a copy. 1020 (the current lease, 1176) is a getter, not a method.
         // A search for the placement's ID finds the copy's root (scripts.md 5), so the call can arrive there.
@@ -487,7 +506,12 @@ impl WorldHost<'_> {
             if is_placement(h) {
                 Some(h)
             } else {
-                self.world.parent(h).filter(|&p| is_placement(p) && self.world.sly2_id(p) == self.world.sly2_id(h))
+                // A copy's root (what a search for the placement's ID gives), named by its own ID or not.
+                self.world.parent(h).filter(|&p| {
+                    is_placement(p)
+                        && (self.world.sly2_id(p) == self.world.sly2_id(h)
+                            || self.world.slot(p).and_then(|ps| self.copy_root(ps)) == Some(h.index()))
+                })
             }
         });
         if (LEASE_CAN..=LEASE_UNLOCK).contains(&option)
@@ -509,12 +533,15 @@ impl WorldHost<'_> {
                 _ => {}
             }
             let fixed = self.world.options(h).and_then(|o| o.i32(FIXED_PLACEMENT)) == Some(1);
-            let held = self.world.shared.leased.contains(&slot) || !fixed;
+            // Held from load by a non-fixed placement in the world (its copy is in use there), and by any placement
+            // once leased; a placement out of the world (m1_neela's 8436) holds none.
+            let held = self.world.shared.leased.contains(&slot) || (!fixed && self.world.in_world(h));
             let grade = match root {
                 _ if self.world.shared.lease_locked.contains(&slot) => 0,
                 None => 0,
                 Some(_) if !held => 4,
-                Some(r) if self.world.in_world(r) => 1,
+                Some(r) if self.world.is_active(r) => 1,
+                Some(r) if self.world.in_world(r) => 2,
                 Some(_) => 3,
             };
             // 1019 (1175) also needs a single-root prefab: one top-level object (the rat pool 125315).
@@ -568,6 +595,18 @@ impl WorldHost<'_> {
         // Object-model hook: a guard or character (class 56 and derived) told to run a command list (script ID 441,
         // stream option 317; missions.md 4.3: Dimitri's lists), and a volume (class 22 and derived) asked whether a
         // position is inside it (script ID 108, stream option 366).
+        // Script ID 970 (stream 1117): an escort job on the list given (guards.md 4.4; m1_neela's chase, 123907).
+        if option == ESCORT
+            && let Some(h) =
+                self.obj(object).filter(|&h| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 56)))
+        {
+            if let Some(Value::Object(Some(l))) = args.first()
+                && let Some(list) = self.obj(*l)
+            {
+                crate::behavior::sly2_commands::start_escort(self.world, h, list);
+            }
+            return Some(Value::Void);
+        }
         if option == RUN_LIST
             && let Some(h) =
                 self.obj(object).filter(|&h| self.world.class(h).is_some_and(|c| crate::world::sly2::is_a(c, 56)))
@@ -928,6 +967,8 @@ const LEASE_LOCK: u16 = 1179;
 const LEASE_UNLOCK: u16 = 1180;
 /// A character's "run this command list" (script ID 441).
 const RUN_LIST: u16 = 317;
+/// An escort job on a list (script ID 970; guards.md 4.4).
+const ESCORT: u16 = 1117;
 /// A volume's "is this position inside" (script ID 108).
 const VOLUME_HOLDS: u16 = 366;
 /// An interaction spot's "used by" (script ID 235).
@@ -936,6 +977,9 @@ const SPOT_USE: u16 = 1071;
 const WORLD_CURRENT_CHARACTER: u16 = 926;
 /// An object's position (script ID 34).
 const OBJECT_POSITION: u16 = 21;
+/// The object's own ID (script ID 28), and its alias through a copy (script ID 29).
+const OBJECT_ID: u16 = 15;
+const OBJECT_ALIAS: u16 = 16;
 /// The parent field (script ID 32).
 const OBJECT_PARENT: u16 = 19;
 /// The placement leasing the object's copy (script ID 31).

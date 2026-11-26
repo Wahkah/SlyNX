@@ -31,7 +31,10 @@
 //!   unestablished ones) complete at once; they are counted in [`Scripts::unhandled`].
 //!
 //! Working readings (to confirm with the spec): `0x1E`'s byte is the task state, 4 meaning "current"; `0x0F` /
-//! `0x10` set and clear an alarm by ID, alarms being one set for all scripts.
+//! `0x10` set and clear an alarm by ID, alarms being one set for all scripts. Alarms set on a named script (method
+//! 735, [`Scripts::set_alarm_of`]) are that script's (scripts.md 7.2: "an alarm of this script or of another
+//! script"): only that script's waits see them, and they are cleared when it ends or is stopped, so another script
+//! waiting on the same alarm ID does not (the four turf-war battles' scripts all wait on 139255, missions.md 4.1a).
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -204,6 +207,8 @@ pub struct Scripts {
     pub answers: BTreeMap<(i32, i32), bool>,
     rng: Rng,
     stopped: BTreeSet<i32>,
+    /// Alarms set on a named script (method 735): alarm → that script.
+    alarm_owners: BTreeMap<i32, i32>,
 }
 
 fn word(a: &[u8], k: usize) -> i32 {
@@ -228,6 +233,7 @@ impl Scripts {
             answers: BTreeMap::new(),
             rng: Rng::new(seed),
             stopped: BTreeSet::new(),
+            alarm_owners: BTreeMap::new(),
         }
     }
 
@@ -298,6 +304,30 @@ impl Scripts {
     /// Stops script `oid` (its finish blocks are not run).
     pub fn stop(&mut self, oid: i32) {
         self.running.retain(|s| s.oid != oid);
+        self.forget_alarms_of(oid);
+    }
+
+    /// Sets `alarm` on script `script` (method 735): it stays set until cleared or until that script ends.
+    pub fn set_alarm_of(&mut self, script: i32, alarm: i32) {
+        self.alarms.insert(alarm);
+        self.alarm_owners.insert(alarm, script);
+    }
+
+    /// Whether `alarm` is set for script `oid`: set, and not set on another script.
+    fn alarm_set_for(&self, oid: i32, alarm: i32) -> bool {
+        self.alarms.contains(&alarm) && self.alarm_owners.get(&alarm).is_none_or(|&o| o == oid)
+    }
+
+    /// Clears the alarms set on script `oid` (it ended or was stopped).
+    fn forget_alarms_of(&mut self, oid: i32) {
+        let alarms = &mut self.alarms;
+        self.alarm_owners.retain(|a, s| {
+            let mine = *s == oid;
+            if mine {
+                alarms.remove(a);
+            }
+            !mine
+        });
     }
 
     /// Runs every script for `dt` seconds (`world` is where `0x17` finds the scripts it starts); their requests are added to [`Scripts::requests`]. Scripts
@@ -313,6 +343,9 @@ impl Scripts {
             if let Some(h) = s.own {
                 self.ended.push((s.oid, h));
             }
+        }
+        for s in scripts.iter().filter(|s| s.runners.is_empty() || stopped.contains(&s.oid)) {
+            self.forget_alarms_of(s.oid);
         }
         scripts.retain(|s| !s.runners.is_empty() && !stopped.contains(&s.oid));
         // Scripts started this frame were pushed onto `self.running`.
@@ -376,7 +409,7 @@ impl Scripts {
             {
                 Some(w.clone())
             }
-            Wait::Alarm(a, _) if !self.alarms.contains(a) => Some(w.clone()),
+            Wait::Alarm(a, _) if !self.alarm_set_for(s.oid, *a) => Some(w.clone()),
             Wait::Runners(n) if s.runners.iter().any(|r| n.contains(&r.name) && !r.stack.is_empty()) => Some(w.clone()),
             _ => None,
         }
@@ -422,6 +455,7 @@ impl Scripts {
                 }
                 if let Wait::Alarm(a, true) = w {
                     self.alarms.remove(&a);
+                    self.alarm_owners.remove(&a);
                 }
             }
             let Some(i) = r.pc else {
@@ -551,6 +585,7 @@ impl Scripts {
                 }
                 0x10 => {
                     self.alarms.remove(&word(&a, 0));
+                    self.alarm_owners.remove(&word(&a, 0));
                 }
                 0x11 => {
                     let script = word(&a, 0);
