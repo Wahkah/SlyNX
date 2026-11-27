@@ -156,6 +156,11 @@ pub const FALL_LOST: f32 = 3000.0;
 /// The floor under `from` within `drop`, leaving out guards' and creatures' own bodies (they are where they were
 /// loaded, not where they are). The body has a width: when the ray at its centre finds nothing (a seam between two
 /// surfaces), the highest floor under four points [`FOOT_RADIUS`] around it.
+/// The floor under `from` within `drop` (guards' and creatures' bodies left out), for the command lists.
+pub fn floor_under(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
+    floor_below(cx, from, drop)
+}
+
 fn floor_below(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
     floor_below_point(cx, from, drop).or_else(|| {
         [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]
@@ -226,13 +231,43 @@ pub fn escort_speed(o: Option<&crate::object::options::OptionStore>, d: Option<f
     }
 }
 
+/// How far down a ledge a pursuit drops (see the walk). *Placeholder* for the navigation regions' drop links.
+pub const PURSUIT_DROP: f32 = 600.0;
+
+/// How far below the next point of its path a guard may fall (see the walk). *Placeholder*.
+pub const PATH_SLACK: f32 = 400.0;
+
+/// How long a knocked-out swarming creature stays before it leaves the world. *Placeholder*.
+pub const SWARMER_LINGER: f32 = 2.0;
+
 /// How long a thrown creature passes through what it starts inside (characters.md 4.6: a dropped load does not
 /// collide with Murray until 0.1 s after they part).
 pub const FLIGHT_CLEAR: f32 = 0.1;
 /// The longest flight before a thrown creature stops where it is. *Placeholder*, a guard against flying forever.
 pub const FLIGHT_TIME: f32 = 3.0;
-/// Hit points one attack of the gang takes. *Placeholder*: characters.md does not give them.
+/// Hit points one attack of the gang takes when its contact value is not known (a thrown object, a blast, a hit of
+/// no kind). *Placeholder*.
 pub const GANG_HIT: f32 = 20.0;
+
+/// The hit points a gang attack takes: its part's contact value by character and contact kind (characters.md 2.3:
+/// Sly's strikes 10, the Silent Obliteration juggle 100; Murray's punches 20, his flop 5, his charge 10; Bentley's
+/// strike 5; the sleep dart 0), else [`GANG_HIT`].
+pub fn gang_hit_value(class: Option<i16>, kind: Option<u32>) -> f32 {
+    use super::sly2_props::contact;
+    let Some(kind) = kind else { return GANG_HIT };
+    if kind == contact::DART {
+        return 0.0;
+    }
+    match (class, kind) {
+        (Some(53), 0x4000) => 100.0,
+        (Some(53), 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x20_0000) => 10.0,
+        (Some(54), 0x2 | 0x20_0000) => 20.0,
+        (Some(54), 0x4) => 5.0,
+        (Some(54), 0x40) => 10.0,
+        (Some(55), 0x2) => 5.0,
+        _ => GANG_HIT,
+    }
+}
 /// An action's animation reference (guards.md 6.4): (object ID of a clip or state machine, start index).
 pub const ACTION_ANIM: u16 = 364;
 /// Clip events that switch damage parts on and off by tag (guards.md 6.3).
@@ -503,6 +538,10 @@ pub struct Sly2Guard {
     pub floored: bool,
     /// The step being walked follows a curve (a path command), where the step physics applies (guards.md 5).
     pub on_curve: bool,
+    /// Walking to a use's floor (command 13 on a target that is not a curve), under step physics.
+    pub ballistic: bool,
+    /// Seconds since it was knocked out (a swarming creature leaves the world after [`SWARMER_LINGER`]).
+    pub down_for: f32,
     /// An escort job (guards.md 4.4: script ID 970, m1_neela's chase), while it runs.
     pub escort: Option<Escort>,
     /// The task item in its pocket (option 309), until it is taken.
@@ -544,6 +583,8 @@ impl Sly2Guard {
             fall: 0.0,
             floored: false,
             on_curve: false,
+            ballistic: false,
+            down_for: 0.0,
             escort: None,
             pocket_item: None,
             acting: None,
@@ -567,6 +608,18 @@ impl Sly2Guard {
         }
     }
 
+    /// Up again, as at load: its hit points from option 254, patrolling (a pool copy leased again).
+    pub fn revive(&mut self, world: &World, h: Handle) {
+        let hp = world.options(h).and_then(|o| o.f32(opt::HIT_POINTS)).unwrap_or(40.0);
+        self.hit_points = hp;
+        self.counted_at = hp;
+        self.counted_hits = 0;
+        self.job = Job::Patrol;
+        self.sight = 0;
+        self.down_for = 0.0;
+        self.commands = None;
+    }
+
     /// Knocked out.
     pub fn knocked_out(&self) -> bool {
         self.job == Job::KnockedOut
@@ -588,17 +641,17 @@ impl Sly2Guard {
     /// A hit (7): raises event 11 (object, attacker, value) and counts it as a boss fight does (7.5: not by
     /// Bentley, and only when the hit points went down since the last counted hit). Call before the hit points
     /// change; the count looks at the drop the previous hits made.
-    fn count_hit(&mut self, cx: &mut Cx<'_>, by: Option<Handle>) {
+    fn count_hit(&mut self, cx: &mut Cx<'_>, by: Option<Handle>, value: f32) {
         cx.raise(
             EVENT_HIT,
             alloc::vec![
                 script::Value::Object(Some(cx.me.to_script())),
                 script::Value::Object(by.map(|b| b.to_script())),
-                script::Value::Float(GANG_HIT),
+                script::Value::Float(value),
             ],
         );
         let bentley = by.is_some_and(|b| cx.world.class(b) == Some(BENTLEY_CLASS));
-        let through = (GANG_HIT - self.block).max(0.0);
+        let through = (value - self.block).max(0.0);
         if !bentley && through > 0.0 && self.hit_points - through < self.counted_at {
             self.counted_hits += 1;
             self.counted_at = (self.hit_points - through).max(0.0);
@@ -683,19 +736,53 @@ impl Sly2Guard {
         // guards.md 5: guards keep their height (with step physics Dimitri's walk drops from his start to the street
         // below and the follow does not end), and so does a pursuit, which goes straight at its target (rats chasing
         // Murray walked off ledges and were lost).
-        if self.swarmer && self.on_curve {
+        // A guard's move to a use's floor (command 13 on a marker, guards.md 5) is under step physics too, and so is
+        // any guard's walk along a curve (guards.md 5: guards moving toward targets take their height from step
+        // physics).
+        if self.on_curve || self.ballistic {
             q[2] = self.step_height(cx, p, q);
+            // A use's move does not fall below the floor it is going to. A guard on a path does not fall more than
+            // PATH_SLACK below the point it walks to: *stand-in* for the jumps its moves make over gaps (not
+            // played; Neyla's 142296 crosses a gap the street level drops into).
+            if self.ballistic {
+                q[2] = q[2].max(to[2]);
+            } else if !self.swarmer && q[2] < p[2] {
+                // Only a fall is bounded: it does not lift a guard walking a lower floor toward a higher point.
+                q[2] = q[2].max((to[2] - PATH_SLACK).min(p[2]));
+            }
             // Fallen far below where it was loaded (over a drop with no floor under it): taken out of the world.
             // A deviation from guards.md 5, which does not say what ends such a fall.
-            if q[2] < self.post[2] - FALL_LOST {
+            // Only swarming creatures: Neyla's escort walks down from a roof 3,000 above the street.
+            if self.swarmer && q[2] < self.post[2] - FALL_LOST {
                 self.fall = 0.0;
                 cx.world.set_in_world(cx.me, false);
+            }
+        }
+        // A pursuit keeps to the floor and does not step off an edge into nothing: with a floor within the step up
+        // or PURSUIT_DROP down ahead it moves onto it (a drop down a ledge, as the navigation regions' drop links
+        // allow), with none it stops (*stand-in*, guards.md 5: pursuers plan over navigation regions, which are not
+        // built).
+        // A pursuer with no floor under it where it stands (a world without collision, one kept at its height) is
+        // left as it was.
+        if self.job == Job::Pursue
+            && !self.on_curve
+            && !self.ballistic
+            && q != p
+            && floor_below(cx, [p[0], p[1], p[2] + STEP_UP], STEP_UP + STEP_DOWN).is_some()
+        {
+            match floor_below(cx, [q[0], q[1], p[2] + STEP_UP], STEP_UP + PURSUIT_DROP) {
+                Some(z) => q[2] = z,
+                None => q = p,
             }
         }
         self.place(cx.world, cx.me, q);
         // Left to go; within ARRIVED of the stop distance it has arrived (the last step lands on the stop ring, and
         // rounding left a remainder just above 0 for good, stalling path following: Dimitri's list 1825).
         let left = dist - stop;
+        // A move to a use's floor has arrived only once it has come down (or up) to that floor.
+        if self.ballistic && (q[2] - to[2]).abs() > STEP_DOWN {
+            return left.max(1.0);
+        }
         if left <= ARRIVED { 0.0 } else { left }
     }
 
@@ -740,7 +827,8 @@ impl Sly2Guard {
                 self.fall += FLIGHT_GRAVITY * cx.dt;
                 (p[2] + self.fall * cx.dt).max(z)
             }
-            None if self.floored => {
+            // A use's move to a floor falls even before any floor was found under it (Neyla off the roof).
+            None if self.floored || self.ballistic => {
                 self.fall += FLIGHT_GRAVITY * cx.dt;
                 p[2] + self.fall * cx.dt
             }
@@ -802,22 +890,31 @@ impl Sly2Guard {
                     if ignore_hits {
                         continue;
                     }
-                    self.count_hit(cx, by);
+                    let kind = match n {
+                        Notice::Attack { kind, .. } => Some(kind),
+                        _ => None,
+                    };
+                    let value = gang_hit_value(by.and_then(|b| cx.world.class(b)), kind);
+                    self.count_hit(cx, by, value);
                     let surprise = cx.time - self.last_seen > SURPRISE_WINDOW && self.sight != 1;
                     // Bosses are not knocked out by surprise: their fights are staged (vehicles-and-minigames.md 7).
                     if surprise && !no_surprise && !self.boss {
                         self.knock_out(cx, by);
                     } else {
                         // The block absorbs the hit first (option 257; what is left of it, 258).
-                        let through = (GANG_HIT - self.block).max(0.0);
-                        self.block = (self.block - GANG_HIT).max(0.0);
+                        let through = (value - self.block).max(0.0);
+                        self.block = (self.block - value).max(0.0);
                         self.hit_points = (self.hit_points - through).max(0.0);
                         if self.hit_points <= 0.0 {
                             self.knock_out(cx, by);
                         } else {
                             // Task event 21 on entering a hit reaction, with the guard (missions.md 4.3).
                             super::sly2_props::send_task_event_from(cx.world, task_events::HIT_REACTION, Some(cx.me));
-                            self.job = Job::Pursue;
+                            // An escort keeps leading (its reaction to the hit is the job's: task event 21 fails
+                            // m1_neela); in pursuit its list would stop for good.
+                            if self.escort.is_none() {
+                                self.job = Job::Pursue;
+                            }
                             self.last_seen = cx.time;
                         }
                     }
@@ -1081,6 +1178,15 @@ impl ClassBehavior for Sly2Guard {
         }
         self.take_notices(cx);
         if self.knocked_out() {
+            // A knocked-out swarming creature leaves the world after a moment, freeing its pool copy for the
+            // generators (missions.md 4.3: the siege's ten rats from a pool of three). *Stand-in*: what becomes of
+            // a knocked-out creature is not specified; Sly 3 removes it with its knock-out clip (guards.md 4b).
+            if self.swarmer && cx.world.sly2.is_some() {
+                self.down_for += cx.dt;
+                if self.down_for >= SWARMER_LINGER {
+                    cx.world.set_in_world(cx.me, false);
+                }
+            }
             return;
         }
         // Kept finite so a bad value cannot stop the attacks for good.
@@ -1161,10 +1267,13 @@ impl ClassBehavior for Sly2Guard {
                         if self.escort.is_some() {
                             speed *= escort_speed(cx.world.options(cx.me), target.map(|t| length(sub(t, me))));
                         }
-                        // Along a curve, the step physics (guards.md 5).
-                        self.on_curve = !run.path.is_empty();
+                        // Along a curve, the step physics (guards.md 5); a use's move to a marker's floor too. A use of a
+                        // curve (a rail, pipe or ladder: 606) travels along it without gravity.
+                        self.on_curve = !run.path.is_empty() && !(run.using && !run.ballistic);
+                        self.ballistic = run.ballistic;
                         let left = self.walk(cx, p, speed, 30.0);
                         self.on_curve = false;
+                        self.ballistic = false;
                         if left <= 0.0 {
                             // Arrived: the next step moves past the command.
                             run.wait = -1.0;

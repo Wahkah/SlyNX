@@ -22,6 +22,8 @@
 //!   knocked out are the crew's targets, and the crew's attacks reach them as Sly 2's gang's do
 //!   (`crate::sly2::gang`): a punch or crossbow swing on its target, an air attack, a flop landing or a dart around
 //!   the point. The guards' strikes on the crew are not taken yet.
+//! - **Reactive props** (class 111, `behavior::sly3::prop`): the same attacks reach the props within
+//!   [`PROP_REACH`] of their origin as hits [I] (missions.md 4.1a: m1_run's opera sign breaks under Sly's attack).
 //! - **Carmelita** (missions.md 4.1a, the turf-war battles: player 0 is handed a class-60 Carmelita copy). Stand-in
 //!   [I] (her controls and movement are not traced): while she is driven, the played member takes the real pad and
 //!   moves as usual; it starts where she stands, and every frame its position and heading are written into her
@@ -52,6 +54,8 @@ fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
 pub const DEFAULT_ARRIVAL: i32 = 424;
 /// The checkpoint class.
 pub const CHECKPOINT_CLASS: i16 = 40;
+/// How near a reactive prop's origin an attack hits it (working value [I]).
+pub const PROP_REACH: f32 = 400.0;
 /// Carmelita's class (a guard-family playable character, missions.md 4.1a).
 pub const CARMELITA_CLASS: i16 = 60;
 /// Where the other core members stand beside the player (offsets along the checkpoint's left axis), and how high
@@ -370,6 +374,23 @@ impl PlayerSystem for CrewPlayer {
                     }
                 }
             };
+            // Sly 3 hook (missions.md 4.1a, m1_run's opera sign 158868): reactive props (class 111) in reach of an attack
+            // take it as a hit (Sly 2's prop model, `behavior::sly2_props`: its hit counts, then event 5 when broken).
+            // Working choice [I]: within [`PROP_REACH`] of the prop's origin (props are larger than guards).
+            let props: Vec<(Handle, [f32; 3])> = world
+                .slots_of_class(engine::behavior::sly3::class::PROP)
+                .iter()
+                .filter_map(|&k| world.handle(k))
+                .filter(|&h| world.in_world(h) && matches!(world.behavior(h), Some(Behavior::Sly2Prop(_))))
+                .filter_map(|h| Some((h, world.position(h)?)))
+                .collect();
+            let hit_props = |world: &mut World, p: [f32; 3]| {
+                for &(h, q) in &props {
+                    if dist(q, p) <= PROP_REACH {
+                        world.notify(h, Notice::Attack { by: me, kind: 1 });
+                    }
+                }
+            };
             for (_, e) in &events {
                 match *e {
                     GangEvent::Punch { target: Some(id), .. } | GangEvent::Crossbow { target: Some(id), .. } => {
@@ -380,6 +401,13 @@ impl PlayerSystem for CrewPlayer {
                     GangEvent::AirAttack(_) => around(world, at),
                     GangEvent::FlopLanded { position, .. } => around(world, position),
                     GangEvent::Dart { to, .. } => around(world, to),
+                    _ => {}
+                }
+                match *e {
+                    GangEvent::Punch { .. } | GangEvent::Crossbow { .. } | GangEvent::AirAttack(_) => {
+                        hit_props(world, at);
+                    }
+                    GangEvent::FlopLanded { position, .. } => hit_props(world, position),
                     _ => {}
                 }
             }

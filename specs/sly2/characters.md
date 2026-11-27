@@ -343,6 +343,14 @@ target's contact bytes (script ID 125) are set against. Parts and the clips that
   bits [R].
   - The values the scripts use are 8 (a hit) and 4.
   - So `(125 256 8)` means "thrown objects count as hits". It does not mean "kinds 0x100 and 8".
+- **Which bytes count as hits** (added 2026-11-26) [R]. An accepted contact whose byte has any of the bits `0xF8` (8, 16,
+  32, 64, 128) is a hit: both the receiver and the sender are told, message 0xB. Bytes 1, 2 and 4 are contacts that
+  hurt nothing.
+  - Byte **16**, which Dimitri's record gives to every kind, is therefore a hit like 8. The byte travels with the hit
+    as its flags into the guard's reaction.
+  - The damage is the contact value whatever the byte: for example −10 for Sly's cane and −20 for Murray's punches.
+  - Before damage, a guard's reaction can also change the amount: four times more in its shrunk modes, none with its
+    "ignore damage" flag, an immediate knockout for a surprise hit (guards.md 7).
 
 ## 3. Sly (class 53): delta from Sly 1
 

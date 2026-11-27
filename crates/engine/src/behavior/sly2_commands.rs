@@ -439,6 +439,14 @@ pub struct CommandRun {
     pub path: Vec<[f32; 3]>,
     /// See [`CommandRun::path`].
     pub path_at: usize,
+    /// The path is a use's move to the floor under a target that is not a curve (command 13), made under step
+    /// physics.
+    pub ballistic: bool,
+    /// A use (command 13) is under way.
+    pub using: bool,
+    /// Locks held (commands 11 and 12, 607 and 608): while any is, the guard stays active whatever the camera's zone
+    /// mask (options-by-class.md 2.2, clock-and-loop.md 3.2).
+    pub locks: u32,
     /// Script event 2 has gone to the list (missions.md 4.3: a list's module hears 2 when a run starts, 3 when it
     /// ends).
     pub started: bool,
@@ -456,6 +464,9 @@ impl CommandRun {
             pause_range: None,
             path: Vec::new(),
             path_at: 0,
+            ballistic: false,
+            using: false,
+            locks: 0,
             started: false,
         }
     }
@@ -488,6 +499,12 @@ pub fn start_escort(world: &mut World, guard: Handle, list: Handle) -> bool {
         _ => false,
     }
 }
+
+/// A use's target that is not a curve is the floor under it, searched from this far above it (options-by-class.md
+/// 2.2, command 13).
+pub const USE_ABOVE: f32 = 100.0;
+/// See [`USE_ABOVE`]: and this far below it.
+pub const USE_BELOW: f32 = 150.0;
 
 /// Speed along a followed path. *Placeholder*: the guard's gait sets it (root motion, not read yet).
 pub const PATH_SPEED: f32 = 250.0;
@@ -531,7 +548,12 @@ pub fn step_commands(cx: &mut Cx<'_>, run: &mut CommandRun, arrived: bool) -> (S
                 }
             }
             6 | 13 => {
-                // Follow the path (a curve: a route, ladder, pipe or rail) point by point.
+                // Follow the path (a curve: a route, ladder, pipe or rail) point by point. A use (13) branches on its
+                // target (options-by-class.md 2.2): a curve is got on at its nearest point (sitting on class 13,
+                // climbing class 11 and hanging from class-19 bars are walked along it, a stand-in); anything else
+                // (a class-3 marker) is the floor under it, searched from 100 above to 150 below, which the guard
+                // moves to under step physics. Stand-in: it walks there at the path speed and drops off edges
+                // under gravity rather than jumping.
                 if run.path.is_empty() && run.path_at == 0 {
                     let path = c.args.first().and_then(|a| object(cx.world, me, a));
                     let mut pts = path.map(|p| super::sly2_sensors::sly2_curve(cx.world, p)).unwrap_or_default();
@@ -539,6 +561,29 @@ pub fn step_commands(cx: &mut Cx<'_>, run: &mut CommandRun, arrived: bool) -> (S
                     if !forward {
                         pts.reverse();
                     }
+                    run.ballistic = false;
+                    if c.kind == 13 {
+                        let here = cx.world.position(me);
+                        if pts.is_empty() {
+                            let floor = path.and_then(|p| cx.world.position(p)).and_then(|t| {
+                                let z = super::sly2::floor_under(
+                                    cx,
+                                    [t[0], t[1], t[2] + USE_ABOVE],
+                                    USE_ABOVE + USE_BELOW,
+                                )?;
+                                Some([t[0], t[1], z])
+                            });
+                            if let Some(f) = floor {
+                                pts.push(f);
+                                run.ballistic = true;
+                            }
+                        } else if let Some(h) = here {
+                            let d = |p: &[f32; 3]| crate::math::length(crate::math::sub(*p, h));
+                            let near = (0..pts.len()).min_by(|&a, &b| d(&pts[a]).total_cmp(&d(&pts[b]))).unwrap_or(0);
+                            pts.drain(..near);
+                        }
+                    }
+                    run.using = c.kind == 13 && !pts.is_empty();
                     run.path = pts;
                 }
                 if arrived {
@@ -549,7 +594,11 @@ pub fn step_commands(cx: &mut Cx<'_>, run: &mut CommandRun, arrived: bool) -> (S
                 }
                 run.path.clear();
                 run.path_at = 0;
+                run.ballistic = false;
+                run.using = false;
             }
+            11 => run.locks += 1,
+            12 => run.locks = run.locks.saturating_sub(1),
             3 => {
                 let at = c.args.first().and_then(|a| object(cx.world, me, a)).and_then(|t| cx.world.position(t));
                 run.at += 1;

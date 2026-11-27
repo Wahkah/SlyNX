@@ -71,6 +71,9 @@ pub const IDS: Ids = Ids {
     switch_trailing: 1,
 };
 
+/// The goal a 1417 entry with task state −1 gives for task state 0 (1764 for 1, 1765 for 2, 1766 for 3).
+pub const FOLLOW_GOAL_BASE: i32 = 1763;
+
 /// Sly 3's script events for the job system's (scripts.md 6, missions.md 4): a task event is event 20 (Sly 2's 17),
 /// becoming current or a job beginning event 22 (Sly 2's 19). The others' Sly 3 numbers are not established and
 /// are not raised (Sly 3's 21 to 24 mean other things than Sly 2's).
@@ -107,6 +110,8 @@ pub fn attach(world: &mut World, progress: Progress, carry: Option<Carry>, queue
     let mut j = Jobs::new_with(world, progress, &IDS);
     j.script_events = script_events;
     j.task_codes = task_codes;
+    // missions.md 4.1a (the 1417 row): a goal entry with task state −1 follows the task's state from 1763.
+    j.follow_goal_base = Some(FOLLOW_GOAL_BASE);
     j.sly3_rules = true; // Sly 3's order of becoming current and world start (sly3/missions.md 4, 7).
     // The macro packages (class 147) hear every task event too (missions.md 4.2).
     j.listener_class = Some(MACRO_LISTENER_CLASS);

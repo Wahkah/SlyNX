@@ -72,6 +72,16 @@ fn apply_world_cue(
             world.raise(seq, SEQUENCE_VALUE, alloc::vec![script::Value::Int(v)]);
             None
         }
+        // Command 632: the character becomes the player (a placement's ID means its copy's root); the session
+        // switches the gang to it.
+        talk::SeqCommand::SetPlayer(id) => {
+            let h = world.find_sly2_id(id, Some(seq));
+            let h = h.map(|x| engine::behavior::sly2_commands::placed_root(world, x).unwrap_or(x));
+            if let Some(l) = world.sly2.as_deref_mut() {
+                l.play_as = h;
+            }
+            None
+        }
         // Command 639: show a screen. The job prompt (class 127) takes control from the player until a face button
         // dismisses it, and is waited for (user-interface.md 2.1); other screens are not drawn by sequences yet.
         talk::SeqCommand::ShowScreen { screen, .. } => {
@@ -728,6 +738,13 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
     fn safe_house_input(&mut self, input: &FrameInput) -> FrameInput {
         use platform_api::Buttons;
         let mut out = *input;
+        // A sequence's 632 (the character becomes the player) switches the gang to it, as a take-out does.
+        if let Some(g) = self.game.as_mut()
+            && let Some(h) = g.world.sly2.as_deref_mut().and_then(|l| l.play_as.take())
+            && let Some(&(who, _)) = gang::CHARACTER_CLASSES.iter().find(|k| Some(k.1) == g.world.class(h))
+        {
+            self.switch_to = Some(who);
+        }
         if let Some(who) = self.switch_to.take() {
             let b = match who {
                 engine::gang::Who::Sly => Buttons::LEFT.0,

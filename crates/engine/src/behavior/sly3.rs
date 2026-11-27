@@ -244,15 +244,37 @@ pub fn alias_options(world: &mut World, h: Handle, class: i16) {
     }
 }
 
+/// Sly 3's reactive-prop options 1128 to 1143 are Sly 2's 1030 to 1045, one for one (missions.md 4.1a).
+pub const PROP_OPTIONS: core::ops::RangeInclusive<u16> = 1128..=1143;
+/// What Sly 3's prop option IDs are less than Sly 2's.
+pub const PROP_OPTION_SHIFT: u16 = 98;
+
+/// A Sly 3 reactive prop (class 111): Sly 2's prop model (`sly2_props::Prop`) over the prop's options and typed
+/// lists (the level's actions), in that order, with options 1128 to 1143 read as Sly 2's 1030 to 1045 (the event
+/// starts, hit counts 1130, items). The other options keep their IDs, which Sly 2's model does not read, except
+/// that values in Sly 2's prop range (1025 to 1045) are left out, as they mean something else in Sly 3.
+pub fn prop(world: &World, h: Handle) -> super::sly2_props::Prop {
+    let mut list: Vec<(u16, OptionValue)> = world.options(h).map(|o| o.entries().to_vec()).unwrap_or_default();
+    if let (Some(l), Some(slot)) = (world.sly3.as_deref(), world.slot(h)) {
+        list.extend(l.actions.iter().filter(|a| a.0 == slot).map(|a| (a.1, OptionValue::Args(a.2.clone()))));
+    }
+    let list: Vec<(u16, OptionValue)> = list
+        .into_iter()
+        .filter(|(id, _)| !(1025..=1045).contains(id))
+        .map(|(id, v)| if PROP_OPTIONS.contains(&id) { (id - PROP_OPTION_SHIFT, v) } else { (id, v) })
+        .collect();
+    super::sly2_props::Prop::from_entries(&list)
+}
+
 /// The behaviour of a Sly 3 object, from its class.
 pub fn for_class(world: &World, h: Handle) -> Behavior {
-    use super::{sly2, sly2_pickups, sly2_props, sly2_sensors};
+    use super::{sly2, sly2_pickups, sly2_sensors};
     match world.class(h) {
         Some(class::GUARD) => Behavior::Sly2Guard(Box::new(sly2::Sly2Guard::new(world, h))),
         Some(class::LASER) => Behavior::Sly2Laser(Box::new(sly2_sensors::Laser::new(world, h))),
         Some(class::DETECTOR) => Behavior::Sly2Detector(Box::new(sly2_sensors::Detector::new(world, h))),
         Some(class::CONTACT) => Behavior::Sly2Pad(Box::default()),
-        Some(class::PROP) => Behavior::Sly2Prop(Box::new(sly2_props::Prop::new(world, h))),
+        Some(class::PROP) => Behavior::Sly2Prop(Box::new(prop(world, h))),
         Some(class::TRIGGER) => Behavior::Sly2Volume(Box::default()),
         Some(c @ class::COIN..=class::LOOT) => sly2_pickups::Sly2Pickup::new(world, h, c - 12)
             .map_or(Behavior::None, |p| Behavior::Sly2Pickup(Box::new(p))),

@@ -392,10 +392,11 @@ impl Game {
             }
             // Vehicles hook: the driven machine runs wherever it is (the hacking ship flies far above the level).
             if by_mask
-                && self
-                    .world
-                    .handle(s)
-                    .is_some_and(|h| self.world.shared.driving != Some(h) && self.world.sly2_zone_mask(h) & mask == 0)
+                && self.world.handle(s).is_some_and(|h| {
+                    self.world.shared.driving != Some(h)
+                        && self.world.sly2_zone_mask(h) & mask == 0
+                        && !self.world.sly2_kept_active(h)
+                })
             {
                 continue;
             }

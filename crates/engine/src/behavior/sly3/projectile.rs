@@ -4,7 +4,8 @@
 //! - A pooled instance taken by script ID 825 (or by the session's shot stand-in, `game::sly3`) is launched with
 //!   option 64 (stream 30), its velocity in the world, and option 549 (stream 439), the damage it carries.
 //! - Each frame it moves by that velocity. Stand-in, a working choice [I] (the flight's end and its hit test are not
-//!   traced): it hits the first target within [`HIT_RADIUS`], or ends after [`LIFETIME`]; either way it leaves the
+//!   traced): it hits the first target within [`HIT_RADIUS`] ([`GUARD_HIT_RADIUS`] for a guard), or ends after
+//!   [`LIFETIME`]; either way it leaves the
 //!   world, back to its pool. Objects in `World::shared.sly3_unhittable` (a defeated enemy boat, stand-in) are passed
 //!   through.
 //! - Targets: active reactive objects (class 111, the enemy boats) for every projectile; for Carmelita's shots
@@ -41,6 +42,9 @@ pub const DAMAGE: u16 = 439;
 pub const GUARD_HIT_EVENT: u32 = 12;
 /// How near a target a hit lands (working value [I]).
 pub const HIT_RADIUS: f32 = 300.0;
+/// How near a guard a hit lands (working value [I]: a person, not a boat; a guard idling beside the line of fire is
+/// passed by).
+pub const GUARD_HIT_RADIUS: f32 = 150.0;
 /// How long a flight lasts at most, seconds (working value [I]).
 pub const LIFETIME: f32 = 2.0;
 /// The hit event.
@@ -77,6 +81,11 @@ impl Projectile {
         }
         if !world.in_world(me) {
             self.age = 0.0;
+            // Back in its pool: its shooter (script ID 552) is forgotten once the hit's event has run (the record is
+            // freed above at the same step).
+            if let Some(slot) = world.slot(me) {
+                world.shared.sly3_shooters.remove(&slot);
+            }
             return;
         }
         let Some(v) = world.options(me).and_then(|o| o.vec3(VELOCITY)) else { return };
@@ -87,11 +96,11 @@ impl Projectile {
         let to = [p[0] + v[0] * dt, p[1] + v[1] * dt, p[2] + v[2] * dt];
         world.set_position(me, to);
         self.age += dt;
-        let r2 = HIT_RADIUS * HIT_RADIUS;
         let guards = world.class(me).is_some_and(|c| SHOT_CLASSES.contains(&c));
-        let hit = targets(world, guards).into_iter().find(|&(_, q)| {
+        let hit = targets(world, guards).into_iter().find(|&(h, q)| {
+            let r = if world.class(h) == Some(GUARD_CLASS) { GUARD_HIT_RADIUS } else { HIT_RADIUS };
             let d = [q[0] - to[0], q[1] - to[1], q[2] - to[2]];
-            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= r2
+            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= r * r
         });
         if let Some((h, _)) = hit {
             if world.class(h) == Some(GUARD_CLASS) {

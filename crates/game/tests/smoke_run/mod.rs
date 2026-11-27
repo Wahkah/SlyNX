@@ -347,7 +347,15 @@ fn route_target(s: &game::sly3::Sly3Session<NullBackend, DiscFile>) -> Option<en
                     .is_some_and(|o| o.entries().iter().any(|(_, v)| v.as_i32().is_some_and(|v| next.contains(&v))))
             };
             // Or a use point (class 33) whose (task, state) pairs (1170) name it.
-            if let Some(h) = g.handles().find(|&h| matches!(g.class(h), Some(21 | 33)) && g.is_active(h) && names(h)) {
+            // (Use points include the classes derived from 33: m1_run's blimp anchors, class 35.)
+            // A use point first: a trigger naming the same task may be one a state machine brought in that only
+            // completes it once it is current (v_gauntlet's 139739 beside use point 50450 for 2308).
+            let point = |h| engine::behavior::sly3::interactables::is_use_point(g, h);
+            let named = |h| g.is_active(h) && names(h);
+            if let Some(h) = g.handles().find(|&h| point(h) && named(h)) {
+                return Some(h);
+            }
+            if let Some(h) = g.handles().find(|&h| g.class(h) == Some(21) && named(h)) {
                 return Some(h);
             }
             // Or a use point the next task's switches bring in while it is available (its own script answers the
@@ -549,6 +557,45 @@ fn knockout_input(
         let yaw = (at[1] - floor[1]).atan2(at[0] - floor[0]);
         let (sn, cs) = (yaw.sin(), yaw.cos());
         let to = engine::math::Affine { cols: [[cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]], t: floor };
+        g.systems.player.place(&mut g.world, to);
+    }
+    Some(sly2_attack_input(k))
+}
+
+/// m1_run's opera sign (missions.md 4.1a): `t1_run_gauntlet` (2208) becomes current when the sign's breakable part
+/// 158868 (class 111) breaks, its prop model's event 5. While 2208 is available, the route puts Sly beside the part
+/// once a second (no path-finding; it is up on a roof) and jumps and attacks (Cross, then Square), which reaches it
+/// as a hit (`game::sly3::crew`).
+fn prop_input(
+    s: &mut game::sly3::Sly3Session<NullBackend, DiscFile>,
+    f: u32,
+    journal: &mut Vec<String>,
+    since: &mut Option<u32>,
+) -> Option<FrameInput> {
+    const TASK: i32 = 2208;
+    const PART: i32 = 158868;
+    let time = f as f32 / FPS as f32;
+    let available = s
+        .jobs
+        .as_ref()
+        .is_some_and(|j| j.task_state(TASK) == Some(1) && j.current != j.graph.task_ids.get(&TASK).copied());
+    if !available {
+        if since.take().is_some() {
+            journal.push(format!("{time:.1} s: opera sign part {PART} broken"));
+        }
+        return None;
+    }
+    let g = s.game.as_mut()?;
+    let part = g.world.find_sly3_id(PART, None).filter(|&h| g.world.in_world(h))?;
+    let from = *since.get_or_insert_with(|| {
+        journal.push(format!("{time:.1} s: knocking opera sign part {PART} (Sly put beside it, no path-finding)"));
+        f
+    });
+    let k = f - from;
+    if k.is_multiple_of(FPS) {
+        let at = g.world.position(part)?;
+        let floor = [at[0] + SLY2_ATTACK_STANDOFF, at[1], at[2] + 5.0];
+        let to = engine::math::Affine { cols: [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], t: floor };
         g.systems.player.place(&mut g.world, to);
     }
     Some(sly2_attack_input(k))
@@ -1048,6 +1095,8 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
     let mut battle = Battle::default();
     // m1_ball: the frame of the last landing seen, launches and tanks journalled so far.
     let mut balling = Balling::default();
+    // m1_run's opera sign: since which frame the route has been knocking it.
+    let mut breaking: Option<u32> = None;
     // The frame of the last load into another world, the character's height just after it, and since when the route
     // has had nothing to do.
     let mut loaded: Option<u32> = None;
@@ -1088,9 +1137,9 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
         if placed && steering == 10 * FPS + 30 {
             // Half a second after placing at a use point: how far the character is from it, against its reach.
             if let Some(h) = target {
-                use engine::behavior::sly3::interactables::{UsePoint, class};
+                use engine::behavior::sly3::interactables::{UsePoint, is_use_point};
                 let g = &s.game.as_ref().unwrap().world;
-                if g.class(h) == Some(class::USE_POINT) {
+                if is_use_point(g, h) {
                     let (p, q) = (g.position(h), g.player.and_then(|p| g.position(p)));
                     let d = p.zip(q).map(|(p, q)| [q[0] - p[0], q[1] - p[1], q[2] - p[2]]);
                     journal.push(format!(
@@ -1108,11 +1157,9 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
         let mut input = steer.unwrap_or_else(|| if wander { gang_pattern(f) } else { FrameInput::default() });
         // At a use point within reach: stand and press the use button (Circle) twice a second.
         if let Some(h) = target {
-            use engine::behavior::sly3::interactables::{UsePoint, class};
+            use engine::behavior::sly3::interactables::{UsePoint, is_use_point};
             let g = &s.game.as_ref().unwrap().world;
-            if g.class(h) == Some(class::USE_POINT)
-                && UsePoint::new(g, h).user_of(g, h).is_some_and(|u| Some(u) == g.player)
-            {
+            if is_use_point(g, h) && UsePoint::new(g, h).user_of(g, h).is_some_and(|u| Some(u) == g.player) {
                 let b = if f % (FPS / 2) == 0 { platform_api::Buttons::A.0 } else { 0 };
                 input = FrameInput { pressed: b, buttons: b, ..Default::default() };
                 if b != 0 {
@@ -1168,6 +1215,9 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             input = i;
         }
         if let Some(i) = ball_input(&mut s, f, &mut journal, &mut balling) {
+            input = i;
+        }
+        if let Some(i) = prop_input(&mut s, f, &mut journal, &mut breaking) {
             input = i;
         }
         s.update(&input, 1.0 / FPS as f32);
@@ -1748,7 +1798,11 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
         } else if let Some((k, h)) =
             photo_from.and_then(|(a, h)| Some((f.checked_sub(a)?, h))).filter(|p| p.0 < 3 * FPS)
         {
-            // Aimed at the target (the stick's stand-in), then the shutter (R) once the framing has settled.
+            // Aimed at the target (the stick's stand-in), then the shutter (R) once the framing has settled; kept at
+            // its framing distance until then.
+            if k < FPS / 2 {
+                sly2_place_for_photo(&mut s, h);
+            }
             if let (Some(p), Some(at)) = (s.photo.as_mut(), s.game.as_ref().and_then(|g| g.world.position(h))) {
                 p.look_at(at);
             }
@@ -1766,7 +1820,12 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
             toss.and_then(|(a, c, v)| Some((f.checked_sub(a)?, c, v))).filter(|t| t.0 < SLY2_TOSS_WINDOW)
         {
             sly2_toss_input(&mut s, k, c, v)
-        } else if let Some(k) = attack_from.map(|a| f - a).filter(|&k| k < 3 * FPS) {
+        } else if let Some(k) = attack_from.map(|a| f - a).filter(|&k| {
+            // A boss (classes 59 to 68) is fought until the next play (m1_boss: Dimitri takes 36 of Sly's strikes).
+            let boss =
+                attack_target.and_then(|h| s.game.as_ref()?.world.class(h)).is_some_and(|c| (59..=68).contains(&c));
+            k < if boss { SLY2_STALL_AFTER as u32 * FPS } else { 3 * FPS }
+        }) {
             // Each jump starts beside the target again (it moves; no path-finding).
             if k % FPS == 0
                 && let Some(h) = attack_target
@@ -2806,8 +2865,9 @@ const SLY2_BENTLEY_TOSSES_MAX: u32 = 4;
 /// See [`sly2_bentley_toss_input`]: how far from the prop Murray throws Bentley from.
 const SLY2_BENTLEY_TOSS_FROM: f32 = 700.0;
 
-/// See [`sly2_toss_input`]: how far from the volume a creature may be for Murray to be put beside it.
-const SLY2_TOSS_FETCH: f32 = 2000.0;
+/// See [`sly2_toss_input`]: how far from the volume a creature may be for Murray to be put beside it (pursuers stop
+/// at edges, so a rat waits on the ledge above the water main).
+const SLY2_TOSS_FETCH: f32 = 4000.0;
 /// How long one toss play lasts: the creatures pursuing Murray may come from far.
 const SLY2_TOSS_WINDOW: u32 = 20 * FPS;
 /// See [`sly2_toss_input`]: how near the creature Murray must be to lift it.
@@ -3018,6 +3078,16 @@ fn sly2_stand_by(s: &mut Sly2, h: engine::object::Handle) -> Option<()> {
 fn sly2_frame_photo(s: &mut Sly2, h: engine::object::Handle) -> Option<()> {
     // The binocucom is closed first, so it opens again at the new eye.
     s.photo = None;
+    sly2_place_for_photo(s, h)?;
+    let g = s.game.as_mut()?;
+    let player = g.world.player?;
+    g.world.shared.camera_binocucom = Some((player, false));
+    Some(())
+}
+
+/// Puts the played character where target `h` fills the frame as [`sly2_frame_photo`] wants (again each frame while
+/// a target that moves is framed: m1_recon's 122764 rides on Dimitri as he walks his list).
+fn sly2_place_for_photo(s: &mut Sly2, h: engine::object::Handle) -> Option<()> {
     let g = s.game.as_mut()?;
     let at = g.world.position(h)?;
     let t = game::sly2::photo::Target::new(&g.world, h, &game::sly2::photo::OPTIONS);
@@ -3036,7 +3106,7 @@ fn sly2_frame_photo(s: &mut Sly2, h: engine::object::Handle) -> Option<()> {
     let (sn, cs) = (yaw.sin(), yaw.cos());
     let to = engine::math::Affine { cols: [[cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]], t: from };
     g.systems.player.place(&mut g.world, to);
-    g.world.shared.camera_binocucom = Some((player, false));
+    let _ = player;
     Some(())
 }
 

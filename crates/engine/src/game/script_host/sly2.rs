@@ -181,6 +181,13 @@ impl WorldHost<'_> {
             {
                 return Value::Vector(p);
             }
+            // Script ID 41 (option 27, a getter) is the object's in-world flag (missions.md 4.3: the siege
+            // generator counts only its spawns in the world as alive).
+            if option == IN_WORLD
+                && let Some(h) = self.obj(object)
+            {
+                return Value::Bool(self.world.in_world(h));
+            }
             // Script ID 643 (stream option 620, a getter) on a sequence is the starter it runs with
             // (dialogue-and-voice.md 2.1) [I: from its uses; row 2's safe-house sequence 27254, started by 141710
             // with Sly, takes every character but that one out of the world].
@@ -322,6 +329,17 @@ impl WorldHost<'_> {
         let h = self.obj(object).ok_or(ScriptError::Host(option as u32))?;
         if self.world.sly2.as_deref_mut().is_some_and(|l| l.anim.set_option(h, option, &v)) {
             return Ok(());
+        }
+        // Object-model hook: writing an object's position (script ID 34, option 21) moves it there in the world
+        // [I: the getter's counterpart; m1_recon's 1771 puts photo target 122764 150 above Dimitri, then parents it to
+        // him]. Stored only, the target stayed where it was loaded and rode on him from there.
+        if option == OBJECT_POSITION
+            && self.world.sly3.is_none()
+            && let Some(p) = v.as_vec3()
+            && let Some(mut w) = self.world.world_transform(h)
+        {
+            w.t = p;
+            self.world.set_world_transform(h, w);
         }
         if option == NOISE_POINT
             && let Some(to) = v.as_vec3()
@@ -580,6 +598,16 @@ impl WorldHost<'_> {
                         g.flight = None;
                     }
                 }
+                // A knocked-out creature's copy leased again comes back up (the siege's rats).
+                {
+                    let mut b = self.world.take_behavior(r.index());
+                    if let crate::behavior::Behavior::Sly2Guard(g) = &mut b
+                        && g.knocked_out()
+                    {
+                        g.revive(self.world, r);
+                    }
+                    self.world.put_behavior(r.index(), b);
+                }
                 self.world.shared.leased.insert(h.index());
                 self.world.set_in_world(h, true);
                 self.world.set_in_world(r, true);
@@ -709,6 +737,15 @@ impl WorldHost<'_> {
             && let Some(h) = self.obj(object)
         {
             self.world.set_in_world(h, option == ADD_TO_WORLD);
+            // A copy's root answers to its placement (scripts.md 5): adding it adds the placement it hangs under
+            // too, which a placement with option 26 left out (m1_boss: 1918's 39 on Dimitri, 122332, whose
+            // placement starts out of the world, kept him inactive).
+            if option == ADD_TO_WORLD
+                && let Some(p) = self.world.parent(h)
+                && self.world.slot(p).and_then(|ps| self.copy_root(ps)) == Some(h.index())
+            {
+                self.world.set_in_world(p, true);
+            }
             // A creature taken out mid-throw starts afresh when it is leased again.
             if let Some(crate::behavior::Behavior::Sly2Guard(g)) = self.world.behavior_mut(h) {
                 g.held = false;
@@ -1012,6 +1049,8 @@ const LEASE_EVENT: u32 = 14;
 const FIXED_PLACEMENT: u16 = 1178;
 /// Murray takes Bentley up to throw (script ID 939).
 const HOLD_BENTLEY: u16 = 1051;
+/// The in-world flag (script ID 41).
+const IN_WORLD: u16 = 27;
 /// A sequence's starter (script ID 643).
 const SEQUENCE_STARTER: u16 = 620;
 /// An object that keeps its own zone mask when one is set on it or an ancestor (clock-and-loop.md 3.1).

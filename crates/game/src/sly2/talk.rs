@@ -80,6 +80,8 @@ pub enum SeqCommand {
     /// Option 631 (record kind 6): stop the named sequence: all its runs stop and retract their waited playbacks
     /// (animation.md 2).
     StopSequence(i32),
+    /// Option 632: the character named becomes the player (missions.md 4.3: `632 8` hands play to Bentley).
+    SetPlayer(i32),
     /// Option 629: wait until the value is in the run's own sequence's signal set; `consume` (flag not 0) then
     /// removes it (dialogue-and-voice.md 2.1).
     WaitSignal {
@@ -173,6 +175,8 @@ pub const SCRIPT_VALUE: i16 = 634;
 pub const PLAY_CLIP: i16 = 635;
 /// Option 627: stop a thread.
 pub const STOP_THREAD: i16 = 627;
+/// Option 632: make a character the player.
+pub const SET_PLAYER: i16 = 632;
 /// Option 631: stop a sequence.
 pub const STOP_SEQUENCE: i16 = 631;
 /// Option 629: wait for a signal (value, flag); option 630: send one (value, sequence) (dialogue-and-voice.md 2.1).
@@ -281,6 +285,9 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
             }
             if o.id == THREAD_END {
                 return Some(SeqCommand::ThreadEnd);
+            }
+            if o.id == SET_PLAYER {
+                return Some(SeqCommand::SetPlayer(int_of(typed_args(v)?.first()?.1)));
             }
             if o.id == STOP_SEQUENCE {
                 return Some(SeqCommand::StopSequence(int_of(typed_args(v)?.first()?.1)));
@@ -707,6 +714,7 @@ impl Sly2Sound {
                 | SeqCommand::RemoveObject(_)
                 | SeqCommand::Value(_)
                 | SeqCommand::StopSequence(_)
+                | SeqCommand::SetPlayer(_)
                 | SeqCommand::ShowScreen { .. }
                 | SeqCommand::SendSignal { .. }
                 | SeqCommand::RunList { .. }

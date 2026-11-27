@@ -77,8 +77,9 @@ pub enum Request {
     Present { object: i32, on: bool },
     /// `0x1E`: a task's state (4: current).
     TaskState { task: i32, state: i32 },
-    /// `0x19`: drive `object`'s state machine `machine` to `goal`.
-    Goal { object: i32, machine: i32, goal: i32, snap: bool },
+    /// `0x19`: drive `object`'s state machine `machine` to `goal`; `near` is the script's object (its copy), where
+    /// `object` is looked up first (a copy's script names its own copy's objects).
+    Goal { object: i32, machine: i32, goal: i32, snap: bool, near: Option<engine::object::Handle> },
     /// `0x1A` / `0x1B`.
     Screen { screen: i32, on: bool },
     /// `0x59` / `0x5A`: push or pop a music track.
@@ -105,8 +106,6 @@ pub enum Request {
     Hint { string: i32, seconds: f32 },
     /// See [`Request::Hint`].
     ClearHint,
-    /// `0x1F`: `script` pauses (true) or resumes the run; a pause ends with its script.
-    Pause { script: i32, on: bool },
     /// `0x46` / `0x6E`: open the binocucom with a scripted view on `character`, looking at `look_at` (−1 none), or
     /// close it (interactables.md 5a).
     Binocucom { open: bool, character: i32, look_at: i32 },
@@ -150,6 +149,8 @@ enum Wait {
 
 #[derive(Clone, Debug)]
 struct Runner {
+    /// Unique in the session (the holds a runner takes are its own).
+    uid: u32,
     name: i32,
     pc: Option<usize>,
     stack: Vec<Frame>,
@@ -209,6 +210,10 @@ pub struct Scripts {
     stopped: BTreeSet<i32>,
     /// Alarms set on a named script (method 735): alarm → that script.
     alarm_owners: BTreeMap<i32, i32>,
+    /// Player 0's holds the scripts' pauses (`0x1F`) took: issuing runner → its script (scripts.md 7.3a: a retiring
+    /// runner releases what it holds).
+    pub holds: BTreeMap<u32, i32>,
+    next_uid: u32,
     /// Alarms that waits with the clear flag passed this frame, cleared once every runner has run (working reading
     /// [I]: 2142's runners 15137 and 4904 both wait on 139312, one clearing it, and both go on, missions.md 4.1a).
     clears: Vec<i32>,
@@ -238,6 +243,8 @@ impl Scripts {
             stopped: BTreeSet::new(),
             alarm_owners: BTreeMap::new(),
             clears: Vec::new(),
+            holds: BTreeMap::new(),
+            next_uid: 1,
         }
     }
 
@@ -282,10 +289,12 @@ impl Scripts {
             .collect();
         let child = (commands[0].child & 0x7FF) as usize;
         self.started.push((oid, h));
+        let uid = self.new_uid();
         self.running.push(ScriptRun {
             oid,
             object,
             runners: alloc::vec![Runner {
+                uid,
                 name: commands[0].object,
                 pc: (child != 0).then_some(child),
                 stack: alloc::vec![Frame::Root],
@@ -322,6 +331,18 @@ impl Scripts {
     pub fn stop(&mut self, oid: i32) {
         self.running.retain(|s| s.oid != oid);
         self.forget_alarms_of(oid);
+        self.release_retired();
+    }
+
+    fn new_uid(&mut self) -> u32 {
+        self.next_uid += 1;
+        self.next_uid
+    }
+
+    /// The holds of runners no longer running are released.
+    fn release_retired(&mut self) {
+        let live: BTreeSet<u32> = self.running.iter().flat_map(|s| s.runners.iter().map(|r| r.uid)).collect();
+        self.holds.retain(|uid, _| live.contains(uid));
     }
 
     /// Sets `alarm` on script `script` (method 735): it stays set until cleared or until that script ends.
@@ -372,6 +393,7 @@ impl Scripts {
         // Scripts started this frame were pushed onto `self.running`.
         scripts.append(&mut self.running);
         self.running = scripts;
+        self.release_retired();
     }
 
     fn step_script(&mut self, world: Option<&World>, s: &mut ScriptRun, view: &View, scripts: &BTreeSet<i32>, dt: f32) {
@@ -387,7 +409,8 @@ impl Scripts {
         if s.runners.is_empty() && !s.finishing && !s.finish.is_empty() {
             s.finishing = true;
             for &c in &s.finish.clone() {
-                s.runners.push(Runner { name: -1, pc: Some(c), stack: alloc::vec![Frame::Root], wait: None });
+                let uid = self.new_uid();
+                s.runners.push(Runner { uid, name: -1, pc: Some(c), stack: alloc::vec![Frame::Root], wait: None });
             }
         }
     }
@@ -521,6 +544,7 @@ impl Scripts {
                 0x00 => {
                     if let Some(ch) = link(c.child) {
                         spawned.push(Runner {
+                            uid: self.new_uid(),
                             name: c.object,
                             pc: Some(ch),
                             stack: alloc::vec![Frame::Root],
@@ -629,6 +653,7 @@ impl Scripts {
                     machine: word(&a, 1),
                     goal: word(&a, 2),
                     snap: a.get(12).is_some_and(|&b| b != 0),
+                    near: s.own.or(s.copy),
                 }),
                 0x1A | 0x1B => self.requests.push(Request::Screen { screen: word(&a, 0), on: c.id == 0x1A }),
                 0x1E => {
@@ -677,7 +702,15 @@ impl Scripts {
                 0x15 => self.requests.push(Request::Module { script: s.oid, value: word(&a, 0), copy: s.copy }),
                 0x60 => self.requests.push(Request::Hint { string: word(&a, 0), seconds: float(&a, 1) }),
                 0x61 => self.requests.push(Request::ClearHint),
-                0x1F => self.requests.push(Request::Pause { script: s.oid, on: a.first().is_some_and(|&b| b != 0) }),
+                // A pause (scripts.md 7.3a / 7.3b): the hold is the issuing runner's, and goes when it retires or its
+                // script stops; a second `0x1F` (a release) ends the script's holds.
+                0x1F => {
+                    if a.first().is_some_and(|&b| b != 0) {
+                        self.holds.insert(r.uid, s.oid);
+                    } else {
+                        self.holds.retain(|_, o| *o != s.oid);
+                    }
+                }
                 // 0x36 moves a character to an object (missions.md 4.1a), arriving at once here like 0x30.
                 0x22 | 0x30 | 0x36 => {
                     let target = [c.object, s.context, s.target, s.object].into_iter().find(|&o| o != -1).unwrap_or(-1);
@@ -738,7 +771,13 @@ mod tests {
         ScriptRun {
             oid: 1,
             object: -1,
-            runners: alloc::vec![Runner { name: -1, pc: Some(child), stack: alloc::vec![Frame::Root], wait: None }],
+            runners: alloc::vec![Runner {
+                uid: 0,
+                name: -1,
+                pc: Some(child),
+                stack: alloc::vec![Frame::Root],
+                wait: None
+            }],
             commands,
             args,
             finish: Vec::new(),

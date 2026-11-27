@@ -2030,7 +2030,8 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
     1891 removes Sly (7) and adds Bentley (8) and Murray (9), the copies of placements 7, 8 and 9;
   - props' contact response bytes (characters.md 2.3; `sly2_props::Prop::responses`): script ID 125 (stream 53) sets
     the byte of each kind bit of its first argument; with bytes set an attack counts only when the OR of its kind
-    bits' bytes has 8, and an attack of unknown kind (Notice kind 1) does not. Stand-in: the bytes a record sets at
+    bits' bytes has a bit of 0xF8 (8 and 16 count; 1, 2 and 4 are harmless), and an attack of unknown kind (Notice
+    kind 1) does not. Stand-in: the bytes a record sets at
     load are not applied (m1_brawl's alarm boxes 125050 take only kind 0x10000, which no gang move is known to be).
     The gang's attacks carry kinds: strikes 0x2 (Murray's Triangle punches, 0x200000, are not told apart), Sly's air
     attacks 0x4 and 0x20, the flop 0x4, the crossbow 0x100, the dart 0x40000;
@@ -2043,11 +2044,47 @@ and swarming creatures (classes 58 and 57, specs/sly2/guards.md), `Sly2Guard`:
     it places the character; 124142 counts Bentley, so 1904 is done by play); the crawl reaches its volume by the
     volume's visit flag while the crawl lasts (putting Sly in the volume's middle, out of cover, ended the crawl and
     removed the volume before it saw him; the removal's event 5 used to do the work);
-  - still forced in `m1_neela` and `m1_heist`: Neyla's chase 1857 (her lists use command 606 on class-3 markers,
-    97775 and many in 123907, which is not a curve, so the use is skipped and she never leaves the roof at 2,800; the
-    route's Sly also falls below the world after the walk to marker 97772), 1896 (the pipe-room valves, not looked
-    at yet) and the siege 1911 (the rats spawn and pursue, but the played Bentley is out of the world during the
-    siege and the route fights only two before none is in reach);
+  - command 606 (13, "use") branches on its target (options-by-class.md 2.2): a curve is got on at its nearest point
+    and travelled without gravity (sitting on class 13, climbing class 11 and hanging from class-19 bars are walked
+    along it, a stand-in); anything else (a class-3 marker) is the floor under it, searched from 100 above to 150
+    below (`sly2::floor_under`), which the guard moves to under step physics (`CommandRun::ballistic`; stand-in: it
+    walks there and drops off edges under gravity instead of jumping, and has arrived only once on that floor). A use
+    and a 607 … 608 lock (`CommandRun::locks`) keep the guard active whatever the camera's zone mask
+    (`World::sly2_kept_active`, clock-and-loop.md 3.2);
+  - guards walking a path (601) are under step physics too (guards.md 5), no longer at the height they were loaded
+    at; *stand-in*: a guard does not fall more than 400 below the point it walks to (`PATH_SLACK`, for the jumps
+    over gaps that are not played), and only swarming creatures are taken out after falling 3,000 below where they
+    were loaded. Neyla walks 123907 from the roof to the street and on, and 1857 is done by play; Dimitri's follow still
+    plays;
+  - a knocked-out swarming creature leaves the world 2 s later (`SWARMER_LINGER`, *stand-in*: what becomes of it is
+    not specified), and a pool copy leased again comes back up (`Sly2Guard::revive`);
+  - script ID 39 on a copy's root also adds its placement when the root hangs under it (m1_boss: Dimitri's placement
+    122332 starts out of the world, and he stayed inactive), and writing an object's position (script ID 34, option
+    21) moves it in the world [I] (m1_recon's photo target 122764 is put above Dimitri and rides on him);
+  - route: the photo play keeps the character at the target's framing distance until the shutter (a target that
+    moves);
+  - sequence command 632 makes the character it names the player (missions.md 4.3; `SeqCommand::SetPlayer`,
+    `Sly2Level::play_as`): the session switches the gang to it (`632 8` hands play to Bentley; m1_heist's 1910 to
+    Sly for the siege);
+  - script ID 41 (option 27) is the in-world flag: the siege generator counts only its spawns in the world as alive;
+  - a gang hit takes its part's contact value from the guard's hit points (characters.md 2.3; `gang_hit_value`):
+    Sly's strikes and air attacks 10 (the Silent Obliteration juggle 100), Murray's punches 20, his flop 5, his charge
+    10, Bentley's strike 5, the dart 0; a thrown object, a blast or a hit of no kind keeps the placeholder 20. The
+    reaction's scaling (shrunk ×4, ignore-damage, surprise knock-out) is as before. An escort hit keeps leading (task
+    event 21 is its job's to answer; in pursuit its list stopped for good);
+  - pursuits keep to the floor (*stand-in*, guards.md 5: pursuers plan over navigation regions with step, jump and
+    drop links, not built): with a floor within the step up or 600 down ahead (`PURSUIT_DROP`, for the drop links) a
+    pursuer moves onto it, with none it stops at the edge. The route's toss fetches Murray to a free rat within 4,000
+    of the volume (they wait at the ledge above the water main);
+  - route: a boss (classes 59 to 68) is attacked until the next play rather than for 3 s;
+  - still forced in `m1_heist`: 1896 (the pipe-room valves: each use plays a turn clip whose timed type-12 events
+    step the valve's 1737 through module 181 or 183 on event 4 of the clip playback, which is not raised, and the
+    handler reads script ID 250 of the playback, not specified) and the siege 1911 (Sly plays it and the generator
+    spawns its 9, but the route fights two and then finds none in the world). 1895 is done by play only when prop
+    123934 survives until then: until 1895's state 1 sets its bytes nothing seals it (1895's state-0 handler does not
+    run at a world start here), and in some runs an attack near it in 1893's fight breaks it early, so its request
+    for 1895 is refused and 1895 is forced. `m1_boss` (1929): Dimitri is active and pursues; the route does not knock
+    him out yet;
   - the route's toss: Murray waits on a floor 1,000 from the volume toward where the creature was loaded, for the
     rats that pursue him, or is put beside a free one on a floor within 2,000 of the volume; the nearest free one in
     reach he turns to and lifts, then he steers the aim onto the volume and throws; a toss lasts up to 20 s and holds
@@ -3095,9 +3132,13 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
             6676, group 8464 class 91, now pooled: classes 89 to 92) every 0.25 s at 4,000 units/s with damage 20,
             Carmelita as its shooter, and an aim assist (0.35 rad). The projectile behaviour now covers classes 89
             to 92; Carmelita's shots also hit guards, giving them script event 12 with a hit record whose amount is
-            the shot's damage. The holds taken before she was handed control (the intro script 2142's `0x1F` (1, 3),
-            never released: 2142 keeps a runner that sends the wave tick forever) do not hold her pad (open: a hold
-            is released when its script stops, missions.md 4.1a, but nothing here stops 2142's runner; still needed).
+            the shot's damage. A shot hits a guard within 150 units (a boat within 300) [I]; its shooter is forgotten
+            at the step after it leaves the world, once the hit's event has run.
+          - Holds (scripts.md 7.3a / 7.3b): a `0x1F` pause is the issuing runner's (`commands::Scripts::holds`), and is
+            released when that runner retires or its script stops, or by a release from the script. 2142's hold is
+            its main runner's, which retires once runners 28 and 15137 have passed alarms 139312 and 139313 (set by
+            Carmelita's list 2144), just before battle 1: she plays unheld. A wait whose clear flag passes clears its
+            alarm at the end of the frame, after every runner has run [I] (15137 and 4904 both wait on 139312).
           - Frame order (missions.md 4.1a): a task made current starts its script at once, and the script takes its
             first step in the same update (`commands::Scripts::step_now`; its `0x15` hooks run at once), so a battle's
             139345 (2653) runs before any later wave tick, and 2142's ticks between battles land on the finished
@@ -3105,15 +3146,13 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
             named).
           - Route: while Carmelita is driven it heads for no waypoint, turns her to the nearest enemy that is up
             (state 0 to 2) and fires within 7,500 units. The enemies take five shots each. Battles 1 to 4 end at
-            1062.3, 1072.2, 1085.2 and 1099.2 s; `t1_turf_war_complete` (2166) runs and m1_turf_war ends (1105.4 s).
+            1063.0, 1073.2, 1086.2 and 1100.2 s; `t1_turf_war_complete` (2166) runs and m1_turf_war ends (1106.5 s).
             `smoke_sly3_job` asserts that 2166 became current only when `SLYNX_ROUTE_SECONDS` is 1,100 or more, so
             the check is part of the long release run, not the default 60 s one.
           - Open: Carmelita's controls, movement, clips and death.
-      35. To m1_ball. Stand-in [I] (open: what stops 2142's runner, missions.md 4.1a; m1_turf_war fires no exit at its
-          end): when a job ends, the scripts still running of its tasks other than its last (whose closing scene
-          plays on) stop, and their holds go. With 2142's hold gone the safe house takes Bentley out (waypoint 64924's
-          custom property 1991 is 25), and the walk to it (placed after 10 s) begins m1_ball at `t1_ball_intro`
-          (2171, 1118.5 s). Its script 2172 plays and ends, and player 0 has Murray.
+      35. To m1_ball. With no hold left, the safe house takes Bentley out (waypoint 64924's custom property 1991 is
+          25), and the walk to it (placed after 10 s) begins m1_ball at `t1_ball_intro` (2171, 1119.5 s). Its script
+          2172 plays and ends, and player 0 has Murray.
       36. m1_ball (missions.md 4.1a; `game::sly3::ball`, stand-ins [I] where marked):
           - The launcher (clip 163095 under a copy of `murray_ball_launcher`, placement 139370): its module's event-2
             handler sets Murray's velocity to (0, 0, 5,000) (a crew member's script ID 64, stream 30, is a launch,
@@ -3127,11 +3166,42 @@ Written from `specs/sly2/characters.md` 1.1, 1.2, 5.3, 9 to 9.3, `specs/sly2/ani
             state machine, its effect and its task's state 2. Failure (1260) needs hits on Murray, which nothing here
             makes.
           - Route: a second after each landing Murray is put on the launcher (no path-finding); in flight he is
-            steered at the nearest tank left. 2173 (1149.8 s), 2175 (1154.2 s), the six tanks between 1154.0 and
-            1181.2 s, `t1_ball_complete` (2184, 1181.2 s); the job's exit 2045 reloads v_ext (1194.6 s).
-          - m1_run then begins at `t1_run_intro` (2192, 1204.6 s, Sly at waypoint 35785). Its next task,
-            `t1_run_destroy_target_1` (2194, script 2197), is named only by object 16255 (class 35), and the specs do
-            not cover m1_run: the route stops there.
+            steered at the nearest tank left. 2173 (1150.8 s), 2175 (1155.2 s), the six tanks between 1155.1 and
+            1182.2 s, `t1_ball_complete` (2184, 1182.2 s); the job's exit 2045 reloads v_ext (1195.6 s).
+      37. m1_run (missions.md 4.1a): `t1_run_intro` (2192, 1205.7 s, Sly at waypoint 35785). Using a blimp anchor
+          (object 16255, class 35, a class derived from 33, in copies of `v_blimp_anchor` under placements 139451 and
+          139452) makes 2194 / 2204 current through its 1170 pair. The use button and the route take the classes
+          derived from 33 as use points when their use starts a script or requests tasks
+          (`interactables::is_use_point`) [I].
+          - State machines (class 132, `game::sly3::machines`): the tasks' 1417 goals (`Jobs::machine_goals`) and
+            `0x19` drive a machine to a goal along the fewest transitions (from the record's tables after its object
+            list; flag bit 0 both ways). Each transition's object is the clip it plays on the machine's object, whose
+            kind-7 / 8 events add and remove objects (`clips`); an instant goal applies every transition's events at
+            once, otherwise the last transition's clip plays. A 1417 entry with task state −1 follows the task's state
+            (goal 1763 + state, `Jobs::follow_goal_base`), and an instant entry applies only while restoring. Lookups
+            stay in the copy: a script's `0x19` names objects in its own copy first, the machine is the one in the
+            object's copy, and a clip's events never reach another copy's object of the same ID (v_gauntlet's
+            buttons each have root 145257 and use point 50450). Working choice [I]: a machine starts in its first
+            listed state.
+          - So 2194's goal drives anchor 139451's 5099 to 1764 (clip 163033 adds 16255): the route uses it (Circle)
+            and 2194 runs (1250.0 s); 2198 (1254.4 s); trigger 140679 completes 2200; 2201 (1264.4 s); anchor 139452
+            makes 2204 current (1292.0 s); `t1_run_gauntlet_intro` (2206, 1301.5 s).
+          - The route also prefers a use point to a trigger naming the same task (v_gauntlet's trigger 139739,
+            brought in by a machine, stands beside use point 50450 for 2308).
+          - 2208 `t1_run_gauntlet` becomes current when the opera sign's breakable part 158868 (class 111) breaks: its
+            prop model's event 5, which placement 139494's override module answers. Sly 3 props now use Sly 2's
+            prop model over their own options (`behavior::sly3::prop`): options 1128 to 1143 are Sly 2's 1030 to 1045
+            one for one (1130 the hit count; 158868 has none, so its one event advances at the first hit), with the
+            typed lists (the level's actions) after the plain options; values in Sly 2's prop range (1025 to 1045)
+            are left out, as they mean other things in Sly 3. The crew's attacks (punch, crossbow, air attack,
+            flop) now also reach reactive props within 400 units of their origin [I] (`crew::PROP_REACH`).
+          - Route: while 2208 is available Sly is put beside the part (no path-finding; it is up on a roof) and
+            attacks; it breaks at once (1301.8 s). 2210 and 2212 follow (1316.2 s; trigger 140689 completes 2212),
+            then `t1_run_chase_intro` (2214, 1326.3 s): its script 2216 starts the chase director 2217 and requests
+            2214 → 2.
+          - Stop: `t1_run_chase` (2220) is available, has no script, and nothing names it; 2217 waits on alarm 139527
+            (and its runner 139523 on 139524). What makes 2220 current, what sets the alarms and what completes the
+            chase are open (missions.md 4.1a).
           - `smoke_sly3_job` asserts 2171 with `SLYNX_ROUTE_SECONDS` of 1,150 or more and 2184 with 1,190 or more
             (the long release run).
       - Module frames (scripts.md 7.4): each object attaches with its copy's ordinal within its group

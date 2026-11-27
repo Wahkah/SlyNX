@@ -168,6 +168,7 @@ impl World {
                 masks: alloc::collections::BTreeMap::new(),
                 starters: alloc::collections::BTreeMap::new(),
                 hold_bentley: false,
+                play_as: None,
                 objects: Vec::new(),
                 ids: Default::default(),
                 records: Vec::new(),

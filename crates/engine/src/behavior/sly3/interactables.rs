@@ -226,6 +226,21 @@ impl ClassBehavior for UsePoint {
     }
 }
 
+/// Whether `h` is a use point the use button can use: class 33, or a class derived from it (by the world's
+/// derived-class map, `World::shared.sly3_derived`) whose use starts a script (1164) or requests tasks (1170), as
+/// m1_run's blimp anchors (class 35, missions.md 4.1a). Working choice [I]: the derived classes' own routines are not
+/// traced, so only those whose use does what class 33's does are taken.
+pub fn is_use_point(world: &World, h: Handle) -> bool {
+    match world.class(h) {
+        Some(class::USE_POINT) => true,
+        Some(c) if world.shared.sly3_derived.get(&class::USE_POINT).is_some_and(|d| d.contains(&c)) => {
+            let p = UsePoint::new(world, h);
+            p.script.is_some() || !p.tasks.is_empty()
+        }
+        _ => false,
+    }
+}
+
 /// Sly 3 hook (use button): player 0's character uses point `me` if it is within reach ([`use_point_use`]). None
 /// when the point is out of reach.
 pub fn use_point_used(world: &mut World, me: Handle) -> Option<Option<i32>> {

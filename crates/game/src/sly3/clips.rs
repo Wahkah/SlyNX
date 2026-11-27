@@ -2,8 +2,8 @@
 //! `engine::behavior::sly2_commands::clip_object_events`).
 //!
 //! - **Events**: kind 7 adds an object and kind 8 removes one; the payload is (object ID, fade time). The object is
-//!   looked up near the clip's owner (`World::find_sly3_id` with the owner as context), so a pooled guard removes
-//!   its own instance. The clip's apply events fire at its start, its timed events at their frame (60 a second) and
+//!   looked up near the clip's owner: in the owner's copy or below it, never another copy's object of that ID, so a
+//!   pooled guard removes its own instance. The clip's apply events fire at its start, its timed events at their frame (60 a second) and
 //!   its retract events at its end.
 //! - **Fades**: a removal with a fade above 0 keeps the object in the world while its alpha ([`Clips::alpha`]) eases
 //!   from 1 to 0 over the fade, then removes it; 0 removes it at once. The Sly 3 drawing has no per-object alpha
@@ -80,6 +80,18 @@ pub struct Clips {
     fades: Vec<Fade>,
 }
 
+/// The object with ID `id` near clip owner `owner`: in the owner's copy, or below the owner. None otherwise: an
+/// event never reaches another copy's object of the same ID (v_gauntlet's timed buttons each hold a use point 50450;
+/// one button's clip must not remove another's).
+pub fn near(world: &World, id: i32, owner: Handle) -> Option<Handle> {
+    let copy = world.sly3_object(owner)?.copy;
+    let below = |h: Handle| core::iter::successors(world.parent(h), |&q| world.parent(q)).any(|q| q == owner);
+    world
+        .sly3_id_slots(id)
+        .filter_map(|k| world.handle(k))
+        .find(|&h| world.sly3_object(h).is_some_and(|o| o.copy == copy) || below(h))
+}
+
 /// The data of a clip record.
 fn clip_data(world: &World, h: Handle) -> Option<&ClipData> {
     match &world.sly3_record(h)?.body {
@@ -148,6 +160,24 @@ impl Clips {
         true
     }
 
+    /// Clip `clip`'s add and remove events (an ID in `owner`'s group) applied at once, with no fades and no pose: a
+    /// state-machine transition snapped (`machines`). False when there is no such clip with data.
+    pub fn apply_now(&mut self, world: &mut World, owner: Handle, clip: i32) -> bool {
+        let Some(group) = world.sly3_object(owner).map(|o| o.group) else { return false };
+        let Some(events) =
+            group_clips(world, group).into_iter().find(|(id, _)| *id == clip).map(|(_, d)| object_events(d))
+        else {
+            return false;
+        };
+        for (_, add, id, _) in events {
+            if let Some(h) = near(world, id, owner) {
+                self.fades.retain(|f| f.object != h);
+                world.set_in_world(h, add);
+            }
+        }
+        true
+    }
+
     /// Plays animation segment `segment` (a class-130 clip record) on its own from its start (`0x16`, missions.md
     /// 4.1a): each channel on transform 0 places the object it keys (by ID, its translation) along its track; the
     /// object's y axis faces the way it moves (inference, marked [I] in the spec: the canal boat, turned on its
@@ -199,7 +229,7 @@ impl Clips {
             }
         }
         for (owner, add, id, fade) in fired {
-            let Some(h) = world.find_sly3_id(id, Some(owner)) else { continue };
+            let Some(h) = near(world, id, owner) else { continue };
             self.fades.retain(|f| f.object != h);
             if add {
                 world.set_in_world(h, true);

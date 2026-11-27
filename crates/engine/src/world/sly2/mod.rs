@@ -172,6 +172,8 @@ pub struct Sly2Level {
     pub starters: alloc::collections::BTreeMap<u32, Handle>,
     /// A script asked Murray to take Bentley up ready to throw (script ID 939), for the gang.
     pub hold_bentley: bool,
+    /// A sequence made this character the player (command 632), for the session: its object.
+    pub play_as: Option<Handle>,
     objects: Vec<Sly2Object>,
     /// Slots by object ID (built at load; a destroyed object leaves it), for the ID searches.
     ids: alloc::collections::BTreeMap<i32, Vec<u32>>,
@@ -283,6 +285,17 @@ impl World {
             Some(formats_sly2::stream::Body::Placement(p)) => p.zone_mask,
             Some(formats_sly2::stream::Body::Other { header: Some(h), .. }) => h.zone_mask,
             _ => 0xFF,
+        }
+    }
+
+    /// A Sly 2 guard kept active whatever the camera's zone mask (clock-and-loop.md 3.2): one holding a command-list
+    /// lock (607 to 608), or in a use (606, which keeps it active while it lasts). Object-model hook: activation.
+    pub fn sly2_kept_active(&self, h: Handle) -> bool {
+        match self.behavior(h) {
+            Some(crate::behavior::Behavior::Sly2Guard(g)) => {
+                g.commands.as_ref().is_some_and(|r| r.locks > 0 || r.using)
+            }
+            _ => false,
         }
     }
 

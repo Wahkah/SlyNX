@@ -278,6 +278,16 @@ Class 60 characters (Neyla in episode 1) can be told to walk a command list **on
   patrol at once [R].
 - On the disc, patrol data come mostly from the placement blocks of fresh placements (route 273, region 301, carried
   keys 308 and 309) ([classes/placement.md](classes/placement.md)) [D].
+- **Finding the way when pursuing** (added 2026-11-26) [R].
+  - A pursuing guard or creature is sent toward its target with a "go to" job.
+  - The way is planned over the world's **navigation regions**: walkable polygons built and merged at load from the
+    world's floor data, with links between them. A link is crossed by its own job (a step, jump or drop), which keeps
+    the guard active.
+  - The pursuer re-plans when the target changes region or moves more than a set distance from the last goal. It
+    goes back to direct chasing once it is within its near chase range in the same region.
+  - So pursuers do not run straight at the target over ledges. An engine without the region graph will see them
+    fall off.
+  - The details of the region build were not traced.
 - **Following a curve does not set the height** (added 2026-11-26) [R]. Command 601's path step (job `0xC0`) takes
   the nearest point of the curve, then steps a fixed distance along it (forward or back, clamped or wrapped). Each
   step is handed to an ordinary "go to" job as a target. The guard or creature walks there with its own step physics:
@@ -286,6 +296,9 @@ Class 60 characters (Neyla in episode 1) can be told to walk a command list **on
   - Over a void it has no floor, so it falls.
   - Swarming creatures (class 57) are guards (class 56) and move the same way.
   - A creature that keeps the curve's height and walks over voids is missing the step physics, not a curve rule.
+  - The same holds for "go to" and "use" targets: the guard walks or jumps to them and its height comes from the
+    floor. A use of a plain marker (command 606) first drops the target onto the floor (from 100 above to 150 below),
+    then jumps there (options-by-class.md 2.2) [R]. Neyla leaves her roof at z 2800 by such hops.
 
 ## 6. Pursuit, attacks and shots
 

@@ -268,6 +268,10 @@ pub struct Jobs {
     pub notices: Vec<Notice>,
     /// State-machine goals set, for the state machines' owner: (object, machine, goal, instant).
     pub machine_goals: Vec<(i32, i32, i32, bool)>,
+    /// Sly 3 hook (missions.md 4.1a, the 1417 row): a goal entry whose task state is −1 follows the task's state,
+    /// its goal becoming this base + the state (1763 for Sly 3), and an instant entry applies only while restoring.
+    /// `None` keeps Sly 2's reading (−1: any state, the entry's own goal).
+    pub follow_goal_base: Option<i32>,
     effects: Vec<Effect>,
     /// Applying a restore: goals are instant and no autosave is asked.
     restoring: bool,
@@ -345,6 +349,7 @@ impl Jobs {
             place: None,
             notices: Vec::new(),
             machine_goals: Vec::new(),
+            follow_goal_base: None,
             effects: Vec::new(),
             restoring: false,
             episode_group: None,
@@ -618,10 +623,21 @@ impl Jobs {
         }
         for g in &task.goals {
             if (g.state == s || g.state == -1) && (g.row < 0 || g.row == row) {
+                let goal = match self.follow_goal_base {
+                    // Sly 3: −1 follows the task's state (0 to 3); an instant entry only while restoring.
+                    Some(base) if g.state == -1 => {
+                        if s >= state::BECAME_CURRENT || (g.instant && !instant) {
+                            continue;
+                        }
+                        base + s
+                    }
+                    Some(_) if g.instant && !instant => continue,
+                    _ => g.goal,
+                };
                 self.effects.push(Effect::Goal {
                     object: g.object,
                     machine: g.machine,
-                    goal: g.goal,
+                    goal,
                     instant: instant || g.instant,
                 });
             }

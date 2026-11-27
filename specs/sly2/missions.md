@@ -193,7 +193,7 @@ The game tells a job or task about changes by raising script events on it ([scri
 | 19 | job | the job **began** (became the current job) | — |
 | 20 | task | the task **stopped being current** | — |
 | 20 | job | the job **ended** | — |
-| 21 | task | **after** the task's state changed (the new state is already set) | — |
+| 21 | task | **after** the task's state changed (the new state is already set). **Not raised while progress is being restored, nor during a world change** (corrected 2026-11-26) [R]. A task's state change is "live" only outside those modes; outside them it also applies the task's object switches and state-machine goals and broadcasts 0x26 / 0x25. Restoring a task sets its state from the save without any of that, so **no event-21 handler runs for the restored state at world start** | — |
 | 22 | task | **before** the task's state changes | — |
 | 23 | task | option 1284 was called | the integer passed |
 
@@ -746,6 +746,26 @@ Its module 0 reads these custom properties, which placement 17346's root patch s
 So the player's actions are: hit the vent, crawl into the space it opened, and crawl to the end, which is volume
 133043. 1813 needs no other condition.
 
+**Command 632 makes a character the player** (added 2026-11-26). It appends a record of kind 7 (`0x001E0450`). When
+it runs, an object of class 50 or derived gets its vtable slot 79 called with 1 [D for the record, R for the rest].
+That is "take the pad":
+
+- the previous player character loses control;
+- the object becomes the current player;
+- the pad's control is set;
+- a character's queued AI jobs are cleared.
+
+Sequences 1891 and 1903 end with `632 8`, handing play to Bentley.
+
+**`m1_boss` (1929), row 2** (added 2026-11-26) [D]. Module 140 shows Dimitri's health bar (screen 1930) when the task
+becomes current. On every task event 21 about Dimitri (122332, a hit reaction), it sets the bar to his current hit
+points over his starting ones: script IDs 381 / 380, stream options 255 / 254 (+0x33C / +0x338). Task event 23 or 24
+about Dimitri (knocked out) sets 1929 to state 2.
+
+- There is no stage logic in the task's script.
+- The fight is the shared enemy rules: each accepted hit lowers his 360 points by the hit's contact value
+  (characters.md 2.3), and at 0 he is knocked out (guards.md 7; vehicles-and-minigames.md 7.4) [R].
+
 **Job `m1_heist` (1889), row 2: three of its tasks** (added 2026-11-26) [D unless marked]:
 
 - **`t1_heist_open_piperoom` (1895).** On a state change, module 118 sets prop **123934**'s contact bytes (script ID
@@ -756,6 +776,11 @@ So the player's actions are: hit the vent, crawl into the space it opened, and c
   - So only a thrown object breaks the prop. Also in state 1 the module calls Murray's script ID 939 (stream option
     1051): Murray enters state 15, **holding Bentley ready to throw** (the Bentley toss) [R]. A hint shows until the
     current character is Murray.
+  - **Before 1895 changes state, the prop is not sealed** (added 2026-11-26). The sealing lives only in 1895's
+    event-21 handler, which does not run for a restored state (section 3.2) [R]. A class-98 prop starts with every hit
+    kind at response 8 (interactables.md 3.2) [D]. So in the original, prop 123934 can be broken by any attack until
+    1895's state first changes while the world is running; during 1893's fight that is possible [I that nothing
+    else covers it: no switch or option 26 on 123934 was found].
   - The prop has one event: remove itself and request **1895 → 2** (option 1045).
   - So the player, as Murray, **throws Bentley at 123934**. Murray's punches (kinds 0x2 and 0x200000) and the Thunder
     Flop (0x4) do not count; see characters.md 2.3.
@@ -781,6 +806,40 @@ So the player's actions are: hit the vent, crawl into the space it opened, and c
     moves and a shot, and ends by asking task 1906 (`t1_heist_5_peacock_climb`) for state 4.
   - There is no driven vehicle: the hijack is the sequence once Bentley reaches the truck [D for the data, I for
     "no driving"].
+- **The pipe-room valves (1896)** (added 2026-11-26).
+  - Each valve is a copy of package `pipe_switch`: placements 88375, 88373, 88358, 142162 and 142136, root 142138
+    (class 48) [D].
+  - The copy holds interaction spot **80398** (class 35, prompt string 839 "Press O to turn valve."). The valve is
+    turned by **using that spot**: the current character presses Circle within 250 units of it, the Circle-button
+    choice for class 35 (interactables.md 9) [R for the input].
+  - The spot's event-5 handler (module 2) works out which side of the valve the user stands on. If it is the right
+    side, it starts sequence 142157 or 142155, depending on whether the valve's setting (property 1737) is above 0,
+    with the user as starter [D].
+  - The sequence walks the user to marker 88363, attaches them to 88369, and plays the turning clip (9216 or 88367).
+  - That clip's type-12 events raise event 4 in the clip's module (animation.md 2): modules 1 and 3 step the
+    valve's 1737 by +0.2 or −0.2 and raise event 5
+    on the valve. The water network then recomputes as above [D for the scripts].
+  - The pipe-room tasks are Bentley's (volumes 124120 and 141948 count only Bentley), so Bentley turns the valves
+    [I]. It is an interaction, not an attack.
+- **`t1_heist_8_siege` (1911, "Defend the truck", option 1272)** (added 2026-11-26).
+  - **Who plays it.** Sequence 1910 adds Sly (object 7) and removes Bentley (8) and Murray (9), so **Sly** plays the
+    siege [D].
+  - **The setup.** Module 131 [D]:
+    - on becoming current, starts generator **123956** (a `generator_rig` copy; section above) and resets a counter;
+    - starts sequence 1912;
+    - shows counter screen 1913 with its bar full.
+  - **Spawns.** Each spawn (the generator's 20524 notice) is given the targets (the truck's 123957 and Sly) through
+    the rat's method 426. The stop test is op11, "≥" (scripts.md 4.2; corrected 2026-11-26). Once the generator's spawn
+    count is **at least 9**, the generator is stopped (1237). So it spawns **nine** rats, at most 1350 at a time.
+    The generator keeps only live spawns in its count of alive ones: script ID 41 (stream option 27, getter
+    `0x00259AE8`) is the object's in-world flag [D].
+  - **Winning.** Every task event 23 or 24 (any knockout or creature death, from any source) adds 1 to the counter.
+    The test is also op11, so at the **9th** the screen is hidden and sequence 1914 (the end) starts. The events are
+    not filtered by object [D]. Nine rats and nine knockouts match.
+  - **Losing.** On a task event 26 from an object on the truck 123957 (script ID 30 tests the object against the
+    truck), if the object inside is not a playable character (class 52), the truck loses 1 of its 5 points and the
+    bar shows the rest. At 0 the job fails with string 835 "You need to prevent the truck from being destroyed."
+    [D for the script, I for "a rat reached the truck"].
 
 **`t1_neela_chase` (1857), job 1851 (row 2)** (added 2026-11-26) [D unless marked]. Neyla leads Sly along command
 list 123907, and Sly must keep up.

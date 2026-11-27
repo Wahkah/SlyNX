@@ -210,6 +210,11 @@ holds at most 32 events of at most 64 items each [R].
 
 ### 3.2 Hits [R]
 
+- **Default contact bytes** (added 2026-11-26) [D]. A class-98 prop's init (`0x001BAB50`) sets the response byte of
+  every hit kind to **8** (a hit), then kinds `0x80001` (bits 0 and 19) to 0 (calls of `0x001F7918` at `0x001BAB70` and
+  `0x001BAB84`). So a prop that no script has sealed can be broken by any attack. Scripts change the bytes with script
+  ID 125 (characters.md 2.3).
+
 - A **hit** is an attack contact on the prop, or a touch by an object of an active trigger class.
 - A hit runs the current event's items, then counts toward the event's hit count; when the count is reached, the next
   event becomes current. After the last event the prop raises script event 5 and tells the tasks (task event 0x11).

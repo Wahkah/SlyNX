@@ -205,6 +205,7 @@ fn jobs() -> Jobs {
         place: None,
         notices: Vec::new(),
         machine_goals: Vec::new(),
+        follow_goal_base: None,
         effects: Vec::new(),
         restoring: false,
         episode_group: None,

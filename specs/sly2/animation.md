@@ -70,7 +70,7 @@ sources:
     what: sly2-decomp @ 33e2bab9 (sequence start and stop, sequence record start)
     used_for: what record kind 6 does (section 2) [R]
 reviewed_by: pending
-date: 2026-11-21
+date: 2026-11-26
 ---
 
 # Sly 2 animation
@@ -154,6 +154,15 @@ Added 2026-11-20:
 - **Type 7** adds the object with the given ID to the world, and **type 8** removes it. The `f32` is a fade time.
   When the clip is playing backward the two swap [R].
 - **Type 6** retracts the playback [R].
+- **Type 12** (one `s32` value) raises **script event 4** with that value (added 2026-11-26) [R; D for the field
+  below]. The handler is looked up in the **clip's** module, that is the module of the class-109 clip object. It is
+  called with the **playback** (class 134) as its first argument and the value as its second. The same path raises
+  event 2 when a playback starts and event 3 when it is retracted.
+  - On a playback, script ID 250 (stream option 116, a field at +0x14 holding a class-109 object) is the playback's
+    **clip**.
+  - So handlers find their own copy's objects with `(op115 id ((op111 playback 250)))`, a nearest search from the
+    clip. For example, the pipe-room valve clips 9216 and 88367 step the nearest valve root 142138's property 1737
+    by ±0.2 in `pipe_switch`'s modules 1 and 3, then raise event 5 on it (missions.md 4.3).
 - A playback whose time passes the clip's end, with none of the loop or hold bits (`0x38`) set in its apply flags, is
   retracted, and retracting fires the retract list. The test is at `0x00130A90` in SCUS_973.16, followed by the call
   to the retract routine `0x00130B18` [D].

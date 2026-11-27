@@ -138,14 +138,16 @@ pub struct Prop {
     /// Hits taken.
     pub hits_taken: u32,
     /// Sly 2: the response byte of each of the 26 contact-kind bits (script ID 125, stream option 53;
-    /// characters.md 2.3), once any is set; a contact counts as a hit when the OR of its bits' bytes has bit 8.
+    /// characters.md 2.3), once any is set; a contact counts as a hit when the OR of its bits' bytes has a bit of
+    /// [`RESPONSE_HIT`].
     pub responses: Option<[u8; CONTACT_KINDS]>,
 }
 
 /// The contact-kind bits a prop's response bytes cover (characters.md 2.3).
 pub const CONTACT_KINDS: usize = 26;
-/// The response bit that makes a contact count as a hit (characters.md 2.3, interactables.md 3.2).
-pub const RESPONSE_HIT: u8 = 8;
+/// The response bits that make a contact count as a hit (characters.md 2.3: any of 0xF8, so 8 and 16 count; 1, 2
+/// and 4 are harmless).
+pub const RESPONSE_HIT: u8 = 0xF8;
 /// Contact kinds (characters.md 2.3): the gang's strikes, air attacks and flop, thrown or fired objects, the dart.
 pub mod contact {
     /// The cane combo, Murray's and Bentley's strikes.
@@ -232,6 +234,12 @@ impl Prop {
             // follow the stored values (the props' items are plain values on the disc).
             list.extend(l.actions.iter().filter(|a| a.0 == h.index()).map(|a| (a.1, OptionValue::Args(a.2.clone()))));
         }
+        Prop::from_entries(&list)
+    }
+
+    /// The event list from (option, value) entries in stream order, with Sly 2's option IDs (Sly 3 hook: Sly 3's
+    /// props map theirs onto these, `behavior::sly3`).
+    pub fn from_entries(list: &[(u16, OptionValue)]) -> Prop {
         let mut p = Prop::default();
         // Stand-in: the response bytes a record sets at load (its option 53 entries) are not applied, only those
         // scripts set (script ID 125). Several kinds are not known for the gang's moves: m1_brawl's alarm boxes
@@ -239,7 +247,7 @@ impl Prop {
         // (characters.md 2.3), so applied they could not be broken.
         let mut cur: Option<usize> = None;
         let mut in_every = false;
-        for (id, v) in &list {
+        for (id, v) in list {
             let item = match id {
                 1025 => {
                     let (class, on) = pair_of(v);

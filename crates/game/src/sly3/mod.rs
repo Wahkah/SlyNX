@@ -52,6 +52,7 @@ pub mod guards; // Sly 3 hook: guard command lists (0x62).
 pub mod jobs;
 pub mod layer; // Sly 3 hook: the 2D layer (fonts, HUD, pause menu, job screens; `ui::sly2`).
 pub mod lock; // Sly 3 hook: the cell lock minigame (class 79).
+pub mod machines; // Sly 3 hook: state machines (class 132) driven to goals (1417, `0x19`), their transitions' clips.
 pub mod photo; // Sly 3 hook: the binocucom's photo mode and photo targets (class 43).
 pub mod safehouse;
 pub mod waypoints;
@@ -101,12 +102,12 @@ pub fn save_tree(world: &World) -> Option<save::sly2::VarTree> {
 enum SessionAction {
     /// Switch to a crew member (`0x13` on a playable character).
     TakeOut(engine::gang::sly3::Member),
-    /// A script holds (true) or releases the pad (`0x1F`).
-    Pause(i32, bool),
     /// `0x46` / `0x6E`: the binocucom opens (looking at the object, −1 none) or closes.
     Binocucom(bool, i32),
     /// `0x62`: a guard gets a command list.
     GuardList(i32, i32),
+    /// `0x19`: a state machine driven to a goal (object, machine, goal, snap, the script's object).
+    Goal(i32, i32, i32, bool, Option<engine::object::Handle>),
     /// Control handed to the safe house (method 983 on safe house 15065, characters.md 6).
     SafeHouse,
     /// `0x60` / `0x61`: a hint shown (string, seconds) or cleared.
@@ -348,9 +349,11 @@ fn apply_request(
         }
         Request::Hint { string, seconds } => return Some(SessionAction::Hint(Some((string, seconds)))),
         Request::ClearHint => return Some(SessionAction::Hint(None)),
-        Request::Pause { script, on } => return Some(SessionAction::Pause(script, on)),
         Request::Binocucom { open, look_at, .. } => return Some(SessionAction::Binocucom(open, look_at)),
         Request::GuardList { guard, list } => return Some(SessionAction::GuardList(guard, list)),
+        Request::Goal { object, machine, goal, snap, near } => {
+            return Some(SessionAction::Goal(object, machine, goal, snap, near));
+        }
         Request::FireExit { exit, point } => {
             if let Some(f) = flow {
                 f.fire(exit, point);
@@ -427,8 +430,6 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     fresh: bool,
     /// The task current at the end of the last frame (its script, option 1408, starts when it changes).
     last_task: Option<usize>,
-    /// The job current at the last frame (its object ID), to stop its tasks' scripts when it ends.
-    last_job: Option<i32>,
     disc: Option<Disc<R>>,
     audio_disc: Option<AudioDisc<R>>,
     gpu: StaticLevel,
@@ -463,9 +464,8 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     pub shot_cooldown: f32,
     /// Sly 3 hook (missions.md 4.1a): m1_ball's launcher, flight and hits (`ball`).
     pub ball: ball::Ball,
-    /// Sly 3 hook (`carmelita`): while Carmelita is driven, the pausing scripts whose holds do not hold her pad.
-    pad_free: Option<alloc::collections::BTreeSet<i32>>,
-    paused_by: alloc::collections::BTreeSet<i32>,
+    /// Sly 3 hook: the state machines' states (`machines`).
+    pub machines: machines::Machines,
     /// The world's mission waypoints (class 120) and, by base class, the classes deriving from it.
     pub waypoints: Vec<waypoints::Waypoint>,
     derived: alloc::collections::BTreeMap<i16, Vec<i16>>,
@@ -532,7 +532,6 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             queued_task: None,
             fresh: true,
             last_task: None,
-            last_job: None,
             disc,
             audio_disc: None,
             gpu: StaticLevel::default(),
@@ -556,8 +555,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             bomb: None,
             shot_cooldown: 0.0,
             ball: ball::Ball::new(),
-            pad_free: None,
-            paused_by: alloc::collections::BTreeSet::new(),
+            machines: machines::Machines::default(),
             waypoints: Vec::new(),
             derived: alloc::collections::BTreeMap::new(),
         }
@@ -783,6 +781,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             (0..256i16).map(|c| (c, derived_classes(&disc.classes, c))).filter(|(_, d)| d.len() > 1).collect();
         self.bomb = None;
         self.clips = clips::Clips::default();
+        self.machines = machines::Machines::default();
         self.boats = boat::Boats::default();
         self.guards.clear();
         self.in_safe_house = false;
@@ -1005,8 +1004,8 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
         let mut lines: Vec<Option<(i32, i32)>> = Vec::new();
         let mut screens: Vec<(i32, bool)> = Vec::new();
         let raw = *input;
-        // Player 0's holds (missions.md 4.2): one per pausing script, one while a screen holds the pad.
-        let holds = self.paused_by.len() as u32 + u32::from(self.screens_hold());
+        // Player 0's holds (missions.md 4.2): one per pausing runner, one while a screen holds the pad.
+        let holds = self.scripts.holds.len() as u32 + u32::from(self.screens_hold());
         let input = &if self.screens_hold() || self.script_paused {
             FrameInput::default()
         } else {
@@ -1067,11 +1066,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             if input.pressed & platform_api::Buttons::A.0 != 0
                 && let Some(p) = g.world.player.and_then(|h| g.world.position(h))
             {
-                use engine::behavior::sly3::interactables::{class, use_point_used};
+                use engine::behavior::sly3::interactables::{is_use_point, use_point_used};
                 let w = &g.world;
                 let mut points: Vec<(f32, engine::object::Handle)> = w
                     .handles()
-                    .filter(|&h| w.class(h) == Some(class::USE_POINT) && w.is_active(h))
+                    .filter(|&h| is_use_point(w, h) && w.is_active(h))
                     .filter_map(|h| {
                         let q = w.position(h)?;
                         let d = [q[0] - p[0], q[1] - p[1]];
@@ -1177,6 +1176,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             g.world.shared.sly3_guard_runs = runs;
             if let Some(j) = self.jobs.as_mut() {
                 jobs::step(j, &mut g.world, measured, touched);
+                // The tasks' state-machine goals (1417, missions.md 4.1a).
+                for (object, machine, goal, instant) in core::mem::take(&mut j.machine_goals) {
+                    self.machines.goal(&mut g.world, &mut self.clips, object, machine, goal, instant);
+                }
                 // Vehicles hook: a job's machine is handed to the player while the job runs.
                 let (job, task) = engine::behavior::vehicles::shots::job_of(j);
                 engine::behavior::vehicles::shots::follow_job(&mut g.world, job, task.as_deref());
@@ -1261,13 +1264,6 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     Some(SessionAction::Segment(h, looping)) => {
                         self.clips.play_segment(&g.world, h, looping);
                     }
-                    Some(SessionAction::Pause(script, on)) => {
-                        if on {
-                            self.paused_by.insert(script);
-                        } else {
-                            self.paused_by.remove(&script);
-                        }
-                    }
                     Some(SessionAction::Binocucom(true, look_at)) => {
                         // The view opens with the photo mode (as R3 opens both), so a later R3 closes both.
                         if let (None, Some(p)) = (g.world.shared.camera_binocucom, g.world.player) {
@@ -1287,6 +1283,9 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     }
                     Some(SessionAction::SafeHouse) => self.in_safe_house = self.safe_house.is_some(),
                     Some(SessionAction::Hint(h)) => self.hint = h,
+                    Some(SessionAction::Goal(object, machine, goal, snap, near)) => {
+                        self.machines.goal_near(&mut g.world, &mut self.clips, (object, near), machine, goal, snap);
+                    }
                     Some(SessionAction::GuardList(guard, list)) => {
                         if let Some(run) = guards::GuardRun::new(&g.world, guard, list) {
                             self.guards.retain(|r| r.guard != run.guard);
@@ -1303,38 +1302,11 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     self.scripts.answers.insert((oid, value), v.is_some_and(|v| v.is_true()));
                 }
             }
-            // A script's pause lasts while it runs.
-            let scripts = &self.scripts;
-            self.paused_by.retain(|o| scripts.is_running(*o));
-            // Stand-in [I] (`carmelita`; open: the intro script 2142 holds the player with `0x1F` (1, 3), never
-            // releases it, and keeps running through the turf-war battles, missions.md 4.1a): the holds taken before
-            // Carmelita was handed control do not hold her pad.
-            self.pad_free = match (carmelita::driven(&g.world), self.pad_free.take()) {
-                (Some(_), Some(free)) => Some(free),
-                (Some(_), None) => Some(self.paused_by.clone()),
-                (None, _) => None,
-            };
-            let free = self.pad_free.as_ref();
-            self.script_paused = self.paused_by.iter().any(|o| !free.is_some_and(|f| f.contains(o)));
+            // A pause lasts while the runner that took it runs (`commands::Scripts::holds`).
+            self.script_paused = !self.scripts.holds.is_empty();
             // A task made current by this update's requests starts its script too.
             start_task_script(self.jobs.as_ref(), &mut self.scripts, &mut self.last_task, g);
             if let Some(j) = self.jobs.as_mut() {
-                // Stand-in [I] (open: what ends the turf-war intro's script 2142, whose runner sends the wave tick's
-                // hook forever and whose `0x1F` (1, 3) hold is never released, missions.md 4.1a; m1_turf_war fires no
-                // exit at its end): when a job ends, the scripts still running of its tasks other than its last (whose
-                // closing scene plays on after the end) stop, and their holds go.
-                let job_id = j.job.map(|k| j.graph.jobs[k].id);
-                let ended = self.last_job.filter(|&id| job_id != Some(id)).and_then(|id| j.graph.job_ids.get(&id));
-                if let Some(&k) = ended {
-                    let last = j.graph.jobs[k].last;
-                    let tasks = j.graph.tasks.iter().enumerate().filter(|&(i, t)| t.job == Some(k) && Some(i) != last);
-                    for (_, t) in tasks {
-                        if let Some(script) = t.script.filter(|&s| self.scripts.is_running(s)) {
-                            self.scripts.stop(script);
-                        }
-                    }
-                }
-                self.last_job = job_id;
                 // Exits fired by jobs (option 1381) and tasks (1406).
                 if let Some(f) = self.flow.as_mut() {
                     for exit in core::mem::take(&mut j.fired_elsewhere) {

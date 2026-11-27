@@ -79,7 +79,7 @@ job's ending and closing events are task events as in Sly 2 [R].
 | 1408 | command script (class 135) at +0xCC | — | a script **started when the task becomes current** [X, section 4] | 3,563 |
 | 1405 | bool at +0xC4 | — | the task is **done as soon as it becomes current** [X, section 4] | 514, all 1 |
 | 1416 | method, 5 arguments | 1287 | **object switch**: Sly 2's four arguments (object, states list, owner, world) plus a fifth value (0) | 5,391 |
-| 1417 | method, 7 arguments | 1288 | **state-machine goal**: Sly 2's six arguments plus a seventh (0) | 2,513 |
+| 1417 | method, 7 arguments | 1288 | **state-machine goal**: Sly 2's six arguments plus a seventh (0). A task state of **−1** means "follow the task's state": the goal becomes **1763 + the task's state** (1763, 1764, 1765, 1766 for states 0 to 3; `0x00185C30`, constants at `0x00185D40` to `0x00185D54`), and the goal argument is ignored [X] | 2,513 |
 | 1423 to 1427 | save paths at +0xD0 … +0xF0 | 1295 to 1299 | save keys `focus_count`, `complete_count`, `is_complete`, `state`, `from_memcard` (name IDs 86, 166, 87, 167, 168) | all 5,519 |
 | 1403 | float pair at +0xB8 | — | (900, 1,800) on 8 tasks. *Interpretation:* two times in seconds, like Sly 2's job times [I] | 8 |
 | 1404 | int at +0xC0 | — | a world slot (15 ×32, 14 ×9, 23 ×5) [I] | 46 |
@@ -727,6 +727,24 @@ I where marked]:
 
 **m1_run (job 2187, v_ext, Sly): release two blimp anchors** [D; I where marked]:
 
+- **What brings the anchors into the world: their state machine, driven by the task's state** [D] [X].
+  - Group `v_blimp_anchor` holds the copy root 158960 (class 47), the anchor use point 16255 and state machine
+    **5099**, with states **1763, 1764, 1765, 1766**. Its edges:
+    - 1763 → 1764 plays clip 163033, whose event kind 7 **adds 16255**;
+    - 1764 → 1763 plays clip 163034, which removes it;
+    - 1764 → 1765 plays clip 163035, which swaps mesh groups and collision tags (kinds 13 to 16) and removes 16255:
+      the anchor released;
+    - 1765 → 1766.
+  - Task 2194's 1417 entries are **(−1, 139451, 5099, −1, 0, …)** and (−1, 139393, 5099, −1, 1, …); task 2204's is
+    (−1, 139452, 5099, −1, …). A task state of −1 makes the goal **1763 + the task's state**. So when 2194
+    becomes **available (state 1)**, the copy at 139451 is driven to **1764**, and that edge's clip adds the
+    anchor. Done (2) drives it to 1765, which releases it and removes the anchor.
+  - The second entry, for 139393, has the instant flag set. It is applied only while restoring (mode ≠ 0) and
+    then snaps.
+  - So the anchors come in through **task 2194's / 2204's 1417 goals on the copy root**: no job start, placement
+    bind or option 26 / 27 is involved. A port must implement the "−1 = 1763 + state" rule and run the edge clips'
+    add / remove events.
+
 - **World and character:** the tasks list world 3 (v_ext) and character 24 (Sly).
 - **"Destroy target" means using a blimp anchor.** Placements 139451 (at 8099, 11005, 126) and 139452 (at
   −8180, 7743, 354) in `v_ext_run` place copies of `v_blimp_anchor` (object 16255, class 35, a use point;
@@ -750,6 +768,97 @@ I where marked]:
   139483 to 139484. Then Sly (24) is retired from the scene and walks to 139487. The script continues with
   cameras and line 1634 [the closing request was not read: I].
 - **2206 `gauntlet_intro`** (1399, checkpoint 139487) follows, with script 2207.
+
+**m1_run after 2206: bring down the opera sign, then return and chase** [D; I where marked]:
+
+- **2206 `gauntlet_intro`** (1399): script 2207 plays a camera the first time (test 1890 on 2206: while
+  restoring) and requests 2206 → 2.
+- **2208 `t1_run_gauntlet` is the opera sign.** Placement 139494 in `v_ext_run` places `v_sign_opera`. Its bind
+  attaches **override module 0 of `v_ext_run`** to the sign's breakable part **158868** (class 111, a reactive
+  prop, section 2 of interactables.md). The override:
+  - **event 5** (the part breaking): runs the part's own handler, then requests **2208 → 4 (make current)**;
+  - **event 19** (hit by a thrown or fired object): runs the part's own handler, then sets the hit flag 1110 = 1
+    while 2208 is not available. *Interpretation:* the hit is ignored or deflected until the job reaches the
+    sign [I].
+  - **What makes 2208 current is breaking the sign's part**, not standing in trigger 140685. That trigger, a part
+    of the sign present while 2208 is available (1416 with owner 139494), only shows hint 1637 for 10 s and runs
+    the game object's 280 (1636) when Sly (class 52) enters (`v_sign_opera` module 1): a hint on how to bring it
+    down.
+  - 2208's 1417 drive the sign's state machine 139495 (140683 in states 0 / 1, 50793 in 2 / 3). The sign's
+    module 4 maps those to the part's state machine (1754 / 1755).
+  - How many hits break the part, and which projectile, are class 111's breakable rules (interactables.md 2)
+    [I: not checked for this part].
+- **Script 2209** (2208's 1408), the collapse: clears hint 1637, holds the player, plays time ramps and cameras,
+  jolts and shakes the camera (`0x3F`, `0x40`), and drives **sign 139494's 139495 → 50793** and **139394's 139483
+  → 139496**. It plays line 1638 and a long camera sequence, then requests **2208 → 2**.
+- **2210 `return_to_bentley_intro`** (1399, checkpoint 140686, Sly): script 2211 resets 139464's state machine
+  (13758, instant), places Sly via 139497, releases the hold, plays line 1638, requests 2210 → 2, and runs
+  **`0x69`** (return to the nearest mission waypoint, scripts.md 7.3).
+- **2212 `return_to_bentley`** (1399): its 1416 bring in 140687 to 140690 (the route and waypoints). Script
+  2213 sets alarms 139504 and 139505 after 30 s each. When they fire it runs `0x69` again with lines 1647 / 1648
+  (time-out reminders that put Sly back on the route). What completes 2212 is presumably reaching Bentley
+  through one of the switched-in objects [I: not decoded].
+- **What completes 2212:** trigger **140689** (class 21, in `v_ext_run`, switched in by 2212's 1416) counts
+  object 24, Sly (option 480), and carries option 489 **(2212, 2)**. So Sly entering it requests 2212 → 2 [D].
+- **2214 `chase_intro`** (1399, checkpoint 140691, Sly). Script 2216:
+  - resets 139464's state machine (instant), starts **2217**, and gives the lion boss **139446** its list **2215**;
+  - holds the player, plays an intro scene with lines 1599 to 1602, and Bentley's animation.
+
+  The lion boss is placed by placement 139446 in `v_ext_run` (`v_lion_boss`, removed at the start, custom
+  property 1823 = 14059). List 2215 is (732 look at 140692) then (743 play clip **8932**, flags 9): the boss's
+  run is a clip with root motion [I].
+- **2220 `t1_run_chase`** (successor of 2214; its 1416 shows waypoint 139447). **Script 2217**, the chase
+  director:
+  - one runner sends hook 139522 every 2 s;
+  - Bentley plays clip 7233 (flags 8), following along;
+  - three exchanges of lines (1607 to 1612, Bentley and the boss) wait on alarms 139524, 139525 and 139526;
+  - **chase blockers:** instances of placements 139453 to 139459 (`v_chase_blocker`) are taken (`0x6F`, flag
+    3) a few ahead. As alarms 139527 to 139530 and 15586 fire in turn, each blocker is hooked (`0x15`) and released
+    (`0x70`), and the next one is taken. When the script ends, all are released.
+  - **What sets the alarms: the boss's route list 2218** [D]. List 2218 (class 134, v_macro module 51) is the
+    lion boss's run:
+    - path follows (735), go-tos at 40 (736) and uses of jump / rail objects (740), from 140693 to beyond 140729;
+    - interleaved **message commands** (733, guard command kind 4) with values 139527, 139524, 139528, 139529,
+      139525, 139530, 139526 and finally 50261.
+    - The list's own module handles each message (event 4). **Any value other than 50261 sets that alarm on
+      the director 2217** (script ID 735). So the director's alarms (lines and blocker swaps) fire as the boss
+      reaches each point of his route.
+    - On the list's event 2 (given to a guard) the module adds objects 27884 and 27888 relative to the guard and
+      runs the game's 286; on event 3 it removes them and runs 287.
+  - **What completes the chase: the boss reaching the end of his route with Sly close.** On message **50261**,
+    the last on the route:
+    - if player 0's object is **inside volume 139532** (built-in 109 on its position), then on the next frame,
+      if that player is not down (938 ≠ 2), the list requests **2220 → 2** (a checked 1 → 2: 2220 only needs
+      to be available, **never current**);
+    - otherwise it calls the job's 1259 with 1598: the failure line, restarting the chase [I for the restart].
+  - **What makes 2220 current: nothing needs to.** It has no 1399, no script and no request to make it current;
+    it completes from state 1.
+  - **The timer:** script 2189 (v_macro module 41) shows screen object 2191 (970) with the time allowed (its
+    custom 2574, plus 0.5). Its hook loop takes 0.5 off every 0.5 s and updates the bar. When it reaches 0 while
+    player 0 is alive, it calls the job's **1260 with (1649, 2190)**, the failure and restart, and stops.
+  - **The blockers:** the job (2187, v_macro module 40) answers task event 29 from a class-21 trigger whose
+    placement row is one of the blockers 139453 to 139459 by starting script **2188** (the boss's taunt lines 1616
+    to 1621), unless the game's 283 says otherwise. An exit (class 24) raising 29 calls the job's 1263.
+  - Job methods registered for the chase include **2687** (take the boss from pool 139446 and place him at
+    waypoint 139447, 200 above), 2068 (the boss's 485 toward an object and Sly), 2689 (a lerp), 2690 (the boss
+    instance), 2683 / 2685 (take / give back the guards 139440 and 139441), and 2691 / 2692 (the same for
+    139442 to 139445).
+  - The director's hook **139522** (every 2 s) starts **noise template 2219** (class 139, guards.md) at a
+    point 400 ahead of and 500 above the boss (`op133`). *Interpretation:* the boss's noise, so guards on the
+    route react [I]. Hooks 139453 to 139456 set
+    the blockers' instance 131 to 0.5.
+- **2221 `t1_run_complete`** (1399): script 2222 is the ending.
+  - It holds the player, places Sly and Bentley (139533 / 139534), gives the boss lists 2223 / 2224, and plays
+    line 1622;
+  - it stops 2217 and **launches Sly** (`0x37` (24, 0.5, 0.0));
+  - it makes Bentley (25), Sly (24) and the boss 139536 meet at rendezvous ID 139537, with clips 8039 and 456;
+  - cameras and lines 1623 / 1624 follow.
+  - The successor is **1827 `t1_chalktalk3`**, the next story task, which ends m1_run.
+- **Class 111 breakables** (for the sign's part 158868): Sly 3's 1128 to 1143 are Sly 2's 1030 to 1045, so
+  the event list, hit counts (Sly 3's **1130**, Sly 2's 1032) and items follow Sly 2's rules
+  ([../sly2/interactables.md](../sly2/interactables.md) 3.2) [R]. After the last event the part raises event 5,
+  which is the trigger above. The part's own option values could not be read with the tools here (its 49 KB body
+  defeats the end-anchored reader), so **the number of hits is open**.
 
 **Clearing the job and task keys** [X]:
 
