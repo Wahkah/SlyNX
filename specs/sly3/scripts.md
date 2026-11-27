@@ -530,6 +530,60 @@ waits until the segment retracts.
 *Interpretation:* `0x69` **returns the player to the nearest suitable mission waypoint**. It is a reset used after
 falls and failed sections [I]. The record field names are not established.
 
+### 7.3a When a script ends, and what a runner releases [X]
+
+- **A runner retires** when it runs past its last command and is not waiting (`0x00226D00`), when `0x0B` retires
+  it (all runners with a parent, this one, or the one named), or when its script stops.
+- **Retiring a runner** (`0x0022B930`) runs the root's finally block (the `0x02` block named by its first
+  argument) and then releases everything the runner holds:
+  - its clip (`0x0022B678`);
+  - a script it waits on, which is stopped (`0x0022B6E0`);
+  - its screen object;
+  - held talk effects (`0x55`);
+  - its binocucom;
+  - any guard job started by `0x33` / `0x34`;
+  - the player-control lock (`0x0022B238`);
+  - **its pause from `0x1F`** (`0x0022B290`, off);
+  - its sound and its camera keys (`0x0022BEE8`).
+
+  **A `0x1F` hold belongs to the runner that issued it** and is released when that runner retires.
+- **A script stops** (`0x00226050`, which retires every runner) when:
+  - **no runner is left**: the script update (`0x00225130`) checks after running them;
+  - `0x11` names it;
+  - its script method 583 is called (`0x00108A18`);
+  - a runner that waited on it retires;
+  - the world resets (`0x0025BD68`).
+
+  **A task closing, stopping being current, or its job ending does not stop the task's script by itself.**
+  Task modules stop scripts explicitly, for example 2241's event 24 calls 583 on 2233.
+- **For 2142.** A runner that loops for ever (`0x04` with condition 1886) keeps the script alive until the
+  script is stopped by one of the paths above. `0x1F (1, 3)` is released when the runner that issued it
+  retires, not when the loop ends. No `0x11` in v_ext and no 583 call names 2142 [D]. So unless one of its
+  own runners retires the loop with `0x0B`, it runs until the world unloads [I].
+
+### 7.3b What `0x1F` holds [X, partial]
+
+- `0x1F (on, kind)` (handler `0x0022778C` → `0x0022B290`) pauses the game **for one player record**. The
+  runner keeps the pause state (+0x3C), the kind (+0x40) and the player index (+0x44). The player index is the
+  run's target's +0x130 when the target is a player owner (class 49), else −1, meaning both players.
+  - Switching on calls `0x001A93C8` and `0x001A94A8`; switching off calls `0x001A9420` and `0x001A94F0`.
+  - A second `0x1F` with a different kind releases the old one first.
+- In each player record (4,544 bytes from `0x0036E740`), a hold (`0x001A9630`):
+  - adds 1 to the **hold count** at +0x1180, which game-object method **1000** reports (missions.md 4.2);
+  - adds 1 to a per-kind counter: **bit 1 → +0x1188** (the first such hold also calls `0x001C4F70` on
+    `0x00370AC8`), **bit 2 → +0x118C**, bit 4 → +0x1190;
+  - adds 1 to +0x1184 through the second routine;
+  - then refreshes the record (`0x001A97B8`), which reconnects or disconnects the record's input objects
+    (+0x1108, +0x110C, +0x1110) depending on the counts.
+- **What the bits cover in play is not established** [I]: bit 1 is likely the controller input to the character
+  and bit 2 the camera or menus. A hand-off with `0x13` changes the record's controlled object (+0x110C) but does
+  **not** change the hold counts. The refresh after a hand-off still applies them, so a hold that is never
+  released should keep blocking the new character too.
+- **For 2142.** The game lets the player control Carmelita (via `0x13`) and later leave the safe house, so
+  2142's hold must be released before then. The runner that issues it most likely retires: the forever loop runs
+  in a separate, spawned runner (`0x00` starts a new runner), so the issuing runner can finish while the loop goes
+  on (7.3a). A port should check the script's runner tree rather than assume the loop holds the pause [I].
+
 ### 7.4 Module environments and copied groups [X] [D]
 
 - **One script block per group, loaded once per world load.** The world loader (`0x0014F440`, the reference's

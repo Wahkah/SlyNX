@@ -122,26 +122,32 @@ const IS_ID: u16 = 18;
 /// Script ID 825 (stream 1282), on placements: takes a new instance of the placement (missions.md 4.1a, the brawl's
 /// spawners; `World::sly3_acquire`).
 const TAKE_INSTANCE: u16 = 1282;
-/// Script IDs 1207 and 1209 (streams 1283, 1285), on placements: take the placement's instance and place it
-/// (missions.md 4.1a: the canal's enemy crews, Carmelita and the boss of the turf-war battles, 2653). Scripts call
-/// them on the copy root a search for the placement's ID finds (scripts.md 5), so the root takes the placement's
-/// methods ([`WorldHost::sly3_fallback_class`]).
+/// Placement methods (missions.md 4.1a): script ID 1207 (stream 1283) takes an instance, 1209 (1285) locks its row,
+/// 1210 (1286) unlocks it, 1211 (1287) gives the instance back. Scripts call them on the copy root a search for the
+/// placement's ID finds (scripts.md 5), so the root takes the placement's methods
+/// ([`WorldHost::sly3_fallback_class`]).
 const TAKE: u16 = 1283;
-const PLACE: u16 = 1285;
-/// Script IDs 1210 and 1211 (streams 1286, 1287), on placements, with an instance: called in that order when job
-/// 2139's wave tick drops an enemy that has left (missions.md 4.1a). Working reading [I] (not in the specs): both
-/// give the instance back, which leaves the world, and its 33 (its placement) is none until it is taken again: the
-/// wave tick keeps in its list of living enemies those whose 33 is not none.
-const GIVE_BACK: [u16; 2] = [1286, 1287];
-/// Script ID 33 (stream 19): an object's placement (value type 0x2008).
+const LOCK_ROW: u16 = 1285;
+const UNLOCK_ROW: u16 = 1286;
+const GIVE_BACK: u16 = 1287;
+/// Script ID 33 (stream 19, value type 0x2008): the object's placement row object, the copy's anchor (missions.md
+/// 4.1a), which holds the turf-war enemies' per-spawn properties 2664 to 2675.
 const PLACEMENT_OF: u16 = 19;
-/// Script IDs 461, 462 and 463 (streams 334, 335, 336) on a guard, as job 2139's wave tick calls them on the turf-war
-/// enemies (missions.md 4.1a: "given the command list 2146", and in state 3 "given command list 2147 and leaving").
-/// Working reading [I] (their routines are not in the specs): 461 gives the guard a command list (as `0x62`), 462
-/// (with none) stops its list, 463 (list) tells whether the guard has finished that list (no run of it left).
+/// Script IDs 461, 462 and 463 (streams 334, 335, 336) on a guard (missions.md 4.1a): give a command list (as
+/// `0x62`), the second kind or stop (462: with no list it stops the guard's list, inference; with one it is given as
+/// 461 does [I]), and whether the guard runs its commands.
 const GUARD_GIVE_LIST: u16 = 334;
 const GUARD_STOP_LIST: u16 = 335;
-const GUARD_LIST_DONE: u16 = 336;
+const GUARD_RUNS: u16 = 336;
+/// Script ID 552 (stream 442) on a projectile (classes 89 to 92): its shooter (missions.md 4.1a), kept in
+/// `World::shared.sly3_shooters` by the launcher.
+const SHOOTER: u16 = 442;
+/// Script ID 44 (stream 29), on any object, one argument: whether the object is in the argument's parent chain (the
+/// argument itself or one of its ancestors; missions.md 4.1a, the direction is a working reading [I]).
+const IN_PARENT_CHAIN: u16 = 29;
+/// Script IDs 940 and 939 on characters and guards (streams 938, 937): current and maximum health (missions.md 4.1a).
+const HEALTH: u16 = 938;
+const MAX_HEALTH: u16 = 937;
 /// Script ID 35 (stream 21, two arguments), on any object: re-parents it (the new parent, flags; missions.md 4.1a).
 const REPARENT: u16 = 21;
 /// The screen object class (`jt`, missions.md 4.1a) and its script IDs 1149, 1150 (hide) and 1153 (a two-argument
@@ -219,6 +225,21 @@ impl WorldHost<'_> {
             .filter_map(|c| self.world.slot(c))
             .filter(|&c| l.object(c).is_some_and(|o| o.copy != own))
             .min()
+    }
+
+    /// Options a Sly 3 script sets that the game applies rather than stores: a core crew member's velocity (script ID
+    /// 64, stream 30) launches it, as a bouncer's launch does (`World::shared.launches`; missions.md 4.1a: m1_ball's
+    /// launcher sets Murray's to (0, 0, 5,000)). True when applied.
+    pub(super) fn sly3_set_live_option(&mut self, object: ObjectId, option: u16, value: &Value) -> bool {
+        const VELOCITY: u16 = 30;
+        let Some(h) = self.obj(object) else { return false };
+        if option != VELOCITY || !matches!(self.world.class(h), Some(52..=54)) {
+            return false;
+        }
+        let Value::Vector(v) = *value else { return false };
+        let launch = crate::behavior::sly3::devices::Launch { who: h, velocity: v, factor: 1.0, by: h };
+        self.world.shared.launches.push(launch);
+        true
     }
 
     /// The placement whose copy `h` is the root of, when it is one.
@@ -314,14 +335,22 @@ impl WorldHost<'_> {
         if matches!(option, IS_ID | ADD_TO_WORLD | REMOVE_FROM_WORLD | DERIVED_FROM | REPARENT) {
             return Some(Value::Method { object, option });
         }
+        // The parent-chain test is a method on any object; a projectile's shooter is kept by its launcher.
+        if option == IN_PARENT_CHAIN {
+            return Some(Value::Method { object, option });
+        }
+        if option == SHOOTER && matches!(self.world.class(h), Some(89..=92)) {
+            let slot = self.world.slot(h)?;
+            let by = self.world.shared.sly3_shooters.get(&slot).copied();
+            return Some(Value::Object(by.map(Handle::to_script)));
+        }
         // A guard's command-list methods.
-        if matches!(option, GUARD_GIVE_LIST | GUARD_STOP_LIST | GUARD_LIST_DONE)
-            && self.world.class(h) == Some(GUARD_CLASS)
+        if matches!(option, GUARD_GIVE_LIST | GUARD_STOP_LIST | GUARD_RUNS) && self.world.class(h) == Some(GUARD_CLASS)
         {
             return Some(Value::Method { object, option });
         }
         // A placement's instance taken and placed, on the placement or its copy root.
-        if (matches!(option, TAKE | PLACE) || GIVE_BACK.contains(&option))
+        if matches!(option, TAKE | LOCK_ROW | UNLOCK_ROW | GIVE_BACK)
             && (self.world.class(h) == Some(PLACEMENT_CLASS) || self.sly3_placement_of(h).is_some())
         {
             return Some(Value::Method { object, option });
@@ -511,8 +540,18 @@ impl WorldHost<'_> {
             }
             return Some(Value::Void);
         }
-        // A guard's command lists (461 to 463, working reading above).
-        if matches!(option, GUARD_GIVE_LIST | GUARD_STOP_LIST | GUARD_LIST_DONE) {
+        // Whether the object is in the argument's parent chain (44).
+        if option == IN_PARENT_CHAIN {
+            let h = self.obj(object)?;
+            let of = match args.first() {
+                Some(Value::Object(Some(o))) => self.obj(*o),
+                _ => None,
+            };
+            let inside = of.is_some_and(|o| core::iter::successors(Some(o), |&q| self.world.parent(q)).any(|q| q == h));
+            return Some(Value::Bool(inside));
+        }
+        // A guard's command lists (461 to 463, above).
+        if matches!(option, GUARD_GIVE_LIST | GUARD_STOP_LIST | GUARD_RUNS) {
             let h = self.obj(object)?;
             if self.world.class(h) != Some(GUARD_CLASS) {
                 return None;
@@ -521,23 +560,28 @@ impl WorldHost<'_> {
                 Some(Value::Object(Some(o))) => self.obj(*o),
                 _ => None,
             };
-            if option == GUARD_LIST_DONE {
-                let (Some(slot), Some(id)) = (self.world.slot(h), list.and_then(|l| self.world.sly3_id(l))) else {
-                    return Some(Value::Bool(true));
-                };
-                let queued = self.world.shared.sly3_guard_commands.iter().any(|&(g, l)| g == h && l == list);
-                return Some(Value::Bool(!queued && !self.world.shared.sly3_guard_runs.contains(&(slot, id))));
+            if option == GUARD_RUNS {
+                // Running: a list given and not yet run (queued), or one running (that list, when one is named).
+                let Some(slot) = self.world.slot(h) else { return Some(Value::Bool(false)) };
+                let id = list.and_then(|l| self.world.sly3_id(l));
+                let queued =
+                    self.world.shared.sly3_guard_commands.iter().any(|&(g, l)| g == h && (list.is_none() || l == list));
+                let runs =
+                    self.world.shared.sly3_guard_runs.iter().any(|&(s, l)| s == slot && id.is_none_or(|i| i == l));
+                return Some(Value::Bool(queued || runs));
             }
-            let given = if option == GUARD_GIVE_LIST { list } else { None };
+            let given = list;
             self.world.shared.sly3_guard_commands.push((h, given));
             return Some(Value::Void);
         }
-        // 1207 (take) and 1209 (place) on a placement or its copy root (missions.md 4.1a). Stand-in [I] (the methods'
-        // routines are not traced): take gives a free pooled copy of the placement's group when the group is pooled
-        // (`World::sly3_acquire`, which brings it into the world at the placement), else the placement's own copy,
-        // left where it is. Place (with the instance as its argument, as 2653 and 2658 call it) brings the instance
-        // and the placement into the world where they stand, and returns it.
-        if matches!(option, TAKE | PLACE) || GIVE_BACK.contains(&option) {
+        // The placement methods on a placement or its copy root (missions.md 4.1a). Take gives a free pooled copy of
+        // the placement's group when the group is pooled (`World::sly3_acquire`, at the placement), else the
+        // placement's own copy (also after it was re-parented away), and brings it into the world (taking a lease adds
+        // the copy to the world, as in Sly 2, placement.md 2.1). Stand-in [I] (the refill was not found): a taken
+        // instance whose current health (940) is not above 0 is refilled to its maximum (939). Locking and unlocking
+        // the row change nothing here. Giving the instance back takes it out of the world, and its 33 is none until it
+        // is taken again (the wave tick keeps the enemies whose 33 is not none).
+        if matches!(option, TAKE | LOCK_ROW | UNLOCK_ROW | GIVE_BACK) {
             let h = self.obj(object)?;
             let placement = if self.world.class(h) == Some(PLACEMENT_CLASS) { h } else { self.sly3_placement_of(h)? };
             let ps = self.world.slot(placement)?;
@@ -551,25 +595,31 @@ impl WorldHost<'_> {
                     self.world.shared.sly3_instance_of.insert(s, ps);
                 }
                 let got = pooled.or(own);
-                if let Some(s) = got.and_then(|i| self.world.slot(i)) {
-                    self.world.shared.sly3_given_back.remove(&s);
+                if let Some(i) = got {
+                    if let Some(s) = self.world.slot(i) {
+                        self.world.shared.sly3_given_back.remove(&s);
+                    }
+                    self.world.set_in_world(placement, true);
+                    self.world.set_in_world(i, true);
+                    if let Some(o) = self.world.options_mut(i) {
+                        let (max, now) = (o.f32(MAX_HEALTH), o.f32(HEALTH).unwrap_or(0.0));
+                        if let Some(m) = max.filter(|&m| m > 0.0 && now <= 0.0) {
+                            o.set(HEALTH, OptionValue::Float(m));
+                        }
+                    }
                 }
                 return Some(Value::Object(got.map(Handle::to_script)));
             }
-            let it = match args.first() {
-                Some(Value::Object(Some(o))) => self.obj(*o),
-                _ => own,
-            }?;
-            let slot = self.world.slot(it)?;
-            if GIVE_BACK.contains(&option) {
+            if option == GIVE_BACK {
+                let it = match args.first() {
+                    Some(Value::Object(Some(o))) => self.obj(*o),
+                    _ => own,
+                }?;
+                let slot = self.world.slot(it)?;
                 self.world.set_in_world(it, false);
                 self.world.shared.sly3_given_back.insert(slot);
-                return Some(Value::Void);
             }
-            self.world.shared.sly3_given_back.remove(&slot);
-            self.world.set_in_world(placement, true);
-            self.world.set_in_world(it, true);
-            return Some(Value::Object(Some(it.to_script())));
+            return Some(Value::Void);
         }
         // A placement's new instance (none when its pool has none free).
         if option == TAKE_INSTANCE {

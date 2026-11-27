@@ -143,6 +143,22 @@ impl Gang {
         }
     }
 
+    /// Sly 2: Murray takes Bentley up ready to throw (script ID 939, stream option 1051; characters.md 4.6 and 7,
+    /// missions.md 4.3: `t1_heist_open_piperoom`): Bentley is carried and Murray is in the throw aim (state 15). The
+    /// played character does not change. Returns whether both are there.
+    pub fn hold_bentley(&mut self) -> bool {
+        let id = Who::Bentley.target_id();
+        let mut out = Vec::new();
+        let shared = &self.shared;
+        let Some(m) = self.members.iter_mut().find(|c| c.who == Who::Murray) else { return false };
+        m.hold_to_throw(shared, id, &mut out);
+        let Some(b) = self.members.iter_mut().find(|c| c.who == Who::Bentley) else { return false };
+        b.velocity = [0.0; 3];
+        b.tossed = false;
+        b.set_state(bentley::CARRIED, &mut out);
+        true
+    }
+
     /// One frame: the player reads `input`, the others an idle input.
     pub fn update(&mut self, dt: f32, input: &GangInput, world: &GangWorld<'_>) -> Vec<(Who, GangEvent)> {
         let mut events = Vec::new();

@@ -165,6 +165,13 @@ pub struct Sly2Level {
     pub placed: alloc::collections::BTreeMap<u32, (u32, u32, Affine)>,
     /// Noise objects made by option 1095: (slot, game time it expires at; negative never).
     pub noise_objects: Vec<(u32, f32)>,
+    /// Zone masks given at run time, by slot (clock-and-loop.md 3.2: a leased copy's objects take their
+    /// placement's mask); they replace the record's mask.
+    pub masks: alloc::collections::BTreeMap<u32, u32>,
+    /// Each running sequence's starter (dialogue-and-voice.md 2.1), by the sequence's slot.
+    pub starters: alloc::collections::BTreeMap<u32, Handle>,
+    /// A script asked Murray to take Bentley up ready to throw (script ID 939), for the gang.
+    pub hold_bentley: bool,
     objects: Vec<Sly2Object>,
     /// Slots by object ID (built at load; a destroyed object leaves it), for the ID searches.
     ids: alloc::collections::BTreeMap<i32, Vec<u32>>,
@@ -186,6 +193,8 @@ impl Sly2Level {
     /// A destroyed object leaves the index (and its slot's ID is cleared, so a run-time object that reuses the
     /// slot has none).
     pub(crate) fn forget(&mut self, slot: u32) {
+        self.masks.remove(&slot);
+        self.starters.remove(&slot);
         let Some(o) = self.objects.get_mut(slot as usize) else { return };
         if let Some(v) = self.ids.get_mut(&o.id) {
             v.retain(|&s| s != slot);
@@ -266,6 +275,9 @@ impl World {
     /// A Sly 2 object's zone mask (its transform header's, `0xFF` without one; camera.md 7.1). Object-model hook:
     /// activation by visibility volume.
     pub fn sly2_zone_mask(&self, h: Handle) -> u32 {
+        if let Some(&m) = self.sly2.as_deref().and_then(|l| l.masks.get(&h.index())) {
+            return m;
+        }
         match self.sly2_record(h).map(|r| &r.body) {
             Some(formats_sly2::stream::Body::Solid(s)) => s.zone_mask,
             Some(formats_sly2::stream::Body::Placement(p)) => p.zone_mask,

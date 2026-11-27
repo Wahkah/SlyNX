@@ -755,9 +755,13 @@ impl World {
             return;
         }
         self.set_flag(s, flags::IN_WORLD, on);
-        // Sly 3 hook: Sly 2's added and removed events (4, 5) are not Sly 3's (sly3/scripts.md 6: event 4 takes two
+        // Sly 3 hook: Sly 1's added and removed events (4, 5) are not Sly 3's (sly3/scripts.md 6: event 4 takes two
         // values, and event 5 is the use and activation event), so a Sly 3 world raises neither.
-        if self.sly3.is_none() {
+        // Sly 2 hook: nor Sly 2's. Its event 5 is a trigger volume's entry and a sequence's start, and event 4 a
+        // sequence's value (scripts.md 6, missions.md 4.1); no Sly 2 spec raises either on adding or removing an
+        // object [working choice]. Raised on removal, 5 ran row 2's volume 124131's entry handler when task 1902's
+        // switch took it out at load, starting the rendezvous sequence 1903 during m1_neela.
+        if self.sly3.is_none() && self.sly2.is_none() {
             self.raise(h, if on { script::event::ADDED } else { script::event::REMOVED }, Vec::new());
         }
     }

@@ -7,20 +7,9 @@
 //!
 //! - **Movement**: the crew controller (`crew`, Carmelita stand-in): the played member takes the pad and its
 //!   position and heading are written into her object.
-//! - **Health**: when a battle starts (a command script sends hook [`START_HOOK`], 139345, whose handler calls job
-//!   2139's method 2653, which takes Carmelita from her pool; filled once the hook's event has run), her current
-//!   health (script ID 940, stream 938) is set
-//!   to her maximum (939, stream 937, the option 937 = 600 of the spec) when it is not above 0 [I: what fills it is
-//!   not traced; the boat's hull is refilled to its maximum on each start, as a model]. Not earlier: the intro (2141)
-//!   hands her control too, and its script keeps sending the wave tick's hook, which ends a battle at once when no
-//!   enemy is up and her health is above 0 (2658). What happens when it reaches 0 is not traced; nothing here lowers
-//!   it.
-//! - **Between battles** [I]: the intro's script 2142 keeps running (it waits on alarm 139312, which nothing sets
-//!   here) and keeps sending the wave tick's hook. Once a battle is over, the next battle's task is current a frame
-//!   or two before its script's start hook has run, and that tick (no enemy up, her health above 0) would set the
-//!   battle-over alarm [`END_ALARM`] (139255) on the new script at once. So the session counts 139255 only while a
-//!   battle runs: from its start hook having run to the alarm being set. Open: why the game's wave tick does not end
-//!   the next battle there (its order of hooks and task-script starts, or what ends 2142, is not traced).
+//! - **Health**: her current health (script ID 940, stream 938) is her maximum (939, stream 937: 600) once her copy
+//!   is taken from its pool (1207, `script_host::sly3`: a taken instance is refilled, an inference of the spec). What
+//!   happens when it reaches 0 is not traced; nothing here lowers it.
 //! - **The shock pistol** [I]: Square ([`FIRE`], the boat's fire button in the canal chase) fires her playable shot
 //!   straight ahead, at most every [`FIRE_INTERVAL`] seconds. The shot is a pooled instance of her playable spawn
 //!   point (the placement under her copy whose ID her option 1545 names, 6676 in the spec; `World::sly3_acquire`),
@@ -56,23 +45,9 @@ pub const MUZZLE_AHEAD: f32 = 60.0;
 /// The aim assist's half-angle, radians [I].
 pub const AIM_CONE: f32 = 0.35;
 
-/// The turf-war battle modules' start hook, and the battle-over alarm the wave tick sets (missions.md 4.1a).
-pub const START_HOOK: i32 = 139345;
-pub const END_ALARM: i32 = 139255;
-
 /// The Carmelita copy player 0 drives, if any.
 pub fn driven(world: &World) -> Option<Handle> {
     world.shared.driving.filter(|&d| world.class(d) == Some(CLASS))
-}
-
-/// A battle starts: the driven Carmelita's health filled to her maximum when it is not above 0 (module notes).
-pub fn fill_health(world: &mut World) {
-    let Some(h) = driven(world) else { return };
-    let Some(o) = world.options_mut(h) else { return };
-    let (max, now) = (o.f32(MAX_HEALTH), o.f32(HEALTH).unwrap_or(0.0));
-    if let Some(m) = max.filter(|&m| m > 0.0 && now <= 0.0) {
-        o.set(HEALTH, OptionValue::Float(m));
-    }
 }
 
 /// Her playable shot's spawn point: the placement (class 8) under her copy named by her option 1545, else the
@@ -125,6 +100,10 @@ pub fn update(world: &mut World, pressed: u32, dt: f32, cooldown: &mut f32) -> O
         dir = d;
     }
     world.set_world_transform(shot, Affine { t: from, ..at });
+    // Its shooter (script ID 552, missions.md 4.1a): Carmelita.
+    if let Some(s) = world.slot(shot) {
+        world.shared.sly3_shooters.insert(s, me);
+    }
     if let Some(o) = world.options_mut(shot) {
         let v = [dir[0] * SHOT_SPEED, dir[1] * SHOT_SPEED, dir[2] * SHOT_SPEED];
         o.set(projectile::VELOCITY, OptionValue::Vector(v));

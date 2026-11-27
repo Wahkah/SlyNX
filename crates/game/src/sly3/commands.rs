@@ -209,6 +209,9 @@ pub struct Scripts {
     stopped: BTreeSet<i32>,
     /// Alarms set on a named script (method 735): alarm → that script.
     alarm_owners: BTreeMap<i32, i32>,
+    /// Alarms that waits with the clear flag passed this frame, cleared once every runner has run (working reading
+    /// [I]: 2142's runners 15137 and 4904 both wait on 139312, one clearing it, and both go on, missions.md 4.1a).
+    clears: Vec<i32>,
 }
 
 fn word(a: &[u8], k: usize) -> i32 {
@@ -234,6 +237,7 @@ impl Scripts {
             rng: Rng::new(seed),
             stopped: BTreeSet::new(),
             alarm_owners: BTreeMap::new(),
+            clears: Vec::new(),
         }
     }
 
@@ -301,6 +305,19 @@ impl Scripts {
         true
     }
 
+    /// Runs script `oid` (already started) for one step now, out of the frame's order, with no time passing: a task's
+    /// script takes its first step in the update in which the task becomes current (missions.md 4.1a). Its requests
+    /// are added to [`Scripts::requests`].
+    pub fn step_now(&mut self, world: Option<&World>, oid: i32, view: &View) {
+        let Some(k) = self.running.iter().position(|s| s.oid == oid) else { return };
+        let names: BTreeSet<i32> = self.running.iter().map(|s| s.oid).collect();
+        let mut s = self.running.remove(k);
+        self.step_script(world, &mut s, view, &names, 0.0);
+        // The step may have stopped other scripts (`0x11`) or started some.
+        let k = k.min(self.running.len());
+        self.running.insert(k, s);
+    }
+
     /// Stops script `oid` (its finish blocks are not run).
     pub fn stop(&mut self, oid: i32) {
         self.running.retain(|s| s.oid != oid);
@@ -337,6 +354,10 @@ impl Scripts {
         let mut scripts = core::mem::take(&mut self.running);
         for s in &mut scripts {
             self.step_script(world, s, view, &names, dt);
+        }
+        for a in core::mem::take(&mut self.clears) {
+            self.alarms.remove(&a);
+            self.alarm_owners.remove(&a);
         }
         let stopped = core::mem::take(&mut self.stopped);
         for s in scripts.iter().filter(|s| s.runners.is_empty() && !stopped.contains(&s.oid)) {
@@ -379,8 +400,11 @@ impl Scripts {
             cond::FIRST_TIME => view.plays.get(&object) == Some(&1),
             cond::LIVE => view.plays.contains_key(&object) && !view.restoring,
             cond::RESTORING => view.plays.contains_key(&object) && view.restoring,
-            cond::ALARM_SET => !self.alarms.is_empty(),
-            cond::ALARM_CLEAR => self.alarms.is_empty(),
+            // An alarm of this script (scripts.md 7.4: the condition's second word names it; none named: any).
+            cond::ALARM_SET | cond::ALARM_CLEAR => {
+                let set = if object == -1 { !self.alarms.is_empty() } else { self.alarm_set_for(s.oid, object) };
+                set == (kind == cond::ALARM_SET)
+            }
             cond::NO_LINE => !view.line_playing,
             cond::LINE => view.line_playing,
             // Any other value asks the script's own module (scripts.md 7.1).
@@ -454,8 +478,7 @@ impl Scripts {
                     return spawned;
                 }
                 if let Wait::Alarm(a, true) = w {
-                    self.alarms.remove(&a);
-                    self.alarm_owners.remove(&a);
+                    self.clears.push(a);
                 }
             }
             let Some(i) = r.pc else {

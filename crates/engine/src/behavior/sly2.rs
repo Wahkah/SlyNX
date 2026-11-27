@@ -58,6 +58,12 @@ pub mod opt {
     pub const NEVER_SEE: u16 = 314;
     /// View volume.
     pub const VIEW: u16 = 315;
+    /// The detector's second volume: an escort stops once the player is outside it (guards.md 4.4).
+    pub const SECOND_VOLUME: u16 = 316;
+    /// An escort's speed factor by the distance to the player, `a + d(b + d c)` (guards.md 4.4).
+    pub const ESCORT_SPEED: u16 = 1119;
+    /// The low and high bounds of [`ESCORT_SPEED`].
+    pub const ESCORT_SPEED_RANGE: u16 = 1120;
     /// Patrol route: a command list (class 113).
     pub const ROUTE: u16 = 273;
     /// A task item in the guard's pocket (pickpocket-and-pickups.md 5).
@@ -194,18 +200,31 @@ fn floor_ray(cx: &Cx<'_>, from: [f32; 3], drop: f32) -> Option<f32> {
 /// The pocket entry standing for a task item (option 309): not a loot kind (those are 1114 to 1143).
 pub const POCKET_TASK_ITEM: i32 = -1;
 
-/// An escort job's state (guards.md 4.4): 0 walking (the player in view), 1 waiting, and how long the player has
-/// been out of view.
+/// An escort job's state (guards.md 4.4): 0 walking (the player in the view volume, until the player leaves the
+/// second volume), 1 waiting, and how long it has waited.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Escort {
     pub state: u8,
     pub out_for: f32,
 }
 
-/// The escort's give-up wait in seconds (option 1121, script ID 974), and its default when unset. *Placeholder*
-/// default: m1_neela's job sets it to 5 + 15 × a random number.
+/// The escort's give-up wait in seconds (option 1121, script ID 974), and its default when unset. The scripts set
+/// it (m1_neela's job: 5 + 15 × the difficulty help, guards.md 4.4); the default is a *placeholder* for a world
+/// whose scripts do not.
 pub const ESCORT_GIVE_UP: u16 = 1121;
 pub const ESCORT_WAIT: f32 = 10.0;
+
+/// An escort's speed factor at distance `d` from the player (guards.md 4.4): `a + d(b + d c)` from option 1119,
+/// clamped to option 1120's low and high values; 1 without option 1119 or a player.
+pub fn escort_speed(o: Option<&crate::object::options::OptionStore>, d: Option<f32>) -> f32 {
+    let (Some(o), Some(d)) = (o, d) else { return 1.0 };
+    let Some([a, b, c]) = o.vec3(opt::ESCORT_SPEED) else { return 1.0 };
+    let f = a + d * (b + d * c);
+    match o.pair(opt::ESCORT_SPEED_RANGE) {
+        Some([lo, hi]) if lo <= hi => f.clamp(lo, hi),
+        _ => f,
+    }
+}
 
 /// How long a thrown creature passes through what it starts inside (characters.md 4.6: a dropped load does not
 /// collide with Murray until 0.1 s after they part).
@@ -457,6 +476,8 @@ pub struct Sly2Guard {
     pub route: Option<Handle>,
     /// Its view volume (option 315), resolved at load.
     pub view: Option<Handle>,
+    /// Its detector's second volume (option 316), resolved at load (an escort's, guards.md 4.4).
+    pub second: Option<Handle>,
     /// Seconds of the current run time left (negative: pausing for up to `route_pause`).
     pub route_clock: f32,
     /// Length of the current pause time.
@@ -542,6 +563,7 @@ impl Sly2Guard {
             route_clock: 0.0,
             route_pause: 0.0,
             view: o.and_then(|o| o.i32(opt::VIEW)).and_then(|id| world.find_sly2_id(id, Some(h))),
+            second: o.and_then(|o| o.i32(opt::SECOND_VOLUME)).and_then(|id| world.find_sly2_id(id, Some(h))),
         }
     }
 
@@ -1066,18 +1088,20 @@ impl ClassBehavior for Sly2Guard {
         let Some(me) = cx.world.position(cx.me) else { return };
         let player = cx.world.player_target();
         let target = player.and_then(|p| cx.world.position(p));
-        // An escort job (guards.md 4.4): with the player inside its view volume it runs its list from where it
-        // stopped (state 0); outside it, it stops and faces the player (1); out of it for longer than the give-up wait
-        // (option 1121), it gives up (2): task event 51 with itself, and the escort ends.
+        // An escort job (guards.md 4.4): it runs its list from where it stopped (state 0) until the player is outside
+        // its detector's second volume (option 316); then it stops and faces the player (1) until the player is back
+        // inside the view volume (option 315); waiting longer than the give-up wait (option 1121), it gives up (2):
+        // task event 51 with itself, and the escort ends. Without a second volume the view volume serves for both.
         if let Some(mut e) = self.escort {
-            let inside = target.is_some_and(|p| {
-                self.view.and_then(|v| super::sly2_props::volume_box(cx.world, v)).is_some_and(|b| {
-                    super::sly2_props::in_volume(&b, [p[0], p[1], p[2] + super::sly2_sensors::CHARACTER_CENTRE])
+            let inside = |v: Option<Handle>| {
+                target.is_some_and(|p| {
+                    v.and_then(|v| super::sly2_props::volume_box(cx.world, v)).is_some_and(|b| {
+                        super::sly2_props::in_volume(&b, [p[0], p[1], p[2] + super::sly2_sensors::CHARACTER_CENTRE])
+                    })
                 })
-            });
-            // The spec's state 1 starts when the player leaves a second, larger volume; this one volume (the view
-            // volume) stands in for both [stand-in: the second volume is not read].
-            if inside {
+            };
+            let walking = if e.state == 0 { inside(self.second.or(self.view)) } else { inside(self.view) };
+            if walking {
                 e.state = 0;
                 e.out_for = 0.0;
             } else {
@@ -1132,7 +1156,11 @@ impl ClassBehavior for Sly2Guard {
                         self.face(p, me, cx.dt);
                         self.place(cx.world, cx.me, me);
                     }
-                    super::sly2_commands::Step::GoTo(p, speed) => {
+                    super::sly2_commands::Step::GoTo(p, mut speed) => {
+                        // An escort's speed follows its distance to the player (guards.md 4.4).
+                        if self.escort.is_some() {
+                            speed *= escort_speed(cx.world.options(cx.me), target.map(|t| length(sub(t, me))));
+                        }
                         // Along a curve, the step physics (guards.md 5).
                         self.on_curve = !run.path.is_empty();
                         let left = self.walk(cx, p, speed, 30.0);

@@ -1838,6 +1838,14 @@ impl Character {
         }
     }
 
+    /// Murray holds `target` (a character's target ID) ready to throw: carrying it, in the throw aim (state 15;
+    /// characters.md 4.6, the Bentley toss that script ID 939 starts).
+    pub fn hold_to_throw(&mut self, s: &Shared, target: u32, out: &mut Vec<GangEvent>) {
+        self.carrying = Some(target);
+        self.velocity = [0.0; 3];
+        self.start_aim(s, murray::THROW_AIM, out);
+    }
+
     fn start_aim(&mut self, s: &Shared, state: u8, out: &mut Vec<GangEvent>) {
         let long = s.has(id::LONG_TOSS);
         self.aim = Some(ThrowAim::new(s.tun.throw_range, s.tun.throw_time, self.yaw, long));

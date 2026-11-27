@@ -181,6 +181,15 @@ impl WorldHost<'_> {
             {
                 return Value::Vector(p);
             }
+            // Script ID 643 (stream option 620, a getter) on a sequence is the starter it runs with
+            // (dialogue-and-voice.md 2.1) [I: from its uses; row 2's safe-house sequence 27254, started by 141710
+            // with Sly, takes every character but that one out of the world].
+            if option == SEQUENCE_STARTER
+                && let Some(h) = self.obj(object).filter(|&h| self.world.class(h) == Some(114))
+            {
+                let starter = crate::behavior::sly2_commands::starter_of(self.world, h);
+                return Value::Object(starter.map(Handle::to_script));
+            }
             // The parent field (script ID 32, option 19) and the placement leasing the object's copy (script ID 31,
             // option 18), as missions.md 4.3 reads them for the water main: a copy root's parent is the placement's
             // parent (the tank root's parent is the rig 123922, not placement 124106) [I], and the placement is
@@ -299,6 +308,10 @@ impl WorldHost<'_> {
                 _ => -1,
             };
             self.world.shared.sly3_context_writes.push((script, with));
+            return Ok(());
+        }
+        // Sly 3 hook: options the game applies rather than stores (a crew member's velocity, `script_host::sly3`).
+        if self.world.sly3.is_some() && self.sly3_set_live_option(object, option, value) {
             return Ok(());
         }
         let v = self.sly2_to_option(self.entry(option), value).ok_or(ScriptError::Host(option as u32))?;
@@ -570,6 +583,21 @@ impl WorldHost<'_> {
                 self.world.shared.leased.insert(h.index());
                 self.world.set_in_world(h, true);
                 self.world.set_in_world(r, true);
+                // The copy's objects take the placement's zone mask, passed down to every child that does not keep
+                // its own (option 32), clock-and-loop.md 3.1 and 3.2 (m1_neela: 8436's 0x2 over Neyla's 0x1). The
+                // placement's radius (option 13) is not copied: activation by radius is not modelled.
+                let mask = self.world.sly2_zone_mask(h);
+                let mut stack = alloc::vec![r];
+                while let Some(o) = stack.pop() {
+                    if self.world.options(o).and_then(|x| x.get(KEEPS_MASK)).is_some_and(|v| v.as_bool() != Some(false))
+                    {
+                        continue;
+                    }
+                    if let Some(l) = self.world.sly2.as_deref_mut() {
+                        l.masks.insert(o.index(), mask);
+                    }
+                    stack.extend(self.world.children(o));
+                }
                 self.world.raise(h, LEASE_EVENT, Vec::new());
                 self.world.raise(r, LEASE_EVENT, Vec::new());
             }
@@ -630,6 +658,27 @@ impl WorldHost<'_> {
                 .zip(crate::behavior::sly2_props::volume_box(self.world, h))
                 .is_some_and(|(p, b)| crate::behavior::sly2_props::in_volume(&b, p));
             return Some(Value::Bool(inside));
+        }
+        // Object-model hook: script ID 939 (stream option 1051) on Murray (class 54) has him take Bentley up ready to
+        // throw (missions.md 4.3: 1895's state 1), done by the gang.
+        if option == HOLD_BENTLEY
+            && self.obj(object).is_some_and(|h| self.world.class(h) == Some(54))
+            && let Some(l) = self.world.sly2.as_deref_mut()
+        {
+            l.hold_bentley = true;
+            return Some(Value::Void);
+        }
+        // Object-model hook: script ID 125 (stream option 53) on a reactive prop sets the response byte of each
+        // contact-kind bit of its first argument to its second (characters.md 2.3; missions.md 4.3: 1895's module
+        // makes 123934 take only thrown objects).
+        if option == crate::behavior::sly2_props::CONTACT_RESPONSE
+            && let [mask, byte] = args
+            && let (Some(mask), Some(byte)) = (mask.as_i32(), byte.as_i32())
+            && let Some(h) = self.obj(object)
+            && let Some(crate::behavior::Behavior::Sly2Prop(p)) = self.world.behavior_mut(h)
+        {
+            p.set_response(mask as u32, byte as u8);
+            return Some(Value::Void);
         }
         // Object-model hook: a sequence's signal set (dialogue-and-voice.md 2.1): script ID 640 (617) sends a value,
         // 641 (618) takes it away (the volumes' leave handlers [I]) and 642 (619) asks whether it is there.
@@ -961,6 +1010,12 @@ const LEASE_OF: u16 = 1177;
 const LEASE_EVENT: u32 = 14;
 /// A fixed placement (its copy kept out of the world as a pool; classes/placement.md 2.1).
 const FIXED_PLACEMENT: u16 = 1178;
+/// Murray takes Bentley up to throw (script ID 939).
+const HOLD_BENTLEY: u16 = 1051;
+/// A sequence's starter (script ID 643).
+const SEQUENCE_STARTER: u16 = 620;
+/// An object that keeps its own zone mask when one is set on it or an ancestor (clock-and-loop.md 3.1).
+const KEEPS_MASK: u16 = 32;
 /// See [`LEASE_CAN`].
 const LEASE_LOCK: u16 = 1179;
 /// See [`LEASE_CAN`].

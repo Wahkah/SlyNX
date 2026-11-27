@@ -137,6 +137,48 @@ pub struct Prop {
     pub triggers: Vec<i16>,
     /// Hits taken.
     pub hits_taken: u32,
+    /// Sly 2: the response byte of each of the 26 contact-kind bits (script ID 125, stream option 53;
+    /// characters.md 2.3), once any is set; a contact counts as a hit when the OR of its bits' bytes has bit 8.
+    pub responses: Option<[u8; CONTACT_KINDS]>,
+}
+
+/// The contact-kind bits a prop's response bytes cover (characters.md 2.3).
+pub const CONTACT_KINDS: usize = 26;
+/// The response bit that makes a contact count as a hit (characters.md 2.3, interactables.md 3.2).
+pub const RESPONSE_HIT: u8 = 8;
+/// Contact kinds (characters.md 2.3): the gang's strikes, air attacks and flop, thrown or fired objects, the dart.
+pub mod contact {
+    /// The cane combo, Murray's and Bentley's strikes.
+    pub const STRIKE: u32 = 0x2;
+    /// Sly's air attack (Square) and Murray's Thunder Flop.
+    pub const AIR: u32 = 0x4;
+    /// Sly's air attack (Triangle).
+    pub const AIR_HIGH: u32 = 0x20;
+    /// Thrown and fired objects.
+    pub const THROWN: u32 = 0x100;
+    /// The sleep dart.
+    pub const DART: u32 = 0x40000;
+}
+
+impl Prop {
+    /// Sets the response byte of every kind bit in `mask` (script ID 125, stream option 53).
+    pub fn set_response(&mut self, mask: u32, byte: u8) {
+        let r = self.responses.get_or_insert([0; CONTACT_KINDS]);
+        for (i, b) in r.iter_mut().enumerate() {
+            if mask & (1 << i) != 0 {
+                *b = byte;
+            }
+        }
+    }
+
+    /// Whether a contact of `kind` counts as a hit: always without response bytes; otherwise when the OR of the bytes
+    /// of its bits has [`RESPONSE_HIT`]. An attack of no known kind (`None`) counts only without bytes.
+    pub fn accepts(&self, kind: Option<u32>) -> bool {
+        let Some(r) = &self.responses else { return true };
+        let Some(kind) = kind else { return false };
+        let or = r.iter().enumerate().filter(|&(i, _)| kind & (1 << i) != 0).fold(0u8, |a, (_, &b)| a | b);
+        or & RESPONSE_HIT != 0
+    }
 }
 
 fn int_of(v: &OptionValue) -> Option<i32> {
@@ -191,6 +233,10 @@ impl Prop {
             list.extend(l.actions.iter().filter(|a| a.0 == h.index()).map(|a| (a.1, OptionValue::Args(a.2.clone()))));
         }
         let mut p = Prop::default();
+        // Stand-in: the response bytes a record sets at load (its option 53 entries) are not applied, only those
+        // scripts set (script ID 125). Several kinds are not known for the gang's moves: m1_brawl's alarm boxes
+        // (125050) set every kind to 1 and 0x10000 to 9, and no gang attack is known to be 0x10000
+        // (characters.md 2.3), so applied they could not be broken.
         let mut cur: Option<usize> = None;
         let mut in_every = false;
         for (id, v) in &list {
@@ -331,8 +377,10 @@ impl ClassBehavior for Prop {
         let notices: Vec<Notice> = cx.world.notices(cx.me).to_vec();
         for n in notices {
             match n {
-                Notice::Attack { by, .. } => self.hit(cx, Some(by)),
-                Notice::Hit(by) => self.hit(cx, Some(by)),
+                // Attack contacts go by the response bytes; kind 1 is an attack of no particular kind (Sly 3, the
+                // tests). A touch by a trigger class (below) is not an attack contact.
+                Notice::Attack { by, kind } if self.accepts((kind != 1).then_some(kind)) => self.hit(cx, Some(by)),
+                Notice::Hit(by) if self.accepts(None) => self.hit(cx, Some(by)),
                 _ => {}
             }
         }
@@ -350,6 +398,9 @@ impl ClassBehavior for Prop {
         }
     }
 }
+
+/// A prop's contact response bytes (script ID 125; characters.md 2.3): (kind mask, byte).
+pub const CONTACT_RESPONSE: u16 = 53;
 
 /// Sly 3: the most members a tracking trigger keeps (interactables.md 6, option 478).
 const MAX_MEMBERS: usize = 64;

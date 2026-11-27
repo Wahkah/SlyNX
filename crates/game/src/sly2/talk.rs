@@ -152,6 +152,8 @@ pub enum SeqCommand {
     Start {
         /// The sequence.
         sequence: Handle,
+        /// Its starter (`None`: −1, the running sequence's own starter is passed on).
+        starter: Option<Handle>,
         /// Do not wait for it.
         no_wait: bool,
     },
@@ -340,7 +342,12 @@ pub fn sequence_commands(world: &World, h: Handle) -> Vec<SeqCommand> {
                 let a = typed_args(v)?;
                 let sequence = world.find_sly2_id(int_of(a.first()?.1), Some(h))?;
                 let no_wait = a.get(2).is_some_and(|x| int_of(x.1) != 0);
-                return Some(SeqCommand::Start { sequence, no_wait });
+                let starter = a.get(1).map(|x| int_of(x.1)).filter(|&id| id >= 0);
+                // A placement's ID means its copy's root, as for the scripts' searches (scripts.md 5: row 2's Sly is
+                // the copy of placement 7).
+                let starter = starter.and_then(|id| world.find_sly2_id(id, Some(h)));
+                let starter = starter.map(|x| engine::behavior::sly2_commands::placed_root(world, x).unwrap_or(x));
+                return Some(SeqCommand::Start { sequence, starter, no_wait });
             }
             TalkCommand::decode(o.id, v).map(SeqCommand::Talk)
         })
@@ -421,7 +428,8 @@ pub struct Sly2Sound {
     world: Option<WorldAudio>,
     talk: Talk,
     sequences: Vec<Sequence>,
-    sub_starts: Vec<Handle>,
+    /// Sub-sequences started (636): the sub-sequence, the sequence that started it and the starter it gave.
+    sub_starts: Vec<(Handle, Handle, Option<Handle>)>,
     /// Task states asked for (option 642).
     task_requests: Vec<(i32, i32)>,
     /// Object and script commands (670, 671, 634, 635) with their run, for the session.
@@ -511,7 +519,7 @@ impl Sly2Sound {
     }
 
     /// Sub-sequences the running sequences started this frame, for the session to start (it has the world).
-    pub fn take_sub_starts(&mut self) -> Vec<Handle> {
+    pub fn take_sub_starts(&mut self) -> Vec<(Handle, Handle, Option<Handle>)> {
         core::mem::take(&mut self.sub_starts)
     }
 
@@ -632,15 +640,17 @@ impl Sly2Sound {
             && let Some(&cmd) = seq.commands.get(seq.at)
         {
             let cmd = match cmd {
-                SeqCommand::Start { sequence, no_wait } => {
+                SeqCommand::Start { sequence, starter, no_wait } => {
                     // A sub-sequence: started by the session (it has the world), waited for unless `no_wait`.
                     if !seq.started_sub {
-                        self.sub_starts.push(sequence);
+                        self.sub_starts.push((sequence, seq.object, starter));
                         seq.started_sub = true;
                         if !no_wait {
                             break;
                         }
-                    } else if !no_wait && (self.sub_starts.contains(&sequence) || self.live.contains(&sequence)) {
+                    } else if !no_wait
+                        && (self.sub_starts.iter().any(|s| s.0 == sequence) || self.live.contains(&sequence))
+                    {
                         break;
                     }
                     seq.started_sub = false;

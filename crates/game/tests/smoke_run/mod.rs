@@ -554,6 +554,70 @@ fn knockout_input(
     Some(sly2_attack_input(k))
 }
 
+/// What [`ball_input`] last saw: launches and tanks hit, and the frame Murray was last put on the launcher.
+#[derive(Default)]
+struct Balling {
+    launches: u32,
+    hit: usize,
+    placed: Option<u32>,
+}
+
+/// m1_ball (missions.md 4.1a, `game::sly3::ball`), while Murray is played in the job: with a tank left (its task
+/// available), the route puts Murray on the launcher (no path-finding) a second after each landing; in flight it
+/// steers him at the nearest tank left, the stick easing off within 1,000 units of it. Launches and hits are
+/// journalled.
+fn ball_input(
+    s: &mut game::sly3::Sly3Session<NullBackend, DiscFile>,
+    f: u32,
+    journal: &mut Vec<String>,
+    state: &mut Balling,
+) -> Option<FrameInput> {
+    use game::sly3::ball;
+    let time = f as f32 / FPS as f32;
+    let j = s.jobs.as_ref()?;
+    j.job.filter(|&k| j.graph.jobs[k].id == ball::JOB)?;
+    let left: Vec<i32> = ball::TANKS.iter().filter(|t| j.task_state(t.1) == Some(1)).map(|t| t.0).collect();
+    let b = s.ball.clone();
+    if b.launches != state.launches {
+        state.launches = b.launches;
+        journal.push(format!("{time:.1} s: ball: launch {} ({} tanks left)", b.launches, left.len()));
+    }
+    if b.hit.len() != state.hit {
+        state.hit = b.hit.len();
+        journal.push(format!("{time:.1} s: ball: hit tank {:?}", b.hit.last()));
+    }
+    let g = s.game.as_mut()?;
+    let me = g.world.player.filter(|&p| g.world.class(p) == Some(ball::MURRAY_CLASS))?;
+    if left.is_empty() {
+        return None;
+    }
+    let at = g.world.position(me)?;
+    if !b.flying {
+        // A second after landing (or at once before the first launch), onto the launcher.
+        let due = b.since_landed >= 1.0 && state.placed.is_none_or(|p| f >= p + FPS);
+        if due && let Some((_, pad)) = ball::launchers(&g.world).first().copied() {
+            let to = g.world.world_transform(pad)?;
+            g.systems.player.place(&mut g.world, to);
+            state.placed = Some(f);
+        }
+        return Some(FrameInput::default());
+    }
+    let d2 = |p: [f32; 3]| (p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2);
+    let target = left
+        .iter()
+        .filter_map(|&id| ball::tank(&g.world, id).and_then(|t| g.world.position(t)))
+        .min_by(|a, b| d2(*a).total_cmp(&d2(*b)))?;
+    let (dx, dy) = (target[0] - at[0], target[1] - at[1]);
+    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let k = (len / 1000.0).min(1.0);
+    let yaw = g.world.shared.camera_yaw;
+    let (fw, r) = ([yaw.cos(), yaw.sin()], [yaw.sin(), -yaw.cos()]);
+    Some(FrameInput {
+        left: [k * (dx * r[0] + dy * r[1]) / len, k * (dx * fw[0] + dy * fw[1]) / len],
+        ..Default::default()
+    })
+}
+
 /// What [`carmelita_input`] last saw: whether Carmelita was driven, her health, and each enemy's state (2665) by the
 /// object holding it.
 #[derive(Default)]
@@ -633,13 +697,9 @@ fn carmelita_input(
     let (dx, dy) = (p[0] - at.t[0], p[1] - at.t[1]);
     let dist = (dx * dx + dy * dy).sqrt().max(1e-3);
     let heading = at.cols[0][1].atan2(at.cols[0][0]);
-    let mut off = dy.atan2(dx) - heading;
-    while off > std::f32::consts::PI {
-        off -= 2.0 * std::f32::consts::PI;
-    }
-    while off < -std::f32::consts::PI {
-        off += 2.0 * std::f32::consts::PI;
-    }
+    // The bearing off her heading, in [−π, π).
+    use std::f32::consts::{PI, TAU};
+    let off = (dy.atan2(dx) - heading + PI).rem_euclid(TAU) - PI;
     // The stick is relative to the camera, as `steer_to` has it; a short push (one frame in three) mostly turns her.
     let yaw = w.shared.camera_yaw;
     let (fw, r) = ([yaw.cos(), yaw.sin()], [yaw.sin(), -yaw.cos()]);
@@ -986,6 +1046,8 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
     let mut knocking: Option<(engine::object::Handle, u32)> = None;
     // The turf-war battles: what the route last saw of Carmelita and the enemies.
     let mut battle = Battle::default();
+    // m1_ball: the frame of the last landing seen, launches and tanks journalled so far.
+    let mut balling = Balling::default();
     // The frame of the last load into another world, the character's height just after it, and since when the route
     // has had nothing to do.
     let mut loaded: Option<u32> = None;
@@ -1103,6 +1165,9 @@ pub fn run_sly3_job(cfg: &Config) -> JobRun {
             input = i;
         }
         if let Some(i) = carmelita_input(&s, f, &mut journal, &mut battle) {
+            input = i;
+        }
+        if let Some(i) = ball_input(&mut s, f, &mut journal, &mut balling) {
             input = i;
         }
         s.update(&input, 1.0 / FPS as f32);
@@ -1525,6 +1590,27 @@ fn sly2_enter_volume(s: &mut Sly2, h: engine::object::Handle) -> Option<String> 
             }
             return Some(format!("walked into trigger volume {oid:?} (no floor in it: entered by flag)"));
         };
+        // A volume that counts one of the gang (option 432: 7 Sly, 8 Bentley, 9 Murray) is walked into by that one:
+        // the route switches to it first (m1_heist's 124142 counts only Bentley).
+        {
+            use engine::game::systems::PlayerSystem;
+            use engine::gang::Who;
+            let named: Vec<i32> =
+                g.world.options(h).map(|o| o.all(432).filter_map(|v| v.as_i32()).collect()).unwrap_or_default();
+            let who = |id: i32| match id {
+                7 => Some(Who::Sly),
+                8 => Some(Who::Bentley),
+                9 => Some(Who::Murray),
+                _ => None,
+            };
+            let wanted: Vec<Who> = named.iter().filter_map(|&id| who(id)).collect();
+            if let Some(gang) = g.systems.player.gang_mut()
+                && !wanted.is_empty()
+                && !wanted.contains(&gang.player)
+            {
+                gang.switch_to(wanted[0]);
+            }
+        }
         let mut to = w;
         to.t = floor;
         g.systems.player.place(&mut g.world, to);
@@ -1642,6 +1728,7 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
     let mut marker_walked: Option<usize> = None;
     let mut traveled_for: Option<usize> = None;
     let mut tosses = 0u32;
+    let mut bentley_tosses = 0u32;
     let mut advanced = 0u32;
     let mut seen_sequences: Vec<engine::object::Handle> = Vec::new();
     let mut namers: std::collections::BTreeMap<i16, u32> = std::collections::BTreeMap::new();
@@ -1864,15 +1951,31 @@ pub fn run_sly2_job(cfg: &Config) -> JobRun {
                 }
             }
             // Creatures a volume counts, for a task whose script names their placement: Murray tosses them in.
-            if did.is_none() && tosses < SLY2_TOSSES_MAX {
+            // Or Bentley, for a task whose prop takes only thrown objects (each kind of toss has its own limit).
+            if did.is_none() {
                 for &k in &target {
                     let Some(id) = sly2_jobs(&s).map(|j| j.graph.tasks[k].id) else { continue };
-                    if let Some((c, v)) = sly2_toss_target(&s, id) {
+                    let creature = if tosses < SLY2_TOSSES_MAX { sly2_toss_target(&s, id) } else { None };
+                    let bentley = if creature.is_none() && bentley_tosses < SLY2_BENTLEY_TOSSES_MAX {
+                        sly2_bentley_toss_target(&s, id)
+                    } else {
+                        None
+                    };
+                    if let Some((c, v)) = creature.or(bentley) {
                         let g = s.game.as_ref().unwrap();
                         let (co, vo) = (g.world.sly2_id(c), g.world.sly2_id(v));
-                        tosses += 1;
+                        if creature.is_some() {
+                            tosses += 1;
+                        } else {
+                            bentley_tosses += 1;
+                        }
                         toss = Some((f + 1, c, v));
-                        did = Some((k, format!("tossing creature {co:?} into volume {vo:?} as Murray")));
+                        let what = if g.world.class(c) == Some(55) {
+                            format!("tossing Bentley at prop {vo:?} as Murray")
+                        } else {
+                            format!("tossing creature {co:?} into volume {vo:?} as Murray")
+                        };
+                        did = Some((k, what));
                         break;
                     }
                 }
@@ -2452,6 +2555,9 @@ fn sly2_toss_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engine
 fn sly2_toss_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::object::Handle) -> FrameInput {
     use engine::game::systems::PlayerSystem;
     use engine::gang::murray;
+    if s.game.as_ref().is_some_and(|g| g.world.class(c) == Some(55)) {
+        return sly2_bentley_toss_input(s, k, v);
+    }
     if k == 0 {
         return FrameInput {
             pressed: platform_api::Buttons::UP.0,
@@ -2605,6 +2711,101 @@ fn sly2_toss_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::o
     }
 }
 
+/// A Bentley toss for task `id` (missions.md 4.3, 1895): a reactive prop the task's script names that takes thrown
+/// objects (contact kind 0x100) and not strikes. Returns (Bentley, the prop).
+fn sly2_bentley_toss_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engine::object::Handle)> {
+    use engine::behavior::Behavior;
+    use engine::behavior::sly2_props::contact;
+    let g = s.game.as_ref()?;
+    let w = &g.world;
+    // The prop asks for the task itself (an event's task request, 1045: 123934 asks for 1895), or its script does.
+    let asks = |p: &engine::behavior::sly2_props::Prop| {
+        p.events
+            .iter()
+            .flat_map(|e| &e.items)
+            .any(|i| matches!(i, engine::behavior::sly2_props::Item::Task(t, _) if *t == id))
+    };
+    let scripted = sly2_scripted_for(s, id);
+    let prop = w.handles().filter(|&h| w.in_world(h)).find(|&h| {
+        matches!(w.behavior(h), Some(Behavior::Sly2Prop(p))
+            if !p.done() && p.accepts(Some(contact::THROWN)) && !p.accepts(Some(contact::STRIKE))
+                && (asks(p) || scripted.contains(&h)))
+    })?;
+    let bentley = w.handles().find(|&h| w.class(h) == Some(55) && w.in_world(h))?;
+    Some((bentley, prop))
+}
+
+/// The pad for a Bentley toss at prop `v`, `k` frames after it starts: Murray (Up) is put on a floor
+/// [`SLY2_BENTLEY_TOSS_FROM`] from the prop facing it (no path-finding), takes Bentley up to throw (the toss that the
+/// task's script ID 939 starts; the placement put him at rest, so the route takes it again), turns the aim onto the
+/// prop and throws (Y, the gang's Square).
+fn sly2_bentley_toss_input(s: &mut Sly2, k: u32, v: engine::object::Handle) -> FrameInput {
+    use engine::game::systems::PlayerSystem;
+    use engine::gang::murray;
+    let press = |b: u32| FrameInput { pressed: b, buttons: b, ..Default::default() };
+    if k == 0 {
+        return press(platform_api::Buttons::UP.0);
+    }
+    let Some(t) = s.game.as_ref().and_then(|g| g.world.position(v)) else { return FrameInput::default() };
+    if k == 10 {
+        let Some(g) = s.game.as_mut() else { return FrameInput::default() };
+        let Some(me) = g.systems.player.gang().and_then(|gg| gg.get(engine::gang::Who::Murray)).map(|m| m.position)
+        else {
+            return FrameInput::default();
+        };
+        let (dx, dy) = (me[0] - t[0], me[1] - t[1]);
+        let l = (dx * dx + dy * dy).sqrt().max(1.0);
+        let (x, y) = (t[0] + dx / l * SLY2_BENTLEY_TOSS_FROM, t[1] + dy / l * SLY2_BENTLEY_TOSS_FROM);
+        let floor = g.systems.physics.queries().ground(&g.world, [x, y, t[2] + 400.0], 1200.0).map(|f| f.0[2]);
+        if let Some(z) = floor {
+            let yaw = (-dy).atan2(-dx);
+            let (sn, cs) = (yaw.sin(), yaw.cos());
+            let to =
+                engine::math::Affine { cols: [[cs, sn, 0.0], [-sn, cs, 0.0], [0.0, 0.0, 1.0]], t: [x, y, z + 60.0] };
+            g.systems.player.place(&mut g.world, to);
+        }
+        return FrameInput::default();
+    }
+    if k == 20 {
+        if let Some(gg) = s.game.as_mut().and_then(|g| g.systems.player.gang_mut()) {
+            gg.hold_bentley();
+        }
+        return FrameInput::default();
+    }
+    let Some(m) =
+        s.game.as_ref().and_then(|g| g.systems.player.gang()).and_then(|gg| gg.get(engine::gang::Who::Murray))
+    else {
+        return FrameInput::default();
+    };
+    let (state, aim, me) = (m.state, m.aim, m.position);
+    match (state, aim) {
+        (murray::THROW_AIM, Some(aim)) if k > 20 => {
+            let (dx, dy) = (t[0] - me[0], t[1] - me[1]);
+            let want_yaw = dy.atan2(dx);
+            let want = (dx * dx + dy * dy).sqrt().clamp(aim.range[0], aim.range[1]);
+            let dyaw =
+                (want_yaw - aim.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            if !dyaw.is_finite() {
+                return FrameInput::default();
+            }
+            let dt = 1.0 / FPS as f32;
+            let ddist = want - aim.distance;
+            if dyaw.abs() < 0.02 && ddist.abs() < 10.0 {
+                return press(platform_api::Buttons::Y.0);
+            }
+            let sx = (-dyaw / (2.0 * dt)).clamp(-1.0, 1.0);
+            let sy = (ddist / (800.0 * dt)).clamp(-1.0, 1.0);
+            FrameInput { left: [sx, sy], ..Default::default() }
+        }
+        _ => FrameInput::default(),
+    }
+}
+
+/// The most Bentley tosses one run plays.
+const SLY2_BENTLEY_TOSSES_MAX: u32 = 4;
+/// See [`sly2_bentley_toss_input`]: how far from the prop Murray throws Bentley from.
+const SLY2_BENTLEY_TOSS_FROM: f32 = 700.0;
+
 /// See [`sly2_toss_input`]: how far from the volume a creature may be for Murray to be put beside it.
 const SLY2_TOSS_FETCH: f32 = 2000.0;
 /// How long one toss play lasts: the creatures pursuing Murray may come from far.
@@ -2754,7 +2955,9 @@ fn sly2_crawl_target(s: &Sly2, id: i32) -> Option<(engine::object::Handle, engin
 }
 
 /// The pad for a crawl, `k` frames after it starts (interactables.md 9): Sly (Left) put in the middle of crawl space
-/// `c` on its floor, Circle (A) there starts the crawl, which brings volume `v` in; then Sly is put in `v`.
+/// `c` on its floor, Circle (A) there starts the crawl, which brings volume `v` in; then Sly reaches `v` while still
+/// crawling (its visit flag: the crawl's movement is not played, and putting him in the volume's middle, out of
+/// cover, ended the crawl and took the volume out before it saw him), and is put in it afterwards.
 fn sly2_crawl_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::object::Handle) -> FrameInput {
     let b = match k {
         0 => platform_api::Buttons::LEFT.0,
@@ -2764,7 +2967,14 @@ fn sly2_crawl_input(s: &mut Sly2, k: u32, c: engine::object::Handle, v: engine::
     if k == 10 {
         sly2_enter_volume(s, c);
     }
-    if k == SLY2_CRAWL_INTO && s.game.as_ref().is_some_and(|g| g.world.in_world(v)) {
+    if k == SLY2_CRAWL_INTO
+        && let Some(g) = s.game.as_mut()
+        && g.world.in_world(v)
+        && let Some(engine::behavior::Behavior::Sly2Volume(t)) = g.world.behavior_mut(v)
+    {
+        t.visit = true;
+    }
+    if k == SLY2_CRAWL_INTO + 10 && s.game.as_ref().is_some_and(|g| g.world.in_world(v)) {
         sly2_enter_volume(s, v);
     }
     FrameInput { pressed: b, buttons: b, ..Default::default() }

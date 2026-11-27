@@ -251,6 +251,8 @@ pub struct Shared {
     /// Sly 3 hook: instances given back to their placement (1210 / 1211) and not taken again, by slot: their 33 (the
     /// placement) is none.
     pub sly3_given_back: alloc::collections::BTreeSet<u32>,
+    /// Sly 3 hook (missions.md 4.1a): each launched projectile's shooter (script ID 552), by the projectile's slot.
+    pub sly3_shooters: BTreeMap<u32, Handle>,
     /// Sly 3 hook (guard command lists from scripts, script IDs 461 and 462 on a guard): (guard, list) given, or
     /// (guard, None) to stop its list, for the session's list runner (`game::sly3::guards`).
     pub sly3_guard_commands: Vec<(Handle, Option<Handle>)>,
@@ -418,6 +420,7 @@ impl Default for Shared {
             sly3_current: [None; 2],
             sly3_instance_of: BTreeMap::new(),
             sly3_given_back: alloc::collections::BTreeSet::new(),
+            sly3_shooters: BTreeMap::new(),
             sly3_guard_commands: Vec::new(),
             sly3_guard_runs: alloc::collections::BTreeSet::new(),
             sly3_restore_mode: false,

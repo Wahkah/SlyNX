@@ -51,6 +51,11 @@ const DROP_HEIGHT: f32 = 50.0;
 pub const TARGET_RANGE: f32 = 3000.0;
 /// Reach around an air attack, a dart's end and a flop landing. *Placeholder*: characters.md gives no radii.
 pub const AREA_REACH: f32 = 250.0;
+/// How near a thrown Bentley passes a reactive prop to hit it. *Stand-in* for the collision of his body against the
+/// prop's.
+pub const TOSS_HIT_REACH: f32 = 200.0;
+/// Reactive props (interactables.md 3).
+const PROP_CLASS: i16 = 98;
 /// A guard attack on the gang. *Placeholder*: guards.md 11 leaves the damage open.
 pub const GUARD_HIT: f32 = 1.0;
 
@@ -279,6 +284,8 @@ pub struct GangPlayer {
     crawl: Option<(Handle, bool)>,
     /// Seconds each member still flashes after a hit, taking no further damage (characters.md 2), by member.
     flashing: [f32; 3],
+    /// The props a thrown Bentley has hit in his current flight.
+    toss_hits: Vec<Handle>,
 }
 
 impl GangPlayer {
@@ -296,6 +303,7 @@ impl GangPlayer {
             carried: None,
             flashing: [0.0; 3],
             crawl: None,
+            toss_hits: Vec::new(),
         }
     }
 
@@ -512,20 +520,25 @@ impl PlayerSystem for GangPlayer {
             self.write_back(world);
             return;
         };
-        let around = |world: &mut World, p: [f32; 3]| {
+        // Contact kinds (characters.md 2.3), which props' response bytes go by.
+        use engine::behavior::sly2_props::contact;
+        let around = |world: &mut World, p: [f32; 3], kind: u32| {
             for t in &targets {
                 if dist(t.position, p) <= AREA_REACH
                     && let Some(h) = world.handle(t.id)
                 {
-                    world.notify(h, Notice::Attack { by: me, kind: 1 });
+                    world.notify(h, Notice::Attack { by: me, kind });
                 }
             }
         };
         for e in events {
             match e {
+                // A strike (the cane combo, the punches; Murray's Triangle punches are 0x200000, not told apart
+                // here) and a crossbow bolt (a fired object).
                 GangEvent::Punch { target: Some(id), .. } | GangEvent::Crossbow { target: Some(id), .. } => {
+                    let kind = if matches!(e, GangEvent::Punch { .. }) { contact::STRIKE } else { contact::THROWN };
                     if let Some(h) = world.handle(id) {
-                        world.notify(h, Notice::Attack { by: me, kind: 1 });
+                        world.notify(h, Notice::Attack { by: me, kind });
                     }
                 }
                 GangEvent::Interact(id) => {
@@ -594,9 +607,13 @@ impl PlayerSystem for GangPlayer {
                 }
                 // Gang hook: R3's binocucom (camera.md 6).
                 GangEvent::Binocucom => engine::gang::toggle_binocucom(world, me, false),
-                GangEvent::AirAttack(_) => around(world, at),
-                GangEvent::FlopLanded { position, .. } => around(world, position),
-                GangEvent::Dart { to, .. } => around(world, to),
+                GangEvent::AirAttack(a) => around(
+                    world,
+                    at,
+                    if a == engine::gang::sly::AIR_TRIANGLE { contact::AIR_HIGH } else { contact::AIR },
+                ),
+                GangEvent::FlopLanded { position, .. } => around(world, position, contact::AIR),
+                GangEvent::Dart { to, .. } => around(world, to, contact::DART),
                 _ => {}
             }
         }
@@ -622,6 +639,32 @@ impl PlayerSystem for GangPlayer {
                     self.carried = None;
                 }
             }
+        }
+        // A script's Bentley toss (script ID 939): Murray holds Bentley ready to throw.
+        if let Some(l) = world.sly2.as_deref_mut()
+            && core::mem::take(&mut l.hold_bentley)
+            && let Some(g) = self.gang.as_mut()
+        {
+            g.hold_bentley();
+        }
+        // Bentley thrown by Murray is a thrown object (contact kind 0x100, characters.md 2.3 and 4.6): a reactive prop
+        // he comes within TOSS_HIT_REACH of during the flight takes the contact once (missions.md 4.3: 123934, which
+        // takes only thrown objects in 1895's state 1). The reach is a stand-in for his collision against the prop's.
+        let tossed = self.gang.as_ref().and_then(|g| g.get(Who::Bentley)).filter(|b| b.tossed).map(|b| b.position);
+        match (tossed, self.handles[Who::Bentley.index()]) {
+            (Some(at), Some(bentley)) => {
+                for t in &targets {
+                    if let Some(h) = world.handle(t.id)
+                        && world.class(h) == Some(PROP_CLASS)
+                        && dist(t.position, at) <= TOSS_HIT_REACH
+                        && !self.toss_hits.contains(&h)
+                    {
+                        self.toss_hits.push(h);
+                        world.notify(h, Notice::Attack { by: bentley, kind: contact::THROWN });
+                    }
+                }
+            }
+            _ => self.toss_hits.clear(),
         }
         // A character whose health ran out stays in its hit reaction (it gets up only with health left). Stand-in
         // for the defeat (characters.md 2.1: task event 0x10, then the job restarts at its checkpoint or the world

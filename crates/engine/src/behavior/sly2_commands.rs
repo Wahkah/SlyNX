@@ -191,6 +191,26 @@ pub fn animation_sequence_starts(world: &mut World) {
     }
 }
 
+/// The starter running sequence `seq` was started with (dialogue-and-voice.md 2.1), if any.
+pub fn starter_of(world: &World, seq: Handle) -> Option<Handle> {
+    let s = world.slot(seq)?;
+    world.sly2.as_deref()?.starters.get(&s).copied().filter(|&h| world.slot(h).is_some())
+}
+
+/// Records (or with `None` clears) the starter of sequence `seq`.
+pub fn set_starter(world: &mut World, seq: Handle, starter: Option<Handle>) {
+    let Some(s) = world.slot(seq) else { return };
+    let Some(l) = world.sly2.as_deref_mut() else { return };
+    match starter {
+        Some(h) => {
+            l.starters.insert(s, h);
+        }
+        None => {
+            l.starters.remove(&s);
+        }
+    }
+}
+
 /// The safe house's actions (option 1338, safehouse-and-shop.md 1): (state, buttons, target object).
 pub const SAFE_HOUSE_ACTION: u16 = 1338;
 
@@ -454,8 +474,8 @@ pub fn run_commands(world: &mut World, guard: Handle, list: Handle) -> bool {
 }
 
 /// Starts an escort job on a guard or character (guards.md 4.4: script ID 970, stream 1117): the list from its
-/// start, walked while the player keeps inside the escort's view volume. Its speed is the path speed [stand-in: the
-/// distance-scaled speed of options 1119 and 1120 is not read].
+/// start, walked while the player keeps up (its detector's volumes); its speed is the path speed times the factor of
+/// options 1119 and 1120 (`sly2::escort_speed`).
 pub fn start_escort(world: &mut World, guard: Handle, list: Handle) -> bool {
     let guard = placed_root(world, guard).unwrap_or(guard);
     match world.behavior_mut(guard) {

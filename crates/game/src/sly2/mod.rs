@@ -56,9 +56,15 @@ fn apply_world_cue(
     c: talk::SeqCommand,
 ) -> Option<engine::object::Handle> {
     match c {
+        // A placement's ID also means its copy's root (scripts.md 5): m1_heist's intro 1891 removes Sly (7) and adds
+        // Bentley (8) and Murray (9), whose objects are the copies of placements 7, 8 and 9.
         talk::SeqCommand::AddObject(id) | talk::SeqCommand::RemoveObject(id) => {
+            let on = matches!(c, talk::SeqCommand::AddObject(_));
             if let Some(h) = world.find_sly2_id(id, Some(seq)) {
-                world.set_in_world(h, matches!(c, talk::SeqCommand::AddObject(_)));
+                world.set_in_world(h, on);
+                if let Some(r) = engine::behavior::sly2_commands::placed_root(world, h) {
+                    world.set_in_world(r, on);
+                }
             }
             None
         }
@@ -167,24 +173,34 @@ pub struct SilentRun {
     pub start: usize,
     /// The clip playback it waits for.
     pub waiting: Option<engine::object::Handle>,
+    /// The sub-sequence it started and waits for (636 with no-wait 0).
+    pub sub: Option<engine::object::Handle>,
 }
 
 impl SilentRun {
     /// The main line of `sequence`.
     pub fn main(sequence: engine::object::Handle) -> SilentRun {
-        SilentRun { sequence, at: 0, end: usize::MAX, thread: talk::MAIN, start: 0, waiting: None }
+        SilentRun { sequence, at: 0, end: usize::MAX, thread: talk::MAIN, start: 0, waiting: None, sub: None }
     }
 }
 
 /// Runs a silent sequence's commands until one waits (a clip played with no-wait 0) or they run out; returns whether
-/// it ended. Lines are not played; sub-sequences start without being waited for. Threads it opens (625) go to
-/// `spawn`, threads it stops (627) to `stop`.
+/// it ended. Lines are not played; a sub-sequence started with no-wait 0 is waited for while it is among `running`
+/// (dialogue-and-voice.md 2.1: m1_neela's 1854 starts 1856, which starts Neyla's escort, only after 1855). Threads it
+/// opens (625) go to `spawn`, threads it stops (627) to `stop`.
 fn step_silent(
     world: &mut engine::world::World,
     run: &mut SilentRun,
     spawn: &mut Vec<SilentRun>,
     stop: &mut Vec<(engine::object::Handle, i32)>,
+    running: &[engine::object::Handle],
 ) -> bool {
+    if let Some(q) = run.sub {
+        if running.contains(&q) {
+            return false;
+        }
+        run.sub = None;
+    }
     if let Some(p) = run.waiting {
         if still_waits(world, p) {
             return false;
@@ -205,15 +221,23 @@ fn step_silent(
                     thread: id,
                     start: run.at,
                     waiting: None,
+                    sub: None,
                 });
                 run.at = end.saturating_add(1);
             }
             talk::SeqCommand::StopThread(id) => stop.push((run.sequence, id)),
             talk::SeqCommand::Task { task, state } => world.shared.task_requests.push((task, state)),
-            talk::SeqCommand::Start { sequence, .. } => world
-                .shared
-                .sequence_requests
-                .push(engine::behavior::sly2_commands::SequenceRequest::Start { sequence, starter: None }),
+            talk::SeqCommand::Start { sequence, starter, no_wait } => {
+                let starter = starter.or_else(|| engine::behavior::sly2_commands::starter_of(world, run.sequence));
+                world
+                    .shared
+                    .sequence_requests
+                    .push(engine::behavior::sly2_commands::SequenceRequest::Start { sequence, starter });
+                if !no_wait {
+                    run.sub = Some(sequence);
+                    return false;
+                }
+            }
             // Command 629: the run waits until its sequence holds the signal (sent before or after).
             talk::SeqCommand::WaitSignal { value, consume } => {
                 let me = world.slot(run.sequence).unwrap_or(u32::MAX);
@@ -861,7 +885,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 let (mut spawn, mut stop) = (Vec::new(), Vec::new());
                 let mut finished: Vec<(engine::object::Handle, usize)> = Vec::new();
                 for run in &mut self.silent {
-                    if step_silent(&mut g.world, run, &mut spawn, &mut stop) {
+                    if step_silent(&mut g.world, run, &mut spawn, &mut stop, &self.running) {
                         finished.push((run.sequence, run.start));
                     }
                 }
@@ -889,6 +913,7 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                 if let Some(s) = g.world.slot(h) {
                     g.world.shared.sequence_signals.remove(&s);
                 }
+                engine::behavior::sly2_commands::set_starter(&mut g.world, h, None);
                 self.signal_waits.retain(|w| w.0 != h);
                 g.world.raise(h, SEQUENCE_ENDED, Vec::new());
             }
@@ -903,6 +928,11 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
                     // Starting a sequence that runs does nothing (dialogue-and-voice.md 2.1, animation.md 2).
                     Q::Start { sequence, .. } | Q::StartWithPlayer(sequence) if self.running.contains(&sequence) => {}
                     Q::Start { sequence, .. } | Q::StartWithPlayer(sequence) => {
+                        let starter = match r {
+                            Q::Start { starter, .. } => starter,
+                            _ => g.world.player,
+                        };
+                        engine::behavior::sly2_commands::set_starter(&mut g.world, sequence, starter);
                         if let Some(s) = self.sound.as_mut() {
                             s.start_sequence(&g.world, sequence);
                         }
@@ -992,7 +1022,9 @@ impl<B: Backend, R: ReadAt> Sly2Session<B, R> {
             }
             // Sub-sequences the running ones started (option 636).
             if let Some(g) = self.game.as_mut() {
-                for h in s.take_sub_starts() {
+                for (h, parent, starter) in s.take_sub_starts() {
+                    let starter = starter.or_else(|| engine::behavior::sly2_commands::starter_of(&g.world, parent));
+                    engine::behavior::sly2_commands::set_starter(&mut g.world, h, starter);
                     s.start_sequence(&g.world, h);
                     if !self.running.contains(&h) {
                         self.running.push(h);

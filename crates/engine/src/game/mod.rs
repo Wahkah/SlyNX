@@ -287,6 +287,30 @@ impl Game {
         r
     }
 
+    /// Sly 3 hook (missions.md 4.1a): calls the procedure `h` holds as custom property `id` (a job's registered
+    /// method) with `args`, at once. `None` when it holds none.
+    pub fn call_custom(
+        &mut self,
+        h: crate::object::Handle,
+        id: u32,
+        args: Vec<script::Value>,
+    ) -> Option<script::Value> {
+        let interp = self.scripts.as_mut()?;
+        let callee = interp.custom_property(h.to_script(), id)?.clone();
+        let mut host = Self::host(&mut self.world, &mut self.rng, self.clock.game_time, self.systems.physics.queries());
+        let r = interp.call(&mut host, callee, args);
+        self.counters.script_errors += host.errors;
+        merge_kinds(&mut self.script_error_kinds, host.kinds);
+        Some(r)
+    }
+
+    /// Sly 3 hook: sets custom property `id` of `h` (a value the scripts read back, as a run's animated object).
+    pub fn set_custom(&mut self, h: crate::object::Handle, id: u32, value: script::Value) {
+        if let Some(interp) = self.scripts.as_mut() {
+            interp.set_custom_property(h.to_script(), id, value);
+        }
+    }
+
     /// Dispatches the queued script events (scripts.md 6).
     pub fn flush_events(&mut self) {
         let Some(interp) = self.scripts.as_mut() else {

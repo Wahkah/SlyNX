@@ -39,6 +39,7 @@ use render::{Backend, Camera, FrameStats, RenderError, Renderer};
 
 use crate::sly2::level::{StaticLevel, upload_stage};
 
+pub mod ball; // Sly 3 hook: m1_ball, Murray launched as a ball at tanks (launcher, flight, hits).
 pub mod boat; // Sly 3 hook: the canal chase's boat (movement by option 194, jumps).
 pub mod carmelita; // Sly 3 hook: Carmelita played in the turf-war battles (health, the shot stand-in).
 pub mod clips; // Sly 3 hook: clips' add and remove events (knock-out clips).
@@ -181,6 +182,58 @@ fn control_to(world: &mut World, h: engine::object::Handle) -> Option<SessionAct
     }
     world.shared.driving = Some(h);
     None
+}
+
+/// What the command scripts see of the session: the tasks' play counts (each focus key of the progress block) and the
+/// restore mode, for the object tests 1888 to 1890.
+fn script_view(jobs: Option<&engine::game::sly2_jobs::Jobs>, g: &Game) -> commands::View {
+    let plays = jobs.map_or_else(Default::default, |j| {
+        j.graph
+            .tasks
+            .iter()
+            .map(|t| {
+                let n = t.keys.focus.as_ref().and_then(|k| j.progress.get(k, None)).map_or(0, |v| v.as_i32());
+                (t.id, n)
+            })
+            .collect()
+    });
+    commands::View { line_playing: false, plays, restoring: g.world.shared.sly3_restore_mode }
+}
+
+/// The current task's script (option 1408) starts when the task becomes current, with player 0's controlled object
+/// as its context (missions.md 4), and takes its first step at once (missions.md 4.1a: the turf-war battles' first
+/// hook, 139345 → 2653, runs before any other script's wave tick). The hooks that step sends to modules (`0x15`) run
+/// now; the rest of its requests go with the frame's. `last_task` is the task last seen current.
+fn start_task_script(
+    jobs: Option<&engine::game::sly2_jobs::Jobs>,
+    scripts: &mut commands::Scripts,
+    last_task: &mut Option<usize>,
+    g: &mut Game,
+) {
+    let Some(j) = jobs else { return };
+    if j.current == *last_task {
+        return;
+    }
+    *last_task = j.current;
+    let Some(script) = j.current.and_then(|t| j.graph.tasks[t].script) else { return };
+    let me = g.world.player.and_then(|h| g.world.sly3_id(h)).unwrap_or(-1);
+    if !scripts.start(&g.world, script, me) {
+        return;
+    }
+    let view = script_view(Some(j), g);
+    let before = scripts.requests.len();
+    scripts.step_now(Some(&g.world), script, &view);
+    let new: Vec<commands::Request> = scripts.requests.drain(before..).collect();
+    for r in new {
+        match r {
+            commands::Request::Module { script, value, copy } => {
+                if let Some(h) = copy.or_else(|| g.world.find_sly3_id(script, None)) {
+                    g.raise_now(h, 4, &[script::Value::Int(value)]);
+                }
+            }
+            other => scripts.requests.push(other),
+        }
+    }
 }
 
 /// Carries out one script request (commands.rs) on the world, the job system, the level flow and the player.
@@ -374,6 +427,8 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     fresh: bool,
     /// The task current at the end of the last frame (its script, option 1408, starts when it changes).
     last_task: Option<usize>,
+    /// The job current at the last frame (its object ID), to stop its tasks' scripts when it ends.
+    last_job: Option<i32>,
     disc: Option<Disc<R>>,
     audio_disc: Option<AudioDisc<R>>,
     gpu: StaticLevel,
@@ -406,10 +461,8 @@ pub struct Sly3Session<B: Backend, R: ReadAt> {
     pub bomb: Option<engine::object::Handle>,
     /// Sly 3 hook (missions.md 4.1a): seconds until Carmelita's shot stand-in can fire again (`carmelita`).
     pub shot_cooldown: f32,
-    /// Sly 3 hook (`carmelita`): a turf-war battle's start hook was sent this frame.
-    battle_starting: bool,
-    /// Sly 3 hook (`carmelita`): a turf-war battle runs (from its start hook to its battle-over alarm).
-    battle_on: bool,
+    /// Sly 3 hook (missions.md 4.1a): m1_ball's launcher, flight and hits (`ball`).
+    pub ball: ball::Ball,
     /// Sly 3 hook (`carmelita`): while Carmelita is driven, the pausing scripts whose holds do not hold her pad.
     pad_free: Option<alloc::collections::BTreeSet<i32>>,
     paused_by: alloc::collections::BTreeSet<i32>,
@@ -479,6 +532,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             queued_task: None,
             fresh: true,
             last_task: None,
+            last_job: None,
             disc,
             audio_disc: None,
             gpu: StaticLevel::default(),
@@ -501,8 +555,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             last_line: None,
             bomb: None,
             shot_cooldown: 0.0,
-            battle_starting: false,
-            battle_on: false,
+            ball: ball::Ball::new(),
             pad_free: None,
             paused_by: alloc::collections::BTreeSet::new(),
             waypoints: Vec::new(),
@@ -974,9 +1027,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             let idle = FrameInput::default();
             let input = if self.photo.is_some() { &idle } else { input };
             g.frame(input, measured);
-            let battle_started = core::mem::take(&mut self.battle_starting);
-            if battle_started {
-                carmelita::fill_health(&mut g.world);
+            // Sly 3 hook (missions.md 4.1a, stand-ins in `ball`): m1_ball's launcher, the ball's flight and its hits.
+            if let Some(j) = self.jobs.as_mut() {
+                let yaw = g.world.shared.camera_yaw;
+                self.ball.update(g, j, input.left, yaw, measured);
             }
             // World-start step 3 (missions.md 4.1a), once the frame has run the restore's events: the queued requests
             // run in mode 1, and the events they raise run while the mode still reads 1, until nothing more is
@@ -1127,6 +1181,10 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                 let (job, task) = engine::behavior::vehicles::shots::job_of(j);
                 engine::behavior::vehicles::shots::follow_job(&mut g.world, job, task.as_deref());
             }
+            // A task made current now starts its script (option 1408) at once, and the script takes its first step
+            // in this update (missions.md 4.1a): its first hooks run before the other scripts' (the turf-war
+            // battles' 139345, 2653, before the intro's wave tick).
+            start_task_script(self.jobs.as_ref(), &mut self.scripts, &mut self.last_task, g);
             // Mission waypoints (missions.md 4.2): walking in raises the events that start a job.
             let derived = &self.derived;
             let derives = |c: i16, b: i16| derived.get(&b).is_some_and(|v| v.contains(&c));
@@ -1142,18 +1200,8 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             }
             // Alarms scripts set on command scripts (method 735) and runner contexts modules wrote (script ID 741).
             for (script, alarm) in core::mem::take(&mut g.world.shared.sly3_alarms) {
-                // Stand-in (`carmelita`): the battle-over alarm counts only while a battle runs.
-                if alarm == carmelita::END_ALARM {
-                    if !self.battle_on {
-                        continue;
-                    }
-                    self.battle_on = false;
-                }
                 self.scripts.set_alarm_of(script, alarm);
             }
-            // The battle runs from the frame after its start hook's event (alarms set during that event's frame, the
-            // intro's wave tick before the start among them, are the gap's).
-            self.battle_on |= battle_started;
             for (script, with) in core::mem::take(&mut g.world.shared.sly3_context_writes) {
                 if let Some(r) = self.scripts.running.iter_mut().find(|r| r.oid == script) {
                     r.context = with;
@@ -1188,17 +1236,7 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             // Scripts, then what they asked.
             // The tasks' play counts (each focus key of the progress block) and the restore mode, for the object
             // tests 1888 to 1890.
-            let plays = self.jobs.as_ref().map_or_else(Default::default, |j| {
-                j.graph
-                    .tasks
-                    .iter()
-                    .map(|t| {
-                        let n = t.keys.focus.as_ref().and_then(|k| j.progress.get(k, None)).map_or(0, |v| v.as_i32());
-                        (t.id, n)
-                    })
-                    .collect()
-            });
-            let view = commands::View { line_playing: false, plays, restoring: g.world.shared.sly3_restore_mode };
+            let view = script_view(self.jobs.as_ref(), g);
             self.scripts.update(Some(&g.world), &view, measured);
             for r in core::mem::take(&mut self.scripts.requests) {
                 // Sly 3 hook (2D layer): the lines' subtitles.
@@ -1209,11 +1247,6 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
                     }
                     commands::Request::ClearSubtitle => lines.push(None),
                     commands::Request::Screen { screen, on } => screens.push((*screen, *on)),
-                    // Stand-in (`carmelita`): a turf-war battle's start fills Carmelita's health once its hook has
-                    // run (next frame, after the events queued before it).
-                    commands::Request::Module { value, .. } if *value == carmelita::START_HOOK => {
-                        self.battle_starting = true;
-                    }
                     _ => {}
                 }
                 match apply_request(
@@ -1273,9 +1306,9 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             // A script's pause lasts while it runs.
             let scripts = &self.scripts;
             self.paused_by.retain(|o| scripts.is_running(*o));
-            // Stand-in [I] (`carmelita`; open: what 2142's hold `0x1F` (1, 3) holds, which is never released while
-            // the turf-war battles are played): the holds taken before Carmelita was handed control do not hold her
-            // pad.
+            // Stand-in [I] (`carmelita`; open: the intro script 2142 holds the player with `0x1F` (1, 3), never
+            // releases it, and keeps running through the turf-war battles, missions.md 4.1a): the holds taken before
+            // Carmelita was handed control do not hold her pad.
             self.pad_free = match (carmelita::driven(&g.world), self.pad_free.take()) {
                 (Some(_), Some(free)) => Some(free),
                 (Some(_), None) => Some(self.paused_by.clone()),
@@ -1283,16 +1316,25 @@ impl<B: Backend, R: ReadAt> Sly3Session<B, R> {
             };
             let free = self.pad_free.as_ref();
             self.script_paused = self.paused_by.iter().any(|o| !free.is_some_and(|f| f.contains(o)));
-            // The current task's script (option 1408) starts when the task becomes current.
+            // A task made current by this update's requests starts its script too.
+            start_task_script(self.jobs.as_ref(), &mut self.scripts, &mut self.last_task, g);
             if let Some(j) = self.jobs.as_mut() {
-                if j.current != self.last_task
-                    && let Some(script) = j.current.and_then(|t| j.graph.tasks[t].script)
-                {
-                    // With player 0's controlled object as its context (missions.md 4).
-                    let me = g.world.player.and_then(|h| g.world.sly3_id(h)).unwrap_or(-1);
-                    self.scripts.start(&g.world, script, me);
+                // Stand-in [I] (open: what ends the turf-war intro's script 2142, whose runner sends the wave tick's
+                // hook forever and whose `0x1F` (1, 3) hold is never released, missions.md 4.1a; m1_turf_war fires no
+                // exit at its end): when a job ends, the scripts still running of its tasks other than its last (whose
+                // closing scene plays on after the end) stop, and their holds go.
+                let job_id = j.job.map(|k| j.graph.jobs[k].id);
+                let ended = self.last_job.filter(|&id| job_id != Some(id)).and_then(|id| j.graph.job_ids.get(&id));
+                if let Some(&k) = ended {
+                    let last = j.graph.jobs[k].last;
+                    let tasks = j.graph.tasks.iter().enumerate().filter(|&(i, t)| t.job == Some(k) && Some(i) != last);
+                    for (_, t) in tasks {
+                        if let Some(script) = t.script.filter(|&s| self.scripts.is_running(s)) {
+                            self.scripts.stop(script);
+                        }
+                    }
                 }
-                self.last_task = j.current;
+                self.last_job = job_id;
                 // Exits fired by jobs (option 1381) and tasks (1406).
                 if let Some(f) = self.flow.as_mut() {
                     for exit in core::mem::take(&mut j.fired_elsewhere) {

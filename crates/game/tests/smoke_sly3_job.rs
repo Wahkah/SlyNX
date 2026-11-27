@@ -25,6 +25,14 @@ fn the_first_venice_job_as_far_as_it_goes() {
     if seconds >= 1100.0 {
         assert!(a.current.iter().any(|t| t.contains("(2166)")), "the turf war ended: {:?}", a.current);
     }
+    // And Bentley, taken out at the safe house, walks into m1_ball's waypoint: `t1_ball_intro` (2171).
+    if seconds >= 1150.0 {
+        assert!(a.current.iter().any(|t| t.contains("(2171)")), "m1_ball began: {:?}", a.current);
+    }
+    // Murray's launches take out the six tanks and m1_ball closes: `t1_ball_complete` (2184).
+    if seconds >= 1190.0 {
+        assert!(a.current.iter().any(|t| t.contains("(2184)")), "m1_ball ended: {:?}", a.current);
+    }
     // Deterministic: the same journal and hashes twice.
     let b = run_sly3_job(&cfg);
     assert_eq!(a.journal, b.journal);

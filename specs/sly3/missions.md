@@ -637,6 +637,119 @@ For m1_turf_war: 1826 `t1_chalktalk2` is current (state 1) when v_ext loads, so 
   - The fire button, rate, speed, damage per shot (the hit's 124) and any auto-aim were **not traced**.
 - **Carmelita herself** [I]: her copy is a class-60 character with option 937 = 600 (its maximum health,
   guards.md). Her controls, her movement and what happens when her health reaches 0 were **not traced**.
+- **Damage and the script IDs used** [X, from the class option map]:
+  - On a projectile (classes 89 to 92), **552** is stream option 442, the object at **+0x1E8**: the **shooter**.
+    It is set by the launcher through the setter `0x0014D1F0`, so a port must store the firing character there.
+    **44** is stream option 29 (`0x00100C00` → `0x001C8F20`, the reference's FLoInParentChain), "is in the
+    parent chain of".
+  - So 2659 tests "the shooter belongs to the boss" (the hit's 124 is set to 0) and "the shooter belongs to
+    Carmelita" (the voice lines). **The damage itself is the hit's 124, which the projectile's hit supplies, and it
+    is subtracted in either case.** A shot whose 552 is empty still deals its 124. It only misses the
+    voice-line branch.
+  - On characters and guards, **939** is stream option 937 (the maximum health, at +0x170) and **940** is stream
+    option 938 (the current health, at +0x16C, clamped to 0 … maximum by its setter `0x001F43D0`).
+    *Interpretation:* the maximum is option 937 (100 on the enemies, 600 on Carmelita), and the current value is
+    refilled to it when the actor resets, as on taking a pool instance [I: the refill was not found. An enemy that
+    starts at 940 = 0 is a port error, since 2659 then puts it straight into state 3].
+  - On a guard, 461 / 462 / 463 are stream options 334 / 335 / 336: **give a command list** (0x198540,
+    TellGuardCommands), **give the second kind / stop** (0x1985A8), and **is it running its commands**
+    (0x1985F0, FGuardRunsCommands).
+  - On a placement, **1207** takes an instance (`0x001FBF08`), **1209** locks its row (`0x001FC060`), **1210**
+    unlocks the row (`0x001FC090`, LockProxyRowOf), and **1211** gives the instance back (`0x001FC0E0`).
+  - **33** (stream option 19, value type `0x2008`, a getter `0x001FC118`) returns the object's **placement row
+    object**, the copy's anchor. The wave code uses `(op117 enemy 33)` to reach the per-spawn custom properties
+    2664 to 2675.
+- **Between battles** [D]. Script 2142 keeps a runner that sends hook 139266 (the wave tick) forever. Between
+  battles the tick spawns nothing, because its spawn count has reached the finished row's length (2653 resets it
+  for the next battle). Its "no enemies left" step then sets alarm 139255 on the **current task's** script, which
+  between battles is 2142's own task, and 2142 does not wait on 139255. So the stray alarm does nothing. When the
+  next battle starts, its first tick spawns before it tests for an empty field, so the battle does not end at once.
+- **What ends 2142:** command lists given to the guards set its alarms. List **2144**, given to Carmelita's copy
+  139252, is:
+  1. go to 140657 at 40;
+  2. wait 0.1 s and play clip 8919;
+  3. **set alarm 139312 on 2142**;
+  4. walk 140658 → 140659, wait 0.3 s;
+  5. **set alarm 139313 on 2142**.
+
+  Lists 2148 to 2150, given to the boss 139253, presumably set 139302 and 139308 the same way [I: not decoded]. The script's runners wait on
+  these and then finish.
+- **`0x1F (1, 3)`** holds the game for the player (hold on, kind mask 3); `0x1F (0, 3)` releases it. It is
+  paired in 2333 [I for the meaning of the mask bits].
+- **Still not traced:** Carmelita's controls, movement, clips and death.
+
+**m1_ball (job 2168, v_ext): Murray launched as a ball at tanks** [D: job 2168's module, v_macro module 36;
+I where marked]:
+
+- **World and character:** all its tasks list world 3 (v_ext) and character 26 (Murray). 2171 `t1_ball_intro`
+  (waypoint 140670, checkpoint 139406) gives player 0 Murray. Its successors are 2173 and the six tank tasks
+  2178 to 2183.
+- **What makes 2173 `first_launch` current: Murray's first launch.** Group **`murray_ball_launcher`** has a clip
+  (163095, class 130) whose module (module 1) handles **event 2** (the clip playing):
+  - it **launches Murray straight up: his velocity becomes (0, 0, 5,000)**;
+  - if the launcher's custom property **2760** names the current job, it calls the job's method **2677**.
+
+  2677 sets the job's launch state to 1 and requests **2173 → 4 (make current)** if 2173 is available. So the
+  first launch from a launcher pad makes 2173 current. 2173's 1417 sets the state machine 139436 on 139370 to
+  15890 while it is available.
+- **2175** (2173's successor) is made current by its own module (v_macro module 39). On task event 94, if the
+  job's **2679** is true, it requests 2175 → 4. 2679 is "launched recently": less than 0.25 s since the last
+  launch, or Murray's object 565 in the world. *Interpretation:* code 94 is a ball impact [I].
+- **Tanks:** the job's table pairs tanks with tasks: (139371 2178), (139372 2179), (139373 2180),
+  (139374 2181), (139375 2182) and (139376 2183). Method **2678 (tank)** destroys one:
+  1. it sets the tank's state machine 113916 to 139402 (destroyed);
+  2. it removes the tank's effect 6097;
+  3. it requests the tank's task → **2**;
+  4. it sets the launch state to 1 and runs a refresh.
+
+  The tank tasks also carry 1405 (done on becoming current). What calls 2678 on a tank, presumably the ball
+  hitting it, was not found [I].
+- **Failure:** the job's task-event handler calls its 1260 with (1028, 2170), the restart / failure path, in
+  three cases:
+  - code 29 from object 6310;
+  - code 24;
+  - codes 15 / 16 that hit Murray outside the launch window or with hit kinds 65,536 / 131,072.
+- **On becoming current** (event 22), the job:
+  - sets object 5756's 310 to 2.0;
+  - schedules its update every 0.017 s (built-in 111);
+  - removes the listed objects 139377 to 139394, calls 2186 on 62490 … 139401, and starts script 2169.
+
+  Event 23 undoes this.
+- **The ball's controls and physics** (Murray's ball form) were not traced. The update (s1823) only shakes the
+  camera every 5 s while launched (Murray's 819) and drops the launch state when the window ends.
+- **Turf-war frame order** [I]: a battle task becomes current inside a request. Its 1408 script starts at once
+  (section 4), and the script's first hook (139345 → 2653) runs on that script's first step, in the same update,
+  before the script reaches its wave-tick loop. A wave tick therefore cannot run between the task becoming current
+  and 2653.
+- **2142's main runner** finishes after alarm 139313 (Carmelita's list 2144, above). The `0x1F (1, 3)` hold is
+  released by a matching `0x1F (0, 3)` or by the script ending (a script's holds are released when it stops)
+  [I: the release-on-stop rule was not traced in Sly 3].
+
+**m1_run (job 2187, v_ext, Sly): release two blimp anchors** [D; I where marked]:
+
+- **World and character:** the tasks list world 3 (v_ext) and character 24 (Sly).
+- **"Destroy target" means using a blimp anchor.** Placements 139451 (at 8099, 11005, 126) and 139452 (at
+  −8180, 7743, 354) in `v_ext_run` place copies of `v_blimp_anchor` (object 16255, class 35, a use point;
+  interactables.md 5). Each copy's bind sets **option 1170** (use-point task request): **(2194, −1)** on 139451
+  and **(2204, −1)** on 139452. So **using the anchor makes the task current**. Waypoints 140674 (2194) and
+  140680 (2204) mark them, through the tasks' 1416.
+- **2194 `destroy_target_1`**, script 2197:
+  - hint 1643 is cleared and the player is held;
+  - camera, then a slow-motion ramp (`0x1D`);
+  - guards 139440 and 139441 get lists 2195 / 2196;
+  - Sly animates (`0x30`, `0x36`);
+  - **the anchor's state machine 5099 on 139451 and on 139393 goes to 1765** (released);
+  - camera jolt, line 1626, cameras;
+  - **2194 → 2**.
+- **2198 `get_tnt_2_intro`** (1399, checkpoint 140677): script 2199 plays line 1627 and closes it.
+- **2200 `get_tnt_2`**: its 1416 brings in waypoint 140678 and **trigger 140679**, which names 2200. Its
+  option-489 request completes it on entry [I: the trigger's request was not decoded].
+- **2201 `destroy_target_2_intro`** (1399): script 2202.
+- **2204 `destroy_target_2`**: using anchor 139452 makes it current. Script 2205 stops 2203, holds the player,
+  plays line 1633 and the cameras, sends **anchor 139452's 5099 → 1765**, and drives 139394's state machine
+  139483 to 139484. Then Sly (24) is retired from the scene and walks to 139487. The script continues with
+  cameras and line 1634 [the closing request was not read: I].
+- **2206 `gauntlet_intro`** (1399, checkpoint 139487) follows, with script 2207.
 
 **Clearing the job and task keys** [X]:
 
